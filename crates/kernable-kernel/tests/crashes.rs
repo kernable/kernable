@@ -529,6 +529,7 @@ async fn submit_values(addr: &str, cmd: &Command, values: &[VaultValue]) -> Opti
         protocol: kernable_core::PROTOCOL,
         listener: String::new(),
         vault: values.to_vec(),
+        received_at: 0,
     };
     CommandServiceClient::new(channel)
         .submit(with_grant(request, &key(1)))

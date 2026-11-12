@@ -141,6 +141,91 @@ kernable deployments drop kernable.db 2026-11-01.1
 
 or let the kernel drop deployments that no membership names, with none of their read models connected for a number of days: `--deployment-retention-days 30`. Either logs what it dropped; the events stay. A dropped deployment that comes back starts afresh: its read models rebuild, and for the unknown-history refusal it counts from its first event, as before.
 
-## Previews and replay checks
+## Check a deployment before switching
 
-A preview of a new deployment on a copy of production, or a check that replays recent commands on a copy before switching, needs a copy of the store. Make a **masked copy** for it ([Previews and copies](./previews)): the events and the history without the personal data, which reads as `null` as after an erasure, from the backup, a store or an export. kernable Cloud makes such copies for you.
+Before a new deployment serves, you can see what it would have done with the commands production really received: `kernable replay` sends production's recent commands, in their original order, to a kernel on a **masked copy** ([Previews and copies](./previews)) where the new deployment's workers run, and compares each outcome with the one production stored. It reports which commands write other events (types, schemas, numbers, payload fields), which ones are rejected now or with another code, and which event types or schemas the new code writes that the store never held. Nothing in production changes, and the copy holds no personal data.
+
+### 1. A masked copy from before the commands
+
+The commands to replay are the ones production stored after the copy's position, so make the copy at a point before them. From the backup, at a time in the past (an hour ago, say):
+
+```sh
+kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
+  --at 2026-11-12T08:00:00Z \
+  --mask-vault --store sqlite:check/kernable.db --vault-store sqlite:check/vault.db \
+  --vault-key check/vault.key --data-store file:check/data
+```
+
+or copy the store now and replay the commands that arrive in the next hour (`kernable copy`). Either prints the copy's mark with its position, `up to event 41870`; `kernable verify` on the copy shows it again.
+
+### 2. A kernel of the check, and the new deployment's workers
+
+Start a kernel on the copy with `--replay on`, a new snapshot store and an address of its own:
+
+```sh
+kernable start --root root.pub --replay on --listen unix:check/k.sock \
+  --store sqlite:check/kernable.db --vault-store sqlite:check/vault.db \
+  --vault-key check/vault.key --snapshots sqlite:check/snapshots.db --data-store file:check/data
+```
+
+Such a kernel starts only on a masked copy, and only does what the check needs:
+
+- it takes only the commands `kernable replay` sends, each run **as if received at its original time** (the submit carries it). As the command also keeps its ID, `ctx.now()` and `ctx.id()` return what they returned in production, so the same code writes the same events;
+- it refuses every other submit (`FAILED_PRECONDITION`, `replay_only`), so the new deployment's reactors and processes send nothing;
+- it **fires no scheduled command and no process step**.
+
+Start the new deployment's processes against it, with their deployment name (`KERNABLE_DEPLOYMENT=2026-11-12.1`) and outbound connections pointed at test accounts, as for a preview. The workers matter, and the middlewares if its memberships list any (a submit waits for them); read models may run, reactors get nothing to do. The copy's memberships name the deployment that served production, so switch to the new one at once:
+
+```sh
+kernable apply unix:check/k.sock keys/deploy.key shop.json --deployment 2026-11-12.1 --force
+```
+
+### 3. Replay
+
+```sh
+kernable replay --from sqlite:kernable.db --since 41870 \
+  --to unix:check/k.sock --deployment 2026-11-12.1
+```
+
+`--from` is production's store on this machine (read, also while its kernel runs), an export file, or a running kernel (`--from 127.0.0.1:7233 --key ops.key`, a key granted `export`). `--since` is the copy's position (or a UTC time, the last event before it); `--limit 5000` replays only the oldest commands after it. The commands go one at a time, each completed before the next.
+
+```text
+replayed the commands of sqlite:kernable.db after position 41870 (up to 42412) on unix:check/k.sock, deployment 2026-11-12.1
+  581 commands: 548 replayed (544 identical, 3 different, 1 error), 28 skipped, not sent: 4 scheduled commands and 1 process step
+new event types and schemas:
+  shop.CartShared schema 1  NEW TYPE  (1 command)
+new rejections:
+  too_many  (1 command)
+differences:
+  9b1e… shop.AddItem on shop.Cart: payload of shop.ItemAdded: changed price; added discount
+  77c4… shop.ShareCart on shop.Cart: events: shop.CartUpdated/1 -> shop.CartUpdated/1, shop.CartShared/1
+  2d0a… shop.AddItem on shop.Cart: outcome: committed shop.ItemAdded/1 -> rejected too_many
+  c51f… shop.Archive on shop.Cart: outcome: committed shop.CartArchived/1 -> refused NOT_FOUND (no worker registered shop.Archive for shop.Cart)
+skipped:
+  e8a2… shop.Register on shop.Customer: carries personal values, which the copy does not hold
+  ...
+FAILED: 4 differences, more than --max-differences 0
+```
+
+`--json` prints the same for a tool. The exit code gates the switch: **0** when at most `--max-differences` commands differ (default 0; a number, or a percent of the commands replayed such as `1%`), **3** when more do, **1** when the check could not run (the kernel at `--to` does not run a check, stays unavailable, or its events come from another deployment than `--deployment`). Then throw the copy away: stop its kernel and delete its stores and its vault key.
+
+### What it compares
+
+Per command: the events production committed against the events the new deployment commits, by type, schema and number, then payload by payload, naming the fields that changed, were added or were removed; or the rejection codes; or that one side committed and the other rejected. A command the kernel of the check refuses (a command type no worker of the new deployment runs: `NOT_FOUND`) counts as an error, which fails the check like a difference. Equal outcomes count as identical; event positions, versions, commit times and the producing deployment are not compared.
+
+The report never holds a value: command IDs, command, aggregate and event types, schemas, rejection codes and field names, no aggregate IDs, no payload values, no rejection messages.
+
+### What it does not send
+
+| Commands | Why | In the report |
+|---|---|---|
+| with personal values (vault references) | the copy holds none of production's values, and a placeholder would change both the command and what the code decides on it | `skipped`, reason `personal` |
+| scheduled ones, and those of process steps | they ran at their own time in production; the kernel of the check fires neither | listed with their original outcome |
+| not completed in production | there is nothing to compare | `skipped`, `notCompleted` |
+| later commands of an aggregate one of the above touched | they would run on another state than they did in production | `skipped`, `afterSkipped` |
+
+Personal values that the copy reads as `null` in an aggregate's history can still change a decision. Payload fields that hold a personal value in production and `null` (or a new value) in the check count as equal; a difference on an aggregate that held personal values is marked as such (`masked`, "its aggregate holds masked personal values"), and one that follows an earlier difference on the same aggregate is marked too (`afterDifference`), as it ran on another state. The check does not follow effects across aggregates (unique keys, requirements) of commands it skipped, and it does not check read models, reactors or queries: watch the [warm-up](#a-new-deployment-warms-up-then-takes-over) for those.
+
+## Previews
+
+A preview of a new deployment on a copy of production needs a copy of the store too. Make a **masked copy** for it ([Previews and copies](./previews)): the events and the history without the personal data, which reads as `null` as after an erasure, from the backup, a store or an export. kernable Cloud makes such copies for you.

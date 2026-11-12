@@ -43,6 +43,7 @@ mod process_model;
 mod process_view;
 mod processes;
 mod queue;
+pub mod replay_check;
 mod replays;
 mod replication;
 pub use replication::{MAX_MESSAGE_BYTES, refuse_if_handed_over, switchover_keeper};
@@ -365,6 +366,13 @@ impl Kernel {
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
         // A masked copy (a preview) runs alone, with its own vault and snapshots.
         let copy = copy::check_config(&config, store.as_ref())?;
+        if config.replay && copy.is_none() {
+            return Err(
+                "--replay on runs only on a masked copy (kernable copy, import or restore \
+                        --mask-vault): a replay check never runs on a production store"
+                    .into(),
+            );
+        }
         if let Some(mark) = &copy {
             copy::check_snapshots(mark, snapshots.as_ref())?;
         }
@@ -502,6 +510,12 @@ impl Kernel {
             tracing::warn!(
                 copy = %copy::describe(mark),
                 "running a masked copy (a preview): the source's personal values read as null"
+            );
+        }
+        if kernel.config.replay {
+            tracing::warn!(
+                "running a replay check: only kernable replay submits; no scheduled command \
+                 and no process step fires"
             );
         }
         Ok(kernel)
@@ -1612,8 +1626,9 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         _ = sample_trend(&kernel) => unreachable!(),
         () = partitions::follow_control(&kernel) => unreachable!(),
         () = moves::follow_moves(&kernel) => unreachable!(),
-        () = timers::run(&kernel) => unreachable!(),
-        () = process_engine::run(&kernel) => unreachable!(),
+        // A replay check reports scheduled commands and process steps, it fires none.
+        () = timers::run(&kernel), if !kernel.config().replay => unreachable!(),
+        () = process_engine::run(&kernel), if !kernel.config().replay => unreachable!(),
         result = serve_metrics(&kernel) => result,
         result = serve_ui(&kernel) => result,
     }
@@ -1892,9 +1907,11 @@ impl CommandService for Api {
         let wait = request.wait();
         let listener = request.listener;
         let values = request.vault;
+        let replayed_at = request.received_at;
         let cmd = request
             .command
             .ok_or_else(|| Status::invalid_argument("no command"))?;
+        replay_check::submitted(kernel.config().replay, replayed_at, &cmd)?;
         kernel.owns(&cmd.tenant_id)?;
         let sig = cmd
             .client_sig
@@ -1999,7 +2016,11 @@ impl CommandService for Api {
             waiting.retain(|w| !w.is_closed());
             waiting.push(tx);
         }
-        let received_at = now_ms();
+        // A replay check runs the command as if received when the original kernel received it.
+        let received_at = match kernel.config().replay {
+            true => replayed_at,
+            false => now_ms(),
+        };
         let enqueued = match kernel.store.enqueue(&cmd, received_at) {
             Ok(enqueued) => enqueued,
             Err(e) => {

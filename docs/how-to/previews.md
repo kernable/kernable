@@ -110,3 +110,7 @@ A copy streams: it reads the source in batches (up to 512 records or 1 MiB each)
 - A copy is not incremental: a fresh preview is a fresh copy. Copy-on-write snapshots of the file system may make copies near-instant later.
 
 Throw a preview away by stopping its kernel and deleting its stores, its vault and its vault key. Nothing in production refers to it.
+
+## Check a deployment on a copy
+
+A masked copy also serves a check before switching: a kernel on it started with `--replay on` runs production's recent commands on the new deployment, and `kernable replay` reports what it would write differently. See [Check a deployment before switching](./deployments#check-a-deployment-before-switching).

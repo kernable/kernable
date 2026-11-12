@@ -198,6 +198,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "How many events a deployment's read models may be behind the newest one when a membership switches a service to that deployment. Further behind, or with a listed worker or listener not connected, the switch is refused as `not_caught_up` (unless forced: `kernable apply --force`), so a new deployment warms up beside the serving one before it takes over. A deployment that wrote events before (a rollback to kept read models) takes over at once.",
     ),
     (
+        "--replay",
+        "KERNABLE_REPLAY",
+        "off",
+        "`on`: the kernel runs a check before switching on a masked copy ([Check a deployment before switching](../how-to/deployments#check-a-deployment-before-switching)): it takes only the commands `kernable replay` sends, each run as if received at its original time, and fires no scheduled command and no process step. Refused on a store that is not a masked copy. `off`: a kernel as usual.",
+    ),
+    (
         "--query-timeout-ms",
         "KERNABLE_QUERY_TIMEOUT_MS",
         "5000",
@@ -351,6 +357,8 @@ pub struct Config {
     /// `--deployment-switch-lag`: events a deployment's read models may be behind when a
     /// membership switches to it.
     pub deployment_switch_lag: u64,
+    /// `--replay on`: a check before switching on a masked copy (`kernable replay`).
+    pub replay: bool,
     pub query_timeout_ms: u64,
     pub middleware_timeout_ms: u64,
     pub drain_timeout_ms: u64,
@@ -648,6 +656,11 @@ impl Config {
             settle_timeout_ms: number("--settle-timeout-ms")?,
             deployment_retention_days: number("--deployment-retention-days")?,
             deployment_switch_lag: number("--deployment-switch-lag")?,
+            replay: match get("--replay").expect("has a default").as_str() {
+                "on" => true,
+                "off" => false,
+                other => return Err(format!("--replay: {other} is neither on nor off").into()),
+            },
             query_timeout_ms: number("--query-timeout-ms")?,
             middleware_timeout_ms: number("--middleware-timeout-ms")?,
             drain_timeout_ms: number("--drain-timeout-ms")?,

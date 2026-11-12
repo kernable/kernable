@@ -46,6 +46,7 @@ async fn submit_values(
         wait: Wait::Committed.into(),
         protocol: kernable_core::PROTOCOL,
         listener: String::new(),
+        received_at: 0,
         vault: values.iter().map(|v| (*v).clone()).collect(),
     };
     Ok(CommandServiceClient::new(channel)

@@ -1068,6 +1068,7 @@ impl Kernable {
             protocol: PROTOCOL,
             vault: sealed.values,
             listener: handling(),
+            received_at: 0,
         };
         let tenant = request
             .command

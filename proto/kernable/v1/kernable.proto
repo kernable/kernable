@@ -528,6 +528,13 @@ message SubmitRequest {
   // waits only for listeners of a lower order, and a command the listener itself checks as a
   // middleware before is refused (FAILED_PRECONDITION).
   string listener = 5;
+  // Not signed, and only for a kernel started with `--replay on` on a masked copy (a check
+  // before switching, `kernable replay`): when the original kernel received the command (ms
+  // since epoch). The command runs as if received then, so `ctx.now()` and the IDs derived
+  // from its command ID are the original ones. Such a kernel takes only submits that carry it
+  // (otherwise FAILED_PRECONDITION `replay_only`); any other kernel refuses one that does
+  // (FAILED_PRECONDITION).
+  int64 received_at = 6;
 }
 
 // How long Submit waits before it responds.

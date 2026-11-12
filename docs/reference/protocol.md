@@ -538,6 +538,7 @@ No fields.
 | `protocol` |  `uint32` | 3 | not signed |
 | `vault` | repeated `VaultValue` | 4 | the values of `command.vault_refs` |
 | `listener` |  `string` | 5 | Set by SDKs when a listener's handler submits (not signed): the listener's name. A listener handles its events one after another, so it cannot wait for itself: a settling submit then waits only for listeners of a lower order, and a command the listener itself checks as a middleware before is refused (FAILED_PRECONDITION). |
+| `received_at` |  `int64` | 6 | Not signed, and only for a kernel started with `--replay on` on a masked copy (a check before switching, `kernable replay`): when the original kernel received the command (ms since epoch). The command runs as if received then, so `ctx.now()` and the IDs derived from its command ID are the original ones. Such a kernel takes only submits that carry it (otherwise FAILED_PRECONDITION `replay_only`); any other kernel refuses one that does (FAILED_PRECONDITION). |
 
 ### Wait
 

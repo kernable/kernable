@@ -301,7 +301,7 @@ kernable import <file> --mask-vault --vault-key <new file> [--with-files] [--sto
 
 Makes a masked copy (a preview) from an export: its records without a vault value, so every personal value reads as null, as after an erasure. `--vault-key` names a file that does not exist: the copy's own, new vault key, which it writes, with a new, empty vault at `--vault-store`. Files are left out unless `--with-files`. The store is marked as a copy: a kernel runs it only alone, with that vault key.
 
-## Previews
+## Previews and checks
 
 ### `kernable copy`
 
@@ -310,6 +310,14 @@ kernable copy <source store> --mask-vault --vault-key <new file> [--files-from <
 ```
 
 Makes a masked copy (a preview) of a store on this machine, read in one consistent view, also while its kernel runs (SQLite): as import `--mask-vault`, without an export file and without the source's vault or its key. `--files-from` copies the files of that data store too. Then checks the copy like verify.
+
+### `kernable replay`
+
+```text
+kernable replay --from <store>|<export file>|<addr> [--key <key>] --since <position>|<time> --to <addr> --deployment <d> [--limit <n>] [--max-differences <n>|<n>%] [--json]
+```
+
+The check before switching: sends the commands the source stored after the point, oldest first, each as received at its original time, to the kernel at `--to`, a masked copy of that point started with `--replay` on where the deployment's workers run, and compares each outcome with the original: event types, schemas, numbers and payload fields, or the rejection code. The source is a store on this machine (also while its kernel runs), an export file, or a running kernel (an `<addr>` with `--key`, granted export). `--since` is the copy's position (its mark) or a UTC time. Not sent, but listed: scheduled commands and process steps, commands with vault values (the copy has none), and later commands of their aggregates. The report names fields and codes, never values. Exit 3 if more commands differ than `--max-differences` (default 0), 1 if the check could not run.
 
 ## Run a node
 
