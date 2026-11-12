@@ -25,10 +25,11 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
   kernable cloud logout                   Ends the session and forgets it
   kernable cloud whoami                   The account, its teams and roles; a CI token's team
   kernable cloud teams [create <slug> [<name>] | accept-terms <team> | verify-payment <team>
-                       | delete <team> | restore <team>]
+                       | delete <team> | restore <team> | two-factor <team> on|off]
                                           Lists your teams, or opens one; accepts the terms and
                                           the Preview Access notice, marks a payment method
-                                          verified, deletes a team (kept 30 days, restorable)
+                                          verified, deletes a team (kept 30 days, restorable),
+                                          requires a second factor of every member (owners')
   kernable cloud members [--team <team>] [invite <email> --role <role> | role <identity> <role>
                        | remove <identity>]
                                           Roles: owner, admin, developer, viewer
@@ -574,6 +575,16 @@ pub fn run(args: &[String]) -> Result<bool, String> {
                     v["deleted_at"].as_i64().map(|_| "").unwrap_or_default()
                 ),
                 _ => println!("{team}: restored, its projects running again"),
+            });
+            Ok(true)
+        }
+        ["teams", "two-factor", team, on @ ("on" | "off")] => {
+            let mut s = Session::open(api.as_deref(), json)?;
+            let body = json!({ "required": *on == "on" });
+            let v = s.call("PUT", &format!("/v1/teams/{team}/two-factor"), Some(body))?;
+            s.show(&v, |_| match *on {
+                "on" => println!("{team}: every member acts only with a second factor"),
+                _ => println!("{team}: a second factor for owners only"),
             });
             Ok(true)
         }

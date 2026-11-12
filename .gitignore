@@ -12,6 +12,8 @@ __pycache__/
 *key
 *.pub
 *.db
+*.db.lock
+*.db.usage
 *.db-shm
 *.db-wal
 # Frozen test stores (see crates/kernable-kernel/tests/compat.rs)
