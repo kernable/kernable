@@ -213,6 +213,189 @@ async fn a_restore_stops_at_a_record() {
     );
 }
 
+/// The generations in `to`: each one's name and its segments' names.
+fn listing(to: &str) -> Vec<(String, Vec<String>)> {
+    let t = target::open(to, None).unwrap();
+    backup::generations(t.as_ref(), &BackupKey::new(&[7; 32]))
+        .unwrap()
+        .into_iter()
+        .map(|g| (g.name, g.segments.into_iter().map(|s| s.name).collect()))
+        .collect()
+}
+
+fn head_of(store: &str) -> u64 {
+    let store = kernable_store::open_read_only(store).unwrap();
+    store.record_head().unwrap().seq
+}
+
+/// The kernel of a new server, started on the stores restored into `from`'s directory
+/// `restored`, with a kernel key of its own (13); and its store's URL.
+async fn start_restored(name: &str, from: &Env, restored: &str) -> (Env, String) {
+    let path = from.dir.join(restored);
+    let store = format!("sqlite:{}", path.join("k.db").display());
+    let env = start_custom(name, |c, dir| {
+        c.replication.backup = true;
+        c.store = store.clone();
+        c.data = format!("file:{}", path.join("data").display());
+        std::fs::write(dir.join("new.key"), hex(key(13).as_bytes())).unwrap();
+        c.kernel_key = dir.join("new.key");
+    })
+    .await;
+    (env, store)
+}
+
+/// Restores the backup in `to` up to `until` into new stores in `env`'s directory `name`.
+fn restore_into(env: &Env, to: &str, name: &str, until: Until, keys: &[String]) -> u64 {
+    let t = target::open(to, None).unwrap();
+    let restored = stores(env, name);
+    backup::restore(
+        t.as_ref(),
+        &BackupKey::new(&[7; 32]),
+        &restored,
+        until,
+        keys,
+    )
+    .unwrap()
+    .record
+}
+
+/// Restored to the backup's end on a new server with another kernel key, the store's history
+/// is the whole newest generation: the restored kernel's follower continues that generation,
+/// and a restore of it takes both kernel keys, as `kernable verify` does after a key change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_to_the_end_continues_the_generation_with_the_new_kernel_key() {
+    let env = start_custom("backup-again", |c, _| c.replication.backup = true).await;
+    spawn_worker(&env).await;
+    let to = target_of(&env);
+    let running = tokio::spawn(backup::run(follower(&env, &to)));
+    place(&env, 0, 5).await;
+    backed_up(&env, &to).await;
+    running.abort();
+    let before = listing(&to);
+    let end = restore_into(&env, &to, "restored", Until::End, &[id(&key(3))]);
+    assert_eq!(end, reach(&to).0);
+
+    // The source is lost; a new server runs on what was restored.
+    let (new, store) = start_restored("backup-again-new", &env, "restored").await;
+    spawn_worker(&new).await;
+    let running = tokio::spawn(backup::run(follower(&new, &to)));
+    place(&new, 5, 10).await;
+    let head = head_of(&store);
+    until("the backup reaches the new kernel's head", || {
+        reach(&to).0 >= head
+    })
+    .await;
+    running.abort();
+    let after = listing(&to);
+    assert_eq!(after.len(), 1, "one generation: {after:?}");
+    assert_eq!(after[0].0, before[0].0);
+    assert!(
+        after[0].1.starts_with(&before[0].1) && after[0].1.len() > before[0].1.len(),
+        "its segments go on after the old ones: {before:?} {after:?}"
+    );
+
+    // Its checkpoints are signed by both kernel keys: a restore names both, or takes the ones
+    // the backup names; the old key alone does not check out.
+    let both = [id(&key(3)), id(&key(13))];
+    assert!(restore_into(&new, &to, "again", Until::End, &both) >= head);
+    let restored =
+        kernable_store::open_read_only(&format!("sqlite:{}", new.dir.join("again/k.db").display()))
+            .unwrap();
+    let source = kernable_store::open_read_only(&store).unwrap();
+    assert_eq!(
+        restored.read_all(0, 1_000).unwrap(),
+        source.read_all(0, 1_000).unwrap()
+    );
+    assert!(restored.verify(&both).unwrap().is_ok());
+    let t = target::open(&to, None).unwrap();
+    let named = backup::restore(
+        t.as_ref(),
+        &BackupKey::new(&[7; 32]),
+        &stores(&new, "named"),
+        Until::End,
+        &[],
+    )
+    .unwrap();
+    assert!(named.kernel_keys.contains(&id(&key(3))) && named.kernel_keys.contains(&id(&key(13))));
+    let old_only = backup::restore(
+        t.as_ref(),
+        &BackupKey::new(&[7; 32]),
+        &stores(&new, "old-only"),
+        Until::End,
+        &[id(&key(3))],
+    );
+    let err = old_only.unwrap_err().to_string();
+    assert!(
+        err.contains(&id(&key(13))) && err.contains("--kernel-pub"),
+        "{err}"
+    );
+}
+
+/// Restored to a point before the backup's end, the store lacks the generation's later records
+/// and the new kernel writes others at their positions: its follower never writes into that
+/// generation, but begins a new one, whether the new kernel's log is still shorter than the
+/// generation (`ahead`: false) or already longer when the follower connects. The old
+/// generation stays as it was, for a restore to a point in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_to_an_earlier_point_begins_a_new_generation() {
+    for ahead in [false, true] {
+        let name = format!("backup-earlier-{ahead}");
+        let env = start_custom(&name, |c, _| c.replication.backup = true).await;
+        spawn_worker(&env).await;
+        let to = target_of(&env);
+        let running = tokio::spawn(backup::run(follower(&env, &to)));
+        place(&env, 0, 5).await;
+        backed_up(&env, &to).await;
+        let middle = env.kernel_head();
+        place(&env, 5, 10).await;
+        backed_up(&env, &to).await;
+        running.abort();
+        let old_end = reach(&to).0;
+        let before = listing(&to);
+        assert_eq!(before.len(), 1);
+        let at = restore_into(&env, &to, "restored", Until::Record(middle), &[]);
+        assert_eq!(at, middle);
+
+        let (new, store) = start_restored(&format!("{name}-new"), &env, "restored").await;
+        spawn_worker(&new).await;
+        if ahead {
+            // Different records at the old generation's positions, and beyond its end.
+            place(&new, 100, 115).await;
+            assert!(head_of(&store) > old_end, "{} {old_end}", head_of(&store));
+        }
+        let running = tokio::spawn(backup::run(follower(&new, &to)));
+        if !ahead {
+            until("the follower begins a new generation", || {
+                listing(&to).len() == 2
+            })
+            .await;
+        }
+        place(&new, 200, 203).await;
+        let head = head_of(&store);
+        until("a new generation reaches the new kernel's head", || {
+            let gens = listing(&to);
+            gens.len() == 2 && reach(&to).0 >= head
+        })
+        .await;
+        running.abort();
+        let after = listing(&to);
+        assert_eq!(after[0], before[0], "the old generation is untouched");
+
+        // The newest generation holds the new kernel's history.
+        let source = kernable_store::open_read_only(&store).unwrap();
+        restore_into(&new, &to, "end", Until::End, &[]);
+        let end = kernable_store::open_read_only(&format!(
+            "sqlite:{}",
+            new.dir.join("end/k.db").display()
+        ))
+        .unwrap();
+        assert_eq!(
+            end.read_all(0, 1_000).unwrap(),
+            source.read_all(0, 1_000).unwrap()
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kernel_without_backup_on_refuses_the_follower() {
     let env = start("backup-off").await;

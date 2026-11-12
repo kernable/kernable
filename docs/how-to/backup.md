@@ -170,6 +170,12 @@ submits each erasing command again, signed with a key granted `submit` for those
 
 A **vault key that changes** (`kernable vault rekey`, or a kernel started with another key) begins a new backup generation: no generation needs two keys. Files you keep per vault key next to the backup, under `vault-keys/<key id>/` (an escrow of the key, say; the key ID is the one `kernable backup list` prints, the key ID of the key's `.pub`), are deleted by the follower with the last generation that needs that key. In a bucket with object lock or versioning, a delete adds a delete marker and the old versions stay until their retention ends, as the generations' objects do.
 
+**After a restore**, start the backup follower against the restored kernel, with the same target. A generation only ever holds one history:
+
+- **Restored to the end** of the newest generation, the store holds all of it, so the follower continues that generation: the new kernel's records chain on from its last one, in segments after the old ones.
+- **Restored to an earlier point** (`--at` or `--at-record` before the end, or a generation that is not the newest), the generation holds records after the point that the restored kernel never gets, and the kernel writes other records at those positions. The follower finds that the kernel's log differs from the backup's (the kernel's log does not reach the generation's last record yet, or holds another record there) and begins a new generation; it never writes into the old one. The old one stays as it was, for a restore to a point in it, until `--keep` prunes it.
+- **A new kernel key** (the restored kernel runs on a new server with a key of its own) begins no generation: the history goes on, and its later checkpoints are signed by the new key, as after a [change of the kernel key](./keys#the-kernel-s-key). A new generation would not help: its base holds the old checkpoints with their old signatures. A later restore names every kernel key with `--kernel-pub` (or none, to take the ones the backup names); one left out is named in the refusal.
+
 ### Check a backup
 
 A backup is only as good as its last restore. `kernable backup check` reads the newest generation all through without writing a store: every object opens with the backup key and decodes, the base holds the records its marker names, and the segments' records chain from the base's hash to the last one without a gap. It prints the record a restore would reach and how old it is, and exits 1 if the backup does not check out:

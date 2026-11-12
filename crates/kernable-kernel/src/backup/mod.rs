@@ -1225,18 +1225,25 @@ pub fn restore(
     }
     let mut keys: Vec<String> = kernel_keys.to_vec();
     let named = kernel_keys.is_empty();
-    let mut learn = |records: &mut dyn Iterator<Item = &Record>| {
-        if named {
-            for r in records {
-                if let Record::Checkpoint(c) = r
-                    && let Some(sig) = &c.kernel_sig
-                    && !keys.contains(&sig.key_id)
-                {
-                    keys.push(sig.key_id.clone());
+    // Without keys named, the ones the backup names; with them, a checkpoint signed by another
+    // (a kernel key changed, or a restored kernel's own key) says which key is missing.
+    let mut learn = |records: &mut dyn Iterator<Item = &Record>| -> Result<Vec<String>, BoxError> {
+        for r in records {
+            if let Record::Checkpoint(c) = r
+                && let Some(sig) = &c.kernel_sig
+                && !keys.contains(&sig.key_id)
+            {
+                if !named {
+                    return Err(format!(
+                        "the checkpoint of event {} is signed by the kernel key {}, which no --kernel-pub names: name every kernel key the source had, or none to take the ones the backup names",
+                        c.global_position, sig.key_id
+                    )
+                    .into());
                 }
+                keys.push(sig.key_id.clone());
             }
         }
-        keys.clone()
+        Ok(keys.clone())
     };
     stores.store.keep_record_log(true)?;
     for n in 1..=base.parts {
@@ -1245,7 +1252,7 @@ pub fn restore(
         let mut rest = plain.as_slice();
         while !rest.is_empty() {
             let batch = ImageBatch::decode_length_delimited(&mut rest)?;
-            let keys = learn(&mut batch.records.iter().filter_map(|l| l.record.as_ref()));
+            let keys = learn(&mut batch.records.iter().filter_map(|l| l.record.as_ref()))?;
             check_vault(stores, &batch.vault)?;
             standby::apply_image(stores, batch, &keys)?;
         }
@@ -1295,7 +1302,7 @@ pub fn restore(
                     .records
                     .iter()
                     .filter_map(|r| r.record.as_ref().and_then(|l| l.record.as_ref())),
-            );
+            )?;
             check_vault(stores, &batch.vault)?;
             let cut_short = matches!(until, Until::Record(n) if batch.records.last().is_some_and(|r| r.seq >= n));
             restored.record = standby::apply(stores, batch, &keys)?;
