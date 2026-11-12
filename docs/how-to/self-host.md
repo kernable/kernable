@@ -27,7 +27,7 @@ sudo systemctl start user@$(id -u kernable)                                     
 sudo -u kernable mkdir -p /srv/kernable/shop
 ```
 
-Put `/srv/kernable` on the disk you want the data on, a local one: never a network file system such as NFS or SMB, whose file locks are not reliable, and one kernel per store rests on a lock (`<store>.lock`). The store is a SQLite file there: back up the directory's disk as you would a database's, and set up [continuous backup](./backup#continuous-backup) besides.
+Put `/srv/kernable` on the disk you want the data on, a local one: never a network file system such as NFS or SMB, whose file locks are not reliable, and one kernel per store rests on locks (`<store>.lock`, and the vault's and the snapshots' own). The store is a SQLite file there: back up the directory's disk as you would a database's, and set up [continuous backup](./backup#continuous-backup) besides.
 
 ## 3. Keys
 

@@ -20,7 +20,7 @@ A reader follows the writer over the same stream a standby uses: every record of
 | Read model, middleware | connect to the reader as to any kernel; positions are kept in memory (a read model with a store resumes from its own) |
 | Reactor | waits, connected: the reader answers `Waiting` with `reader_of`, the writer's address |
 | Worker (command handler) | registers and gets no commands (`Registered.reader_of`) |
-| Command | forwarded to the writer as it came (signature, ID, vault values); answered once the reader holds the events, and for a settling submit once the reader's listeners processed them too. `Committed.position` says where they are. |
+| Command | forwarded to the writer as it came (signature, ID, vault values); answered once the reader holds the events, and for a settling submit once the reader's listeners processed them too: the writer's listeners settle first, then the reader's, so a settling submit through a reader may take up to two `--settle-timeout-ms`. `Committed.position` says where they are. |
 | Files, cache, memberships, revocations, processes, partition maps, exports | forwarded to the writer as they come |
 
 A reader is never promoted and keeps no followers of its own (no standby, backup follower or readers).
@@ -38,15 +38,15 @@ The writer then keeps its record log (as for a standby or a backup), and SQLite 
 
 ## 2. Keys
 
-Each reader needs a key granted `replicate`, and keys of its own for its vault and its checkpoints:
+Each reader needs a key granted `read`, and keys of its own for its vault and its checkpoints:
 
 ```sh
-kernable keys new reader-1 && kernable grant root.key reader-1.pub 'replicate=*'
+kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*'
 kernable keys new reader-1-kernel
 kernable keys new reader-1-vault
 ```
 
-`replicate` lets a key receive everything, every vault value in plaintext included: keep the reader's key as carefully as the root key, and run readers over mutual TLS only (see [Mutual TLS](./tls)). Revoke it and its stream ends.
+`read` lets a key receive everything, every vault value in plaintext included: keep the reader's key as carefully as the root key, and run readers over mutual TLS only (see [Mutual TLS](./tls)). Revoke it and its stream ends. Unlike `replicate`, a standby's action, `read` never lets the key follow as a standby, so a reader's key cannot take the standby's place in a pair (and a standby's key does not follow as a reader: each role has its own key).
 
 ## 3. Start a reader
 
@@ -87,6 +87,7 @@ KERNABLE_INSTANCE=reader-1 KERNABLE_URL=https://10.0.0.5:7233 node app.ts
 ```
 
 - **Commands go through the reader**, not straight to the writer: the reader answers once its own copy holds the events, so the query that follows sees them, on this reader. Going straight to the writer would be as correct but leaves the next query on the reader waiting for the copy.
+- **A settling command takes longer through a reader.** With `wait: settled` the writer waits for its listeners (up to `--settle-timeout-ms` on the writer), then the reader for its own (up to `--settle-timeout-ms` on the reader): up to two settle timeouts in all. Give the client's own deadline room for both.
 - **Read your writes holds across copies.** Every SDK keeps the newest position its own commands committed at and sends it with its queries (`min_position`), so a query that a different copy answers waits until that copy holds it. Across processes (a browser that talks to two of your servers), pass the position on yourself: it is the last event's `globalPosition` (`global_position`) of the outcome.
 - **Address lists still work.** `KERNABLE_URL=https://10.0.0.5:7233,https://10.0.0.6:7233` lets a process turn to another reader (or the writer) when its own is away or behind: a reader answers `UNAVAILABLE` (`reader_behind`, `writer_away`, `reader_catching_up`), and the SDKs try the next address.
 - Read models and live listeners connect to the reader and build their state from its copy. Give them an instance ID (`KERNABLE_INSTANCE`) as on a [pair](./instances); a read model in memory rebuilds from the first event, one with a store resumes from its own position.

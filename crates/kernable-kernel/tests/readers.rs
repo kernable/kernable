@@ -11,8 +11,9 @@ use common::*;
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Ack, ChallengeResponse, CommandResult, Hello, ListenerMessage, PromoteRequest, QueryAnswer,
-        QueryRequest, QueryResult, Wait, command_result::Outcome, listener_delivery::Msg as Out,
+        Ack, ChallengeResponse, CommandResult, FollowHello, FollowRequest, Hello, ListenerMessage,
+        PromoteRequest, QueryAnswer, QueryRequest, QueryResult, Wait, command_result::Outcome,
+        follow_request, follow_response, listener_delivery::Msg as Out,
         listener_message::Msg as In, listener_service_client::ListenerServiceClient, query_answer,
         query_result, query_service_client::QueryServiceClient,
         replication_service_client::ReplicationServiceClient,
@@ -80,14 +81,13 @@ fn writer_config(dir: &Path, standby: bool) -> Config {
     config
 }
 
-/// A reader `name` of the kernels at `writers` (comma-separated), with a key granted
-/// `replicate`.
+/// A reader `name` of the kernels at `writers` (comma-separated), with a key granted `read`.
 fn reader_config(dir: &Path, name: &str, seed: u8, writers: &str) -> Config {
     let mut config = config(dir, name, seed);
     let reader = key(seed + 50);
     let key_path = dir.join(format!("{name}.key"));
     std::fs::write(&key_path, hex(reader.as_bytes())).unwrap();
-    let grant = grant(&reader, &[("replicate", &["*"])]);
+    let grant = grant(&reader, &[("read", &["*"])]);
     std::fs::write(
         dir.join(format!("{name}.grant")),
         hex(&grant.encode_to_vec()),
@@ -634,6 +634,55 @@ async fn a_reader_keeps_up_under_load() {
         most < 8_192,
         "a reader stays within one window of the writer"
     );
+}
+
+/// Each role its own key: a key granted `read` follows as a reader and never as a standby, and
+/// a standby's key (`replicate`) does not follow as a reader.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_key_never_follows_as_a_standby() {
+    let dir = Dir::new("readers-roles");
+    // A writer that keeps both a standby and readers.
+    let writer_config = writer_config(&dir.0, true);
+    let writer = open(&writer_config).await;
+    let (reader, standby) = (key(71), key(72));
+    writer.grant(grant(&reader, &[("read", &["*"])])).unwrap();
+    writer
+        .grant(grant(&standby, &[("replicate", &["*"])]))
+        .unwrap();
+    // What the writer answers a follower's hello with: a challenge, or why not.
+    let hello = async |key: &SigningKey, as_reader: bool| -> Result<(), tonic::Status> {
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(FollowRequest {
+            msg: Some(follow_request::Msg::Hello(FollowHello {
+                key_id: id(key),
+                protocol: kernable_core::PROTOCOL,
+                reader: as_reader,
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+        let channel = transport::connect(&writer_config.listen).await.unwrap();
+        let mut answers = ReplicationServiceClient::new(channel)
+            .follow(ReceiverStream::new(rx))
+            .await?
+            .into_inner();
+        match answers.message().await?.and_then(|m| m.msg) {
+            Some(follow_response::Msg::Challenge(_)) => Ok(()),
+            other => panic!("expected a challenge, got {other:?}"),
+        }
+    };
+    hello(&reader, true).await.unwrap();
+    hello(&standby, false).await.unwrap();
+    let as_standby = hello(&reader, false).await.unwrap_err();
+    assert_eq!(as_standby.code(), Code::PermissionDenied, "{as_standby:?}");
+    assert!(
+        as_standby.message().contains("needs replicate"),
+        "{as_standby:?}"
+    );
+    let as_reader = hello(&standby, true).await.unwrap_err();
+    assert_eq!(as_reader.code(), Code::PermissionDenied, "{as_reader:?}");
+    assert!(as_reader.message().contains("needs read"), "{as_reader:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

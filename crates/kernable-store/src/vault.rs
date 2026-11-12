@@ -115,6 +115,8 @@ pub struct Vault {
     lookup: [u8; 32],
     /// [`signing::vault_key_id`] of its key.
     key_id: String,
+    /// `<path>.lock`, held while a kernel or standby writes the vault ([`Vault::open_locked`]).
+    _lock: Option<std::fs::File>,
 }
 
 /// The key that hashes personal key identities, derived from the vault key: without the vault
@@ -177,8 +179,19 @@ pub struct SubjectView {
 }
 
 impl Vault {
+    /// Like [`Vault::open`], as the only writer: takes `<path>.lock` first and holds it while
+    /// the vault is open, so a second kernel with another event store but this vault is
+    /// refused before it touches it. A kernel, a standby and a reader open their vault so.
+    pub fn open_locked(url: &str, key: &[u8; 32]) -> Result<Self> {
+        let lock = crate::lock_url(url, "the vault")?;
+        let mut vault = Self::open(url, key)?;
+        vault._lock = lock;
+        Ok(vault)
+    }
+
     /// Opens the vault at `url` (`sqlite:<path>`, a bare path, or `memory:`), encrypted with
-    /// the 32-byte `key`.
+    /// the 32-byte `key`. It takes no lock: for tools and tests that look into a vault (see
+    /// [`Vault::open_locked`]).
     pub fn open(url: &str, key: &[u8; 32]) -> Result<Self> {
         let conn = match crate::backend(url) {
             ("memory", _) => Connection::open_in_memory()?,
@@ -210,6 +223,7 @@ impl Vault {
         }
         conn.execute_batch(SEALED)?;
         Ok(Vault {
+            _lock: None,
             conn: Mutex::new(conn),
             cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)),
             lookup: lookup_key(key),

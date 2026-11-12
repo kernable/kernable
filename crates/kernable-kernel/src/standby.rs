@@ -91,12 +91,13 @@ impl Stores {
             return Err("the store is a masked copy (a preview): it is never a standby".into());
         }
         store.keep_record_log(true)?;
+        // Locked as a kernel locks them: the standby or reader writes them alone.
         let vault = match &config.vault {
-            Some(v) => Some(Vault::open(&v.store, &*config.read_secret(&v.key)?)?),
+            Some(v) => Some(Vault::open_locked(&v.store, &*config.read_secret(&v.key)?)?),
             None => None,
         };
         let data = kernable_store::data::open(&config.data)?;
-        let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
+        let snapshots = kernable_store::snapshots::open_locked(&config.snapshots)?;
         if let Some(vault) = &vault {
             recover_vault(store.as_ref(), vault, snapshots.as_ref())?;
         }
@@ -1067,10 +1068,11 @@ fn restore_into(
     let target = crate::backup::target::open(&from.target, None)?;
     let crypt = crate::backup::crypt::BackupKey::read(&from.key)?;
     let vault = match (&config.vault, &from.vault_key) {
-        (Some(v), Some(backup_key)) => {
-            Some(Vault::open(&v.store, &*config.read_secret(backup_key)?)?)
-        }
-        (Some(v), None) => Some(Vault::open(&v.store, &*config.read_secret(&v.key)?)?),
+        (Some(v), Some(backup_key)) => Some(Vault::open_locked(
+            &v.store,
+            &*config.read_secret(backup_key)?,
+        )?),
+        (Some(v), None) => Some(Vault::open_locked(&v.store, &*config.read_secret(&v.key)?)?),
         (None, _) => None,
     };
     let stores = Stores {

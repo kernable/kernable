@@ -222,6 +222,7 @@ except where noted. The action `*` stands for all actions.
 - cache: use the cache of a domain (`domain.*` or `*`).
 - manage: apply the membership of these services (service names, or `*`).
 - replicate: follow the kernel as its standby (`*`).
+- read: follow the kernel as a reader, a read-only copy (`*`); never as its standby.
 - export: export the whole kernel (`*`, ExportService in export.proto).
 
 | Field | Type | Number | Description |

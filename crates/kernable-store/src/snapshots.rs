@@ -57,8 +57,20 @@ pub struct SnapshotInfo {
     pub deployment: String,
 }
 
-/// Opens a snapshot store: `sqlite:<path>`, a bare SQLite path, or `memory:`.
+/// Opens a snapshot store: `sqlite:<path>`, a bare SQLite path, or `memory:`. It takes no
+/// lock: for tools and tests that look into one (see [`open_locked`]).
 pub fn open(url: &str) -> Result<Box<dyn SnapshotStore>> {
+    open_with(url, false)
+}
+
+/// Like [`open`], as the only writer: takes `<path>.lock` first and holds it while the store is
+/// open, so a second kernel with another event store but these snapshots is refused before it
+/// touches them. A kernel, a standby and a reader open their snapshots so.
+pub fn open_locked(url: &str) -> Result<Box<dyn SnapshotStore>> {
+    open_with(url, true)
+}
+
+fn open_with(url: &str, locked: bool) -> Result<Box<dyn SnapshotStore>> {
     Ok(match crate::backend(url) {
         ("memory", _) => Box::new(MemorySnapshots::default()),
         ("file", _) => {
@@ -66,7 +78,15 @@ pub fn open(url: &str) -> Result<Box<dyn SnapshotStore>> {
                 "snapshots cannot live in a file log: use sqlite: or memory:".into(),
             ));
         }
-        (_, path) => Box::new(SqliteSnapshots::open(path)?),
+        (_, path) => {
+            let lock = match locked {
+                true => Some(crate::lock_file(Path::new(path), "the snapshot store")?),
+                false => None,
+            };
+            let mut snapshots = SqliteSnapshots::open(path)?;
+            snapshots._lock = lock;
+            Box::new(snapshots)
+        }
     })
 }
 
@@ -135,7 +155,11 @@ impl SnapshotStore for MemorySnapshots {
     }
 }
 
-pub struct SqliteSnapshots(Mutex<Connection>);
+pub struct SqliteSnapshots {
+    conn: Mutex<Connection>,
+    /// `<path>.lock`, held while a kernel or standby writes them ([`open_locked`]).
+    _lock: Option<std::fs::File>,
+}
 
 impl SqliteSnapshots {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -165,11 +189,14 @@ impl SqliteSnapshots {
             ) STRICT",
         )?;
         conn.pragma_update(None, "user_version", FORMAT)?;
-        Ok(SqliteSnapshots(Mutex::new(conn)))
+        Ok(SqliteSnapshots {
+            conn: Mutex::new(conn),
+            _lock: None,
+        })
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

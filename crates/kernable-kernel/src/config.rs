@@ -15,7 +15,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--store",
         "KERNABLE_STORE",
         "sqlite:kernable.db",
-        "The event store. It also holds the command queue and results, checkpoints, revocations and registrations. `sqlite:<path>` or a bare path: SQLite. `file:<path>`: an append-only log file. `memory:`: nothing survives the process, for tests. Keep it, the vault and the snapshots on a local disk, never on a network file system such as NFS or SMB: one kernel per store rests on a file lock (`<store>.lock`), which such file systems do not hold reliably, so two kernels could write one store.",
+        "The event store. It also holds the command queue and results, checkpoints, revocations and registrations. `sqlite:<path>` or a bare path: SQLite. `file:<path>`: an append-only log file. `memory:`: nothing survives the process, for tests. Keep it, the vault and the snapshots on a local disk, never on a network file system such as NFS or SMB: one kernel per store rests on file locks (`<store>.lock`, and the vault's and the snapshots' own), which such file systems do not hold reliably, so two kernels could write one store.",
     ),
     (
         "--listen",
@@ -33,7 +33,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--snapshots",
         "KERNABLE_SNAPSHOTS",
         "",
-        "The snapshot store, a cache of aggregate states that workers rebuild from the events. `sqlite:<path>` or a bare path: SQLite, kept across restarts. `memory:`: lost on a restart, so the first command per aggregate reads all its events again. Not `file:`. Default: SQLite next to the event store, `<its name>-snapshots.db` (`kernable-snapshots.db` for `kernable.db`), or `memory:` for a `memory:` store.",
+        "The snapshot store, a cache of aggregate states that workers rebuild from the events. `sqlite:<path>` or a bare path: SQLite, kept across restarts. `memory:`: lost on a restart, so the first command per aggregate reads all its events again. Not `file:`. Default: SQLite next to the event store, `<its name>-snapshots.db` (`kernable-snapshots.db` for `kernable.db`), or `memory:` for a `memory:` store. One kernel per snapshot store: a second one is refused (`<path>.lock`).",
     ),
     (
         "--data-store",
@@ -57,7 +57,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--vault-store",
         "KERNABLE_VAULT_STORE",
         "sqlite:vault.db",
-        "Where the vault keeps personal and secret values, encrypted with `--vault-key`. `sqlite:<path>` or a bare path: SQLite. `memory:`: every value is lost on a restart, for tests. Not `file:`. Ignored without `--vault-key`.",
+        "Where the vault keeps personal and secret values, encrypted with `--vault-key`. `sqlite:<path>` or a bare path: SQLite. `memory:`: every value is lost on a restart, for tests. Not `file:`. Ignored without `--vault-key`. One kernel per vault: a second one is refused (`<path>.lock`).",
     ),
     (
         "--tls-cert",
@@ -111,13 +111,13 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--readers",
         "KERNABLE_READERS",
         "off",
-        "`on`: readers (read-only copies, `kernable start --reader`, each with a key granted `replicate`) may follow this kernel, any number of them; the kernel keeps its record log for them, as for a standby. A reader gets only what the kernel may tell (with `--replication sync`, what the standby holds), and nothing waits for it. Give both kernels of a pair `--readers on`. `off`: no readers.",
+        "`on`: readers (read-only copies, `kernable start --reader`, each with a key granted `read`) may follow this kernel, any number of them; the kernel keeps its record log for them, as for a standby. A reader gets only what the kernel may tell (with `--replication sync`, what the standby holds), and nothing waits for it. Give both kernels of a pair `--readers on`. `off`: no readers.",
     ),
     (
         "--reader",
         "KERNABLE_READER",
         "",
-        "Run as a reader, a read-only copy of the writer at these addresses (comma-separated: both kernels of a pair; it follows whichever is the primary). It applies the writer's records as a standby does, answers queries, subscriptions and live listeners from its own copy, forwards commands and every other write to the writer, and is never promoted. Reactors and workers that connect to it wait (`reader_of`); scheduled commands and business processes run on the writer. Needs `--follow-key` (granted `replicate`) and `--primary-kernel-key`; the writer needs `--readers on`. Not with `--follow`, `--witness`, `--replication sync`, `--backup on` or `--readers on`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
+        "Run as a reader, a read-only copy of the writer at these addresses (comma-separated: both kernels of a pair; it follows whichever is the primary). It applies the writer's records as a standby does, answers queries, subscriptions and live listeners from its own copy, forwards commands and every other write to the writer, and is never promoted. Reactors and workers that connect to it wait (`reader_of`); scheduled commands and business processes run on the writer. Needs `--follow-key` (granted `read`, not `replicate`: a reader's key never follows as a standby) and `--primary-kernel-key`; the writer needs `--readers on`. Not with `--follow`, `--witness`, `--replication sync`, `--backup on` or `--readers on`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
     ),
     (
         "--from-backup",
@@ -189,7 +189,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--follow-key",
         "KERNABLE_FOLLOW_KEY",
         "standby.key",
-        "With `--follow`: the standby's key, whose grant (`<name>.grant` next to it) allows `replicate`.",
+        "With `--follow`: the standby's key, whose grant (`<name>.grant` next to it) allows `replicate`. With `--reader`: the reader's key, whose grant allows `read`.",
     ),
     (
         "--primary-kernel-key",
@@ -219,7 +219,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--settle-timeout-ms",
         "KERNABLE_SETTLE_TIMEOUT_MS",
         "5000",
-        "How long a settling submit (the default) waits after the commit for the listeners that count to process the events, in milliseconds. After that the client gets the committed outcome marked as not settled (`NotSettled` in the SDKs).",
+        "How long a settling submit (the default) waits after the commit for the listeners that count to process the events, in milliseconds. After that the client gets the committed outcome marked as not settled (`NotSettled` in the SDKs). Through a reader it may take up to twice as long: the writer waits for its listeners, then the reader for its own.",
     ),
     (
         "--deployment-retention-days",

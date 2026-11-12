@@ -48,6 +48,7 @@ kernable grant root.key app.pub 'submit=shop.*' 'listen=shop.*'   # writes app.g
 | `cache` | domains whose cache it may use |
 | `manage` | services whose membership it may apply (service names, or `*`); with `*` also `kernable promote` |
 | `replicate` | `*`: following the kernel as its [standby](../how-to/standby); the key gets every record, file and vault value |
+| `read` | `*`: following the kernel as a [reader](../how-to/readers), a read-only copy; the key gets every record, file and vault value, as a standby's does, but can never follow as a standby |
 | `export` | `*`: [exporting](../how-to/export) the whole kernel; the vault values stay sealed with its vault key |
 | `backup` | `*`: following the kernel as its [backup follower](../how-to/backup#continuous-backup); the key gets every record and file, the vault values sealed |
 | `reserved_order` | `*`: registering listeners and middlewares at negative orders, which run before every other listener; for kernable's kits (tenancy, accounts, authorization) |

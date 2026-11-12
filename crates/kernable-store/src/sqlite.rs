@@ -280,17 +280,7 @@ impl SqliteStore {
         let lock = if path.as_os_str() == ":memory:" {
             None
         } else {
-            let lock = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(format!("{}.lock", path.display()))?;
-            lock.try_lock().map_err(|_| {
-                Error::Io(std::io::Error::other(
-                    "store is in use by another process (a running kernel?)",
-                ))
-            })?;
-            Some(lock)
+            Some(crate::lock_file(path, "store")?)
         };
         let mut store = Self::configure(path, durability)?;
         let on_disk = lock.is_some();

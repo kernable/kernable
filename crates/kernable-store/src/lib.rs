@@ -870,6 +870,31 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
     })
 }
 
+/// Takes the exclusive lock `<path>.lock` of the database at `path` for `what` (`store`, `the
+/// vault`, `the snapshot store`), held while the file lives: one process at a time writes it.
+/// Refused at once while another process holds it.
+pub(crate) fn lock_file(path: &std::path::Path, what: &str) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(format!("{}.lock", path.display()))?;
+    lock.try_lock().map_err(|_| {
+        Error::Io(std::io::Error::other(format!(
+            "{what} is in use by another process (a running kernel?)"
+        )))
+    })?;
+    Ok(lock)
+}
+
+/// Like [`lock_file`], for the SQLite database at `url`; none in memory.
+pub(crate) fn lock_url(url: &str, what: &str) -> Result<Option<std::fs::File>> {
+    match backend(url) {
+        ("memory", _) | ("file", _) => Ok(None),
+        (_, path) => lock_file(std::path::Path::new(path), what).map(Some),
+    }
+}
+
 /// Splits a store URL into backend and path; a bare path means SQLite.
 pub fn backend(url: &str) -> (&str, &str) {
     match url.split_once(':') {

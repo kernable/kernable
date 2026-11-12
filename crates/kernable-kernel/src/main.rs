@@ -72,11 +72,12 @@ Keys and trust:
                                           or a bare <type> for every action. Actions: submit run
                                           subscribe listen query answer check privileged vault_read
                                           vault_erase data_read data_write cache manage replicate
-                                          export backup reserved_order process. A type is *,
+                                          read export backup reserved_order process. A type is *,
                                           <domain>.* or <domain>.<Type>; manage takes service names,
                                           process takes process names (<domain>.<name>), privileged
-                                          takes bypass_authorization; replicate, export, backup and
-                                          reserved_order (negative listener orders, for kits) take *.
+                                          takes bypass_authorization; replicate (a standby), read
+                                          (a reader), export, backup and reserved_order (negative
+                                          listener orders, for kits) take *.
                                           --succeeds lets this key take over the aggregates and
                                           listeners registered with <old.pub>. A newer grant for the
                                           same key replaces the older one.

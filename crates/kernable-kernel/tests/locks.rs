@@ -1,7 +1,9 @@
 //! One kernel per store, with the real binary: a second `kernable start` on the stores of a
 //! running kernel is refused before it opens anything (the event store's lock, taken first,
-//! keeps the vault and the snapshots out too), the first one serves on; and a kernel killed
-//! with `kill -9` leaves no lock behind, so a restart on its stores serves at once.
+//! keeps the vault and the snapshots out too), the first one serves on; a second kernel with
+//! an event store of its own but the vault or the snapshots of a running one is refused by
+//! their own locks; and a kernel killed with `kill -9` leaves no lock behind, so a restart on
+//! its stores serves at once.
 
 mod common;
 
@@ -137,6 +139,54 @@ async fn a_second_kernel_never_opens_the_vault_or_the_snapshots_of_a_running_one
     // The event store's lock is taken first: the refused kernel wrote neither file.
     assert_eq!((state(&vault), state(&snapshots)), before);
     healthy(&metrics).await;
+}
+
+/// `flags` with `flag`'s value replaced.
+fn with(flags: &[String], flag: &str, value: String) -> Vec<String> {
+    let mut flags = flags.to_vec();
+    let at = flags.iter().position(|f| f == flag).unwrap() + 1;
+    flags[at] = value;
+    flags
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_vault_and_the_snapshots_have_locks_of_their_own() {
+    let dir = Dir::new("locks-own");
+    let metrics = free_addr();
+    let flags = flags(&dir.0, &metrics);
+    let addr = format!("unix:{}", dir.0.join("k.sock").display());
+    let _first = spawn(&dir.0, &flags);
+    wait_for(&addr).await;
+    start_worker(addr.clone(), TestWorker::honest()).await;
+    place(&addr, 0).await;
+    let (vault, snapshots) = (dir.0.join("vault.db"), dir.0.join("snapshots.db"));
+    let before = (state(&vault), state(&snapshots));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Another event store and socket, the same snapshots (and vault): refused at the snapshots.
+    let path = |name: &str| dir.0.join(name).display().to_string();
+    let other = with(&flags, "--store", format!("sqlite:{}", path("other.db")));
+    let other = with(&other, "--listen", format!("unix:{}", path("other.sock")));
+    let said = second_kernel(&dir.0, &other).await;
+    assert!(
+        said.contains("the snapshot store is in use by another process"),
+        "a clear error: {said}"
+    );
+    // Its own snapshots too, the same vault: refused at the vault.
+    let other = with(
+        &other,
+        "--snapshots",
+        format!("sqlite:{}", path("other-snapshots.db")),
+    );
+    let said = second_kernel(&dir.0, &other).await;
+    assert!(
+        said.contains("the vault is in use by another process"),
+        "a clear error: {said}"
+    );
+    // Neither refused kernel wrote the first one's files, and the first serves on.
+    assert_eq!((state(&vault), state(&snapshots)), before);
+    healthy(&metrics).await;
+    place(&addr, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

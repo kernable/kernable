@@ -839,8 +839,11 @@ async fn run(
     kernel.present_standby(metadata, &hello.key_id)?;
     let allowed = |kernel: &Kernel| {
         let permissions = kernel.permissions();
+        // Each role its own action: a reader's key (`read`) never follows as a standby.
         let rules = if backup {
             &permissions.backup
+        } else if reader {
+            &permissions.read
         } else {
             &permissions.replicate
         };
@@ -849,8 +852,10 @@ async fn run(
     if !allowed(&kernel) {
         return Err(Status::permission_denied(if backup {
             "the key may not back up this kernel: its grant needs backup"
+        } else if reader {
+            "the key may not follow this kernel as a reader: its grant needs read"
         } else {
-            "the key may not follow this kernel: its grant needs replicate"
+            "the key may not follow this kernel as its standby: its grant needs replicate"
         }));
     }
     let mut nonce = [0u8; 32];
@@ -1141,7 +1146,7 @@ async fn run(
             },
             () = wrote(primary.as_deref(), reader.then_some(&*kernel)) => {}
             Ok(()) = changes.changed() => {
-                // A revoked key, or a grant without replicate (backup): it follows no longer.
+                // A revoked key, or a grant without its action: it follows no longer.
                 if !allowed(&kernel) {
                     return Err(Status::permission_denied(
                         "the follower's key may follow no longer: revoked, or its grant changed",

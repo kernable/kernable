@@ -148,7 +148,7 @@ The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](.
 
 ## Where the stores live
 
-Keep the project directory, and with it the event store, the vault and the snapshots, on a local disk, never on a network file system such as NFS or SMB. One kernel per store rests on a file lock (`<store>.lock`), and such file systems do not hold file locks reliably: two kernels could then write one store.
+Keep the project directory, and with it the event store, the vault and the snapshots, on a local disk, never on a network file system such as NFS or SMB. One kernel per store rests on file locks (`<store>.lock`, and the vault's and the snapshots' own), and such file systems do not hold file locks reliably: two kernels could then write one store.
 
 ## The kernel's local socket
 

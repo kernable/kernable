@@ -35,7 +35,7 @@ The tutorial uses one key for everything (`--dev` writes `app.key` with a grant 
    kernable grant keys/root.key keys/deploy.pub manage=shop   # applies the shop's membership
    ```
 
-   Each call prints the permissions and `wrote keys/<name>.grant`. A permission is `<action>=<type>,<type>`, or a bare type for every action; a type is `shop.Place`, `shop.*` or `*`. The actions are in [Trust](../concepts/trust#keys-and-grants); `manage` takes service names.
+   Each call prints the permissions and `wrote keys/<name>.grant`. A permission is `<action>=<type>,<type>`, or a bare type for every action; a type is `shop.Place`, `shop.*` or `*`. The actions are in [Trust](../concepts/trust#keys-and-grants); `manage` takes service names. Kernels that follow another get keys of their own: a [standby](./standby) `replicate=*`, a [reader](./readers) `read=*`, a [backup follower](./backup#continuous-backup) `backup=*`. A reader's key never follows as a standby, and a standby's never as a reader.
 
 3. **Start the kernel with the root's public key:** `kernable start --root keys/root.pub ...`.
 

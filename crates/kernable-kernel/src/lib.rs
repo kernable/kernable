@@ -374,7 +374,9 @@ impl Kernel {
         };
         let workers = workers::Registry::load(store.workers()?);
         let schemas = store.event_schemas()?.into_iter().collect();
-        let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
+        // The snapshots and the vault have locks of their own: a second kernel with another
+        // event store but these files is refused before it touches them.
+        let snapshots = kernable_store::snapshots::open_locked(&config.snapshots)?;
         // A masked copy (a preview) runs alone, with its own vault and snapshots.
         let copy = copy::check_config(&config, store.as_ref())?;
         if let Some(mark) = &copy {
@@ -388,7 +390,7 @@ impl Kernel {
                     }
                     _ => BoxError::from(e),
                 })?;
-                let vault = Vault::open(&v.store, &key)?;
+                let vault = Vault::open_locked(&v.store, &key)?;
                 if let Some(mark) = &copy {
                     copy::check_vault(mark, &vault)?;
                 }
