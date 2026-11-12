@@ -46,6 +46,13 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           backups, only you can open it; set when it is created,
                                           never after. A host name of your own: set the TXT record
                                           `domain add` names, then run it again
+  kernable cloud deploy [<dir>] --project <name> [--team <team>]
+                                          Packs the app in <dir> (default .; what .kernableignore
+                                          names stays here), puts it, has kernable Cloud build its
+                                          Containerfile on the project's server (scanned for known
+                                          vulnerabilities), release it beside the deployment that
+                                          serves and switch once it caught up; follows it and
+                                          prints the scan and, if it failed, the build's log
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
 const DEFAULT_API: &str = "https://api.kernable.com";
@@ -596,6 +603,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         ["members", rest @ ..] => members(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["tokens", rest @ ..] => tokens(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["projects", rest @ ..] => projects(Session::open(api.as_deref(), json)?, team_flag, rest),
+        ["deploy", rest @ ..] => deploy(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["help" | "--help"] | [] => {
             println!("{USAGE}");
             Ok(true)
@@ -694,6 +702,124 @@ fn login(mut s: Session, no_browser: bool) -> Result<bool, String> {
             "~/.config/kernable/cloud.json"
         }
     );
+    Ok(true)
+}
+
+/// `kernable cloud deploy [<dir>] --project <name>`: packs the app's source (what
+/// `.kernableignore` leaves out stays here), puts it, has kernable Cloud build its Containerfile
+/// and release it, and follows the deploy until it serves or fails.
+fn deploy(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
+    use sha2::Digest;
+    let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
+    let project =
+        flag(&mut rest, "--project")?.ok_or("kernable cloud deploy needs --project <name>")?;
+    let dir = match rest.as_slice() {
+        [] => std::path::PathBuf::from("."),
+        [d] => std::path::PathBuf::from(d),
+        _ => return Ok(false),
+    };
+    let app = crate::init::App::read(&dir)?;
+    if !dir.join("Containerfile").is_file() {
+        return Err(format!(
+            "{}: no Containerfile (kernable init writes one)",
+            dir.display()
+        ));
+    }
+    // The source, packed by the system's tar, leaving out what .kernableignore names.
+    let packed =
+        std::env::temp_dir().join(format!("kernable-source-{}.tar.gz", std::process::id()));
+    let mut tar = std::process::Command::new("tar");
+    tar.arg("-czf").arg(&packed);
+    if dir.join(".kernableignore").is_file() {
+        tar.arg("-X").arg(dir.join(".kernableignore"));
+    }
+    tar.arg("-C").arg(&dir).arg(".");
+    let status = tar.status().map_err(|e| format!("tar: {e}"))?;
+    if !status.success() {
+        return Err(format!("tar ended {status}"));
+    }
+    let bytes = std::fs::read(&packed).map_err(|e| format!("{}: {e}", packed.display()))?;
+    let _ = std::fs::remove_file(&packed);
+    let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+    let t = team(&mut s, team_flag)?;
+    let at = |p: &str| format!("/v1/teams/{t}/projects/{project}/{p}");
+    let up = s.call(
+        "POST",
+        &at("uploads"),
+        Some(json!({ "sha256": sha256, "size": bytes.len() })),
+    )?;
+    let url = up["url"].as_str().ok_or("no upload URL")?;
+    if !s.json {
+        eprintln!(
+            "{project}: uploading the source ({} kB)",
+            bytes.len() / 1000
+        );
+    }
+    ureq::put(url)
+        .send(&bytes[..])
+        .map_err(|e| format!("uploading the source: {e}"))?;
+    let started = s.call(
+        "POST",
+        &at("deploys"),
+        Some(json!({ "sha256": sha256, "app": app })),
+    )?;
+    let id = started["id"].as_str().ok_or("no deploy ID")?.to_owned();
+    let mut last = String::new();
+    let job = loop {
+        let job = s.call("GET", &at(&format!("deploys/{id}")), None)?;
+        let state = job["state"].as_str().unwrap_or_default().to_owned();
+        if state != last && !s.json {
+            eprintln!("{project}: {state}");
+            last = state.clone();
+        }
+        if state == "serving" || state == "failed" {
+            break job;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    };
+    s.show(&job, |j| {
+        let report = &j["report"];
+        let scan = &report["scan"];
+        if scan.is_object() {
+            match scan["note"].as_str() {
+                Some(note) => println!("scan: {note}"),
+                None => println!(
+                    "scan: {} critical, {} high",
+                    scan["critical"].as_u64().unwrap_or(0),
+                    scan["high"].as_u64().unwrap_or(0)
+                ),
+            }
+            for f in scan["findings"].as_array().into_iter().flatten().take(10) {
+                println!(
+                    "  {} {} {} {} (fixed in {})",
+                    text(f, "severity"),
+                    text(f, "id"),
+                    text(f, "package"),
+                    text(f, "installed"),
+                    f["fixed"]
+                        .as_str()
+                        .filter(|x| !x.is_empty())
+                        .unwrap_or("none yet")
+                );
+            }
+        }
+        match j["state"].as_str() {
+            Some("serving") => println!(
+                "{project}: {} serves (built in {} s)",
+                text(j, "deployment"),
+                report["seconds"].as_u64().unwrap_or(0)
+            ),
+            _ => {
+                println!("{project}: failed: {}", text(j, "error"));
+                if let Some(log) = report["log"].as_str().filter(|l| !l.is_empty()) {
+                    println!("the build's log, its end:\n{log}");
+                }
+            }
+        }
+    });
+    if job["state"] != "serving" {
+        return Err(format!("the deploy of {project} failed"));
+    }
     Ok(true)
 }
 
