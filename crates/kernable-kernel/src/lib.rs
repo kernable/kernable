@@ -74,10 +74,11 @@ use kernable_core::{
     proto::{
         Accepted, CacheRequest, CacheResult, Challenge, Command, CommandResult, Committed,
         DataEntry, DataList, DataRequest, DataResult, Event, Execute, ExecuteMore, Grant,
-        KernelMessage, ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent, QueryRequest,
-        QueryResult, Register, Registered, Rejected, RetryRequest, RetryResult, RevocationRecord,
-        RevokeRequest, RevokeResponse, Signature, Snapshot, SnapshotRecord, SubmitRequest,
-        SubscribeRequest, VaultValue, Wait, When, WorkerMessage,
+        KernelMessage, ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent,
+        PushGrantRequest, PushGrantResponse, QueryRequest, QueryResult, Register, Registered,
+        Rejected, RetryRequest, RetryResult, RevocationRecord, RevokeRequest, RevokeResponse,
+        Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait,
+        When, WorkerMessage,
         cache_service_server::{CacheService, CacheServiceServer},
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
@@ -2061,6 +2062,19 @@ impl TrustService for Api {
         }
         kernel.revoke(&req.key_id, req.since).map_err(internal)?;
         Ok(Response::new(RevokeResponse {}))
+    }
+
+    async fn push_grant(
+        &self,
+        request: Request<PushGrantRequest>,
+    ) -> Result<Response<PushGrantResponse>, Status> {
+        let req = request.into_inner();
+        protocol(req.protocol)?;
+        let grant = req
+            .grant
+            .ok_or_else(|| Status::invalid_argument("no grant"))?;
+        self.0.grant(grant)?;
+        Ok(Response::new(PushGrantResponse {}))
     }
 }
 

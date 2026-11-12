@@ -248,6 +248,7 @@ Revocation of keys, by root-key tooling (`kernable revoke`).
 | RPC | Request | Response | Description |
 |---|---|---|---|
 | `Revoke` | `RevokeRequest` | `RevokeResponse` | Revokes `key_id` from `since` on, for good. Signed by a root key over kernable.v1.revoke and valid 60 s around issued_at. The kernel stores it signed with its own key (kernable.v1.revocation), refuses the key from then on and ends its streams; queued commands signed with it and received at or after `since` are rejected with `key_revoked`. A revoked root key takes the grants it signed with it. Revoking a key again does nothing. Errors: PERMISSION_DENIED (not a root key, or a revoked one), UNAUTHENTICATED (invalid signature, outside the time window), INVALID_ARGUMENT (`key_id` is not a key ID). |
+| `PushGrant` | `PushGrantRequest` | `PushGrantResponse` | Takes a grant into effect at once, as presenting it with a request does: checked like any grant (signed by a root key, or delegated within its delegate's newest grant), kept if it is the newest for its key, stored and passed on to the standby and the readers. Sessions are checked again when it replaces a grant. Pushing a delegate's newer grant that names fewer actions narrows what the delegate granted at once: grants it signed for the actions taken away stop counting, and sessions that relied on them end. Errors: UNAUTHENTICATED (unsigned, invalid signature), PERMISSION_DENIED (not signed by a root key or a delegate allowed to grant its actions, a revoked key). |
 
 ### RevokeRequest
 
@@ -261,6 +262,19 @@ Revocation of keys, by root-key tooling (`kernable revoke`).
 | `protocol` |  `uint32` | 5 | not signed |
 
 ### RevokeResponse
+
+
+No fields.
+
+### PushGrantRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `grant` |  `Grant` | 1 |  |
+| `protocol` |  `uint32` | 2 | not signed |
+
+### PushGrantResponse
 
 
 No fields.

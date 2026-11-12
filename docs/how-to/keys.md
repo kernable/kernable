@@ -55,7 +55,14 @@ kernable grant keys/root.key keys/mover.pub grant=replicate,read     # writes ke
 kernable grant keys/mover.key keys/reader-1.pub --delegated 'read=*'   # signed by the mover
 ```
 
-`--delegated` puts `keys/mover.grant` (beside the signing key) into the new grant; the kernel takes it for `replicate` and `read` only and refuses anything else the mover signs. A key the mover granted cannot grant on. To end it, revoke the mover: every grant it signed goes with it. To narrow it, issue the mover a newer grant with fewer actions.
+`--delegated` puts `keys/mover.grant` (beside the signing key) into the new grant; the kernel takes it for `replicate` and `read` only and refuses anything else the mover signs. A key the mover granted cannot grant on. To end it, revoke the mover: every grant it signed goes with it. To narrow it, issue the mover a newer grant with fewer actions and push it to every running kernel; it takes effect at once:
+
+```sh
+kernable grant keys/root.key keys/mover.pub grant=replicate          # read taken away
+kernable push-grant http://127.0.0.1:7233 keys/mover.grant
+```
+
+The kernel stores the newer grant, passes it to its standby and readers, drops the grants the mover signed for `read` and ends the sessions that relied on them. A kernel that is not running gets it when it next starts only if something presents it, so push it again then, or revoke the mover instead.
 
 ## Changing what a key may do
 

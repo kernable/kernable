@@ -809,6 +809,85 @@ async fn a_move_key_grants_only_what_its_grant_names_until_it_is_revoked() {
     assert_eq!(e.code(), Code::PermissionDenied, "{e:?}");
 }
 
+/// Narrowing a move key takes effect at once: its newer grant with fewer actions, pushed to the
+/// running kernel, drops what it granted for the actions taken away; the rest stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_key_narrowed_by_a_pushed_grant_loses_what_it_granted_at_once() {
+    use kernable_core::proto::Permission;
+    let dir = Dir::new("readers-narrowed");
+    let writer_config = writer_config(&dir.0, false);
+    let writer = open(&writer_config).await;
+    let (mover, reader) = (key(73), key(74));
+    let issuer = grant(&mover, &[("grant", &["replicate", "read"])]);
+    let delegated =
+        |by: &SigningKey, issuer: kernable_core::proto::Grant, to: &SigningKey, action: &str| {
+            signing::delegated_grant(
+                by,
+                issuer,
+                &id(to),
+                vec![Permission {
+                    action: action.into(),
+                    types: vec!["*".into()],
+                }],
+                now_ms(),
+            )
+        };
+    let hello = async |key: &SigningKey| -> Result<(), tonic::Status> {
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(FollowRequest {
+            msg: Some(follow_request::Msg::Hello(FollowHello {
+                key_id: id(key),
+                protocol: kernable_core::PROTOCOL,
+                reader: true,
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+        let channel = transport::connect(&writer_config.listen).await.unwrap();
+        let mut answers = ReplicationServiceClient::new(channel)
+            .follow(ReceiverStream::new(rx))
+            .await?
+            .into_inner();
+        match answers.message().await?.and_then(|m| m.msg) {
+            Some(follow_response::Msg::Challenge(_)) => Ok(()),
+            other => panic!("expected a challenge, got {other:?}"),
+        }
+    };
+
+    let (standby, granted_at) = (key(78), now_ms());
+    writer
+        .grant(delegated(&mover, issuer.clone(), &reader, "read"))
+        .unwrap();
+    writer
+        .grant(delegated(&mover, issuer.clone(), &standby, "replicate"))
+        .unwrap();
+    hello(&reader).await.unwrap();
+
+    // The root issues the move key a newer grant without `read`, and it is pushed.
+    until("a newer millisecond", || now_ms() > granted_at).await;
+    let narrower = grant(&mover, &[("grant", &["replicate"])]);
+    let channel = transport::connect(&writer_config.listen).await.unwrap();
+    kernable_core::proto::trust_service_client::TrustServiceClient::new(channel)
+        .push_grant(kernable_core::proto::PushGrantRequest {
+            grant: Some(narrower),
+            protocol: kernable_core::PROTOCOL,
+        })
+        .await
+        .unwrap();
+
+    // `read` granted by it no longer counts; `replicate` still does.
+    let e = hello(&reader).await.unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied, "{e:?}");
+    let e = writer
+        .grant(delegated(&mover, issuer.clone(), &key(79), "read"))
+        .unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied, "{e:?}");
+    writer
+        .grant(delegated(&mover, issuer, &key(80), "replicate"))
+        .expect("replicate is still the move key's to grant");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_writer_without_readers_on_refuses_a_reader() {
     let dir = Dir::new("readers-refused");

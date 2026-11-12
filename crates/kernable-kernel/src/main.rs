@@ -13,9 +13,9 @@ use std::{
 use kernable_core::{
     proto::{
         ApplyRequest, Attribute, Command, ExportRequest, ListenerRecord, MapRequest, Membership,
-        MoveStatusRequest, Partition, PartitionMap, Permission, PromoteRequest, RetryRequest,
-        RevokeRequest, SubmitRequest, SwitchoverRequest, TenantMove, TenantPartition, When,
-        WorkerRecord, command_result::Outcome, command_service_client::CommandServiceClient,
+        MoveStatusRequest, Partition, PartitionMap, Permission, PromoteRequest, PushGrantRequest,
+        RetryRequest, RevokeRequest, SubmitRequest, SwitchoverRequest, TenantMove, TenantPartition,
+        When, WorkerRecord, command_result::Outcome, command_service_client::CommandServiceClient,
         export_service_client::ExportServiceClient, listener_service_client::ListenerServiceClient,
         membership_service_client::MembershipServiceClient,
         partition_service_client::PartitionServiceClient,
@@ -90,6 +90,12 @@ Keys and trust:
                                           2026-10-27T09:00:00Z): the kernel refuses it, ends its
                                           connections and rejects its queued commands accepted since
                                           then (key_revoked). The kernel must be running.
+  kernable push-grant <addr> <name.grant>
+                                          Takes a grant into effect on a running kernel at once,
+                                          as presenting it does. Pushing a delegate's newer grant
+                                          that names fewer actions narrows what it granted: the
+                                          kernel drops those grants and ends the sessions that
+                                          relied on them, and passes it to its standby and readers.
   kernable witness --listen <addr> --root <root.pub> --state <file> --generation <file> [--lease-ms <ms>] [--tls-...]
                                           Runs the witness of a pair of kernels started with
                                           --witness: it decides which one is the primary, renews
@@ -562,6 +568,7 @@ async fn main() -> ExitCode {
             grant(root, key, permissions)
         }
         ["revoke", addr, root, key, since] => revoke(addr, root, key, since).await,
+        ["push-grant", addr, file] => push_grant(addr, file).await,
         ["promote", addr, key] => promote(addr, key).await,
         ["switchover", "--socket", socket] => switchover_local(socket),
         ["switchover", addr, key] => switchover(addr, key).await,
@@ -1197,6 +1204,25 @@ async fn revoke(addr: &str, root: &str, key: &str, since: &str) -> Result<bool> 
         .revoke(request)
         .await?;
     println!("revoked {key_id}");
+    Ok(true)
+}
+
+/// `kernable push-grant <addr> <name.grant>`: takes the grant into effect on a running kernel
+/// at once, e.g. a delegate's narrower grant, which narrows what the delegate granted.
+async fn push_grant(addr: &str, file: &str) -> Result<bool> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+    let grant = kernable_core::proto::Grant::decode(hex::decode(text.trim())?.as_slice())
+        .map_err(|e| format!("{file}: not a grant: {e}"))?;
+    let key_id = grant.key_id.clone();
+    TrustServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
+        .push_grant(PushGrantRequest {
+            grant: Some(grant),
+            protocol: kernable_core::PROTOCOL,
+        })
+        .await?;
+    println!("pushed the grant of {key_id}");
     Ok(true)
 }
 

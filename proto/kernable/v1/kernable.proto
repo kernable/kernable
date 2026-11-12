@@ -241,6 +241,15 @@ service TrustService {
   // Errors: PERMISSION_DENIED (not a root key, or a revoked one), UNAUTHENTICATED (invalid
   // signature, outside the time window), INVALID_ARGUMENT (`key_id` is not a key ID).
   rpc Revoke(RevokeRequest) returns (RevokeResponse);
+  // Takes a grant into effect at once, as presenting it with a request does: checked like any
+  // grant (signed by a root key, or delegated within its delegate's newest grant), kept if it
+  // is the newest for its key, stored and passed on to the standby and the readers. Sessions
+  // are checked again when it replaces a grant. Pushing a delegate's newer grant that names
+  // fewer actions narrows what the delegate granted at once: grants it signed for the actions
+  // taken away stop counting, and sessions that relied on them end.
+  // Errors: UNAUTHENTICATED (unsigned, invalid signature), PERMISSION_DENIED (not signed by a
+  // root key or a delegate allowed to grant its actions, a revoked key).
+  rpc PushGrant(PushGrantRequest) returns (PushGrantResponse);
 }
 
 message RevokeRequest {
@@ -252,6 +261,13 @@ message RevokeRequest {
 }
 
 message RevokeResponse {}
+
+message PushGrantRequest {
+  Grant grant = 1;
+  uint32 protocol = 2; // not signed
+}
+
+message PushGrantResponse {}
 
 // ---- memberships ----
 

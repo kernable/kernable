@@ -66,7 +66,7 @@ A root key can let another key, a **delegate**, grant a few actions in its place
 
 - for actions the delegate's grant names (never `*`, `grant` or `succeeds`): anything else it signs is refused;
 - one step from a root: a key a delegate granted cannot grant on;
-- while the delegate's newest grant still names the action: a newer grant of the delegate with fewer actions takes the rest away.
+- while the delegate's newest grant still names the action: a newer grant of the delegate with fewer actions takes the rest away. Push it to the running kernel (`kernable push-grant`) and it takes effect at once, like a revocation: the kernel stores it, passes it to its standby and readers, drops the grants the delegate signed for the actions taken away, and ends the sessions that relied on them.
 
 Revoking the delegate, or the root that signed its grant, ends what it granted, and the streams of those keys end.
 

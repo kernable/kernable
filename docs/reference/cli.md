@@ -51,6 +51,14 @@ kernable revoke <addr> <root.key> <key.pub> <since>
 
 Revokes a key for good from `<since>` on (UTC, like `2026-10-27T09:00:00Z`): the kernel refuses it, ends its connections and rejects its queued commands accepted since then (`key_revoked`). The kernel must be running.
 
+### `kernable push-grant`
+
+```text
+kernable push-grant <addr> <name.grant>
+```
+
+Takes a grant into effect on a running kernel at once, as presenting it does. Pushing a delegate's newer grant that names fewer actions narrows what it granted: the kernel drops those grants and ends the sessions that relied on them, and passes it to its standby and readers.
+
 ### `kernable witness`
 
 ```text
