@@ -1342,6 +1342,7 @@ function drawOperations(v) {
       line(state.kernel.ready === "ready" ? "ok" : "warn", `Version ${state.kernel.version}`, state.kernel.ready === "ready" ? "ready" : state.kernel.ready),
       line("ok", "Started", el("span", {}, when(s.startedAt), ` · up ${duration(s.now - s.startedAt)}`)),
       line("ok", "Listens on", s.addr),
+      s.copy ? line("warn", "Masked copy", `of ${s.copy.source} up to event ${num(s.copy.position)}, ${when(s.copy.copiedAt)}: personal values of the source read as null`) : null,
       line(s.queue.queued > 1000 ? "warn" : "ok", "Queued · scheduled", `${num(s.queue.queued)} · ${num(s.queue.scheduled)}`)));
     panels.push(el("div", { class: "panel" }, el("h2", {}, "Standby and failover"),
       line(s.role === "standby" ? "ok" : "ok", "This kernel", s.role),

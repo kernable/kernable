@@ -18,12 +18,12 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, Attribute, CheckpointRecord, Command, CommandResult, Committed,
-        CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, GlobalKeyRecord, Grant,
-        ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent,
-        ParkedEvent, PartitionMap, ProcessPositionRecord, ProcessRecord, Rejected, RejectedRecord,
-        ReplicatedRecord, ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord,
-        Signature, StreamIndex, TenantImportedRecord, TenantIndexRecord, When, WorkerRecord,
-        command_result::Outcome, log_record::Record,
+        CommittedRecord, CopyRecord, DataChangedRecord, EnqueuedRecord, Event, GlobalKeyRecord,
+        Grant, ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware,
+        NewEvent, ParkedEvent, PartitionMap, ProcessPositionRecord, ProcessRecord, Rejected,
+        RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RequestContext, Requirement,
+        RevocationRecord, Signature, StreamIndex, TenantImportedRecord, TenantIndexRecord, When,
+        WorkerRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -1097,6 +1097,20 @@ impl Store for SqliteStore {
 
     fn processes(&self) -> Result<Vec<ProcessRecord>> {
         read_processes(&self.conn())
+    }
+
+    fn copy_mark(&self) -> Result<Option<CopyRecord>> {
+        read_copy(&self.conn())
+    }
+
+    fn mark_copy(&self, mark: &CopyRecord) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_copy_tx(&tx, mark)?;
+        let head = self.file(&tx, || vec![Record::Copy(mark.clone())])?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
     }
 
     fn save_process(&self, record: &ProcessRecord) -> Result<()> {
@@ -2692,6 +2706,7 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
             save_process_tx(tx, p)?;
         }
         Record::ProcessPosition(p) => save_process_position_tx(tx, p.position)?,
+        Record::Copy(c) => save_copy_tx(tx, c)?,
         Record::Revocation(r) => {
             revoke_tx(tx, r)?;
         }
@@ -2722,6 +2737,38 @@ CREATE TABLE IF NOT EXISTS partition_map (
     map   BLOB    NOT NULL -- the PartitionMap message, with its signature
 ) STRICT;
 ";
+
+/// The mark of a masked copy, created with it.
+const COPY_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS copy (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    record BLOB    NOT NULL -- the CopyRecord
+) STRICT;
+";
+
+fn read_copy(conn: &Connection) -> Result<Option<CopyRecord>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'copy')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let blob: Option<Vec<u8>> = conn
+        .query_row("SELECT record FROM copy WHERE id = 1", [], |r| r.get(0))
+        .optional()?;
+    Ok(blob.map(|b| CopyRecord::decode(b.as_slice())).transpose()?)
+}
+
+fn save_copy_tx(tx: &Connection, mark: &CopyRecord) -> Result<()> {
+    tx.execute_batch(COPY_SCHEMA)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO copy (id, record) VALUES (1, ?1)",
+        [mark.encode_to_vec()],
+    )?;
+    Ok(())
+}
 
 /// On the target of a move, created with the first tenant copied here.
 const IMPORTED_SCHEMA: &str = "
@@ -3137,6 +3184,9 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     let position = read_process_position(conn)?;
     if position > 0 {
         f(Record::ProcessPosition(ProcessPositionRecord { position }))?;
+    }
+    if let Some(mark) = read_copy(conn)? {
+        f(Record::Copy(mark))?;
     }
     for w in read_workers(conn)? {
         f(Record::Worker(w))?;

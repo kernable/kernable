@@ -143,4 +143,4 @@ or let the kernel drop deployments that no membership names, with none of their 
 
 ## Previews and replay checks
 
-A preview of a new deployment on a copy of production, or a check that replays recent commands on a copy before switching, needs a copy of the store: [export and import](./export) one. kernable Cloud makes such copies for you.
+A preview of a new deployment on a copy of production, or a check that replays recent commands on a copy before switching, needs a copy of the store. Make a **masked copy** for it ([Previews and copies](./previews)): the events and the history without the personal data, which reads as `null` as after an erasure, from the backup, a store or an export. kernable Cloud makes such copies for you.

@@ -57,6 +57,7 @@ const SIDEBAR = [
       { text: "Deployments and rollbacks", link: "/how-to/deployments" },
       { text: "Back up and restore", link: "/how-to/backup" },
       { text: "Move a kernel", link: "/how-to/export" },
+      { text: "Previews and copies", link: "/how-to/previews" },
       { text: "Run a standby", link: "/how-to/standby" },
       { text: "Run a listener on several machines", link: "/how-to/instances" },
       { text: "Run a node from one file", link: "/how-to/node" },

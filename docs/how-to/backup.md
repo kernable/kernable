@@ -152,6 +152,8 @@ kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
 
 It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. If the backup ends earlier, or holds nothing between the end of that generation and the base of the next, it says so in a `note:` line and restores up to there. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key of that generation's time: each generation's values are sealed with one vault key, which `kernable backup list` names, and a restore with another is refused before it writes anything. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore).
 
+**A copy for a preview.** `--mask-vault --vault-key <new file>` restores a masked copy instead: the backup's events without its vault values, so personal data reads as `null`, with a new vault of its own; the source's vault key is not needed ([Previews and copies](./previews)).
+
 **Erasures after the point.** Before it writes anything, a restore to a point lists the erasures the backup holds after it:
 
 ```text

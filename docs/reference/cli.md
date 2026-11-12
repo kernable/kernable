@@ -293,6 +293,24 @@ kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vau
 
 Fills new, empty stores from an export, then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key. The whole file is checked before anything is written: a copy cut short or changed, or a wrong vault key, is refused. Without `--kernel-pub`, the store is checked with the kernel keys the export names; compare them with the source's `.pub` files, or name those. Keep the source's kernel `.pub` files for verify after the kernel runs on the new stores.
 
+### `kernable import`
+
+```text
+kernable import <file> --mask-vault --vault-key <new file> [--with-files] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+```
+
+Makes a masked copy (a preview) from an export: its records without a vault value, so every personal value reads as null, as after an erasure. `--vault-key` names a file that does not exist: the copy's own, new vault key, which it writes, with a new, empty vault at `--vault-store`. Files are left out unless `--with-files`. The store is marked as a copy: a kernel runs it only alone, with that vault key.
+
+## Previews
+
+### `kernable copy`
+
+```text
+kernable copy <source store> --mask-vault --vault-key <new file> [--files-from <d>] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+```
+
+Makes a masked copy (a preview) of a store on this machine, read in one consistent view, also while its kernel runs (SQLite): as import `--mask-vault`, without an export file and without the source's vault or its key. `--files-from` copies the files of that data store too. Then checks the copy like verify.
+
 ## Run a node
 
 ### `kernable node`
@@ -356,10 +374,10 @@ Reads the newest generation all through, without writing a store: every object o
 ### `kernable restore`
 
 ```text
-kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--mask-vault [--with-files]] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
 ```
 
-Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key of that generation's time; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names. To a point, it first lists the erasures committed after it: restored as it was, they did not happen yet. To apply them again, `--reapply-erasures <file>` (or yes when asked) writes them to `<file>` for kernable erasures apply. With `--signer` and `--signer-key`, it reads an s3:// target through a signer, as backup list, plan and check do.
+Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key of that generation's time; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names. To a point, it first lists the erasures committed after it: restored as it was, they did not happen yet. To apply them again, `--reapply-erasures <file>` (or yes when asked) writes them to `<file>` for kernable erasures apply. With `--signer` and `--signer-key`, it reads an s3:// target through a signer, as backup list, plan and check do. With `--mask-vault`, and `--vault-key` naming a file that does not exist yet, it makes a masked copy (a preview) as import `--mask-vault` does, with the files only if `--with-files`; no vault key of the source is needed.
 
 ### `kernable backup signer`
 

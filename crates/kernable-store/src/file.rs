@@ -44,7 +44,7 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, CheckpointRecord, Command, CommandResult, Committed, CommittedRecord,
-        DataChangedRecord, EnqueuedRecord, Event, FormatRecord, GlobalKeyRecord, Grant,
+        CopyRecord, DataChangedRecord, EnqueuedRecord, Event, FormatRecord, GlobalKeyRecord, Grant,
         ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent, PartitionMap,
         ProcessPositionRecord, ProcessRecord, Rejected, RejectedRecord, ReplicatedRecord,
         ReplicationHeadRecord, RevocationRecord, Signature, StreamIndex, TenantImportedRecord,
@@ -116,6 +116,8 @@ struct State {
     process_states: BTreeMap<String, ProcessRecord>,
     /// How far the process engine has handled the log.
     process_position: u64,
+    /// The newest mark of a masked copy, if the store is one.
+    copy: Option<CopyRecord>,
     revocations: Vec<RevocationRecord>,
     grants: BTreeMap<String, Grant>,
     /// What each stream holds, from its latest commit with an index; none if it holds nothing.
@@ -280,6 +282,7 @@ impl State {
                 self.memberships.insert(service.unwrap_or_default(), m);
             }
             Record::ProcessPosition(p) => self.process_position = p.position,
+            Record::Copy(c) => self.copy = Some(c),
             Record::Process(p) if p.version == 0 => {
                 self.process_states.insert(p.name.clone(), p);
             }
@@ -403,6 +406,7 @@ impl State {
             | Record::Membership(_)
             | Record::Process(_)
             | Record::ProcessPosition(_)
+            | Record::Copy(_)
             | Record::Grant(_)
             | Record::PartitionMap(_)
             | Record::GlobalKey(_)
@@ -1125,6 +1129,14 @@ impl Store for FileStore {
             &mut self.inner(),
             Record::ProcessPosition(ProcessPositionRecord { position }),
         )
+    }
+
+    fn copy_mark(&self) -> Result<Option<CopyRecord>> {
+        Ok(self.inner().state.copy.clone())
+    }
+
+    fn mark_copy(&self, mark: &CopyRecord) -> Result<()> {
+        append(&mut self.inner(), Record::Copy(mark.clone()))
     }
 
     fn save_process(&self, process: &ProcessRecord) -> Result<()> {

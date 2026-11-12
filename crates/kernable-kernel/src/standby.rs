@@ -66,6 +66,9 @@ impl Stores {
     }
 
     fn open_on(config: &Config, store: Box<dyn Store>) -> Result<Self, BoxError> {
+        if store.copy_mark()?.is_some() {
+            return Err("the store is a masked copy (a preview): it is never a standby".into());
+        }
         store.keep_record_log(true)?;
         let vault = match &config.vault {
             Some(v) => Some(Vault::open(&v.store, &*config.read_secret(&v.key)?)?),
@@ -559,6 +562,13 @@ async fn follow_once(
     loop {
         match next(&mut inbound).await? {
             Some(follow_response::Msg::Records(batch)) => {
+                crate::copy::refuse_marked(
+                    batch
+                        .records
+                        .iter()
+                        .filter_map(|r| r.record.as_ref().and_then(|l| l.record.as_ref())),
+                    "the primary",
+                )?;
                 standby.primary_head.store(batch.head, SeqCst);
                 let stores = standby.stores();
                 let keys = follow.primary_kernel_keys.clone();
@@ -646,6 +656,10 @@ async fn take_image(
     loop {
         match next(inbound).await? {
             Some(follow_response::Msg::Image(batch)) => {
+                crate::copy::refuse_marked(
+                    batch.records.iter().filter_map(|l| l.record.as_ref()),
+                    "the primary",
+                )?;
                 records += batch.records.len();
                 let stores = standby.stores();
                 let keys = standby.follow.primary_kernel_keys.clone();

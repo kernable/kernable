@@ -283,6 +283,24 @@ Export and import:
                                           the export names; compare them with the source's .pub
                                           files, or name those. Keep the source's kernel .pub files
                                           for verify after the kernel runs on the new stores.
+  kernable import <file> --mask-vault --vault-key <new file> [--with-files] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+                                          Makes a masked copy (a preview) from an export: its
+                                          records without a vault value, so every personal value
+                                          reads as null, as after an erasure. --vault-key names a
+                                          file that does not exist: the copy's own, new vault key,
+                                          which it writes, with a new, empty vault at
+                                          --vault-store. Files are left out unless --with-files.
+                                          The store is marked as a copy: a kernel runs it only
+                                          alone, with that vault key.
+
+Previews:
+  kernable copy <source store> --mask-vault --vault-key <new file> [--files-from <d>] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+                                          Makes a masked copy (a preview) of a store on this
+                                          machine, read in one consistent view, also while its
+                                          kernel runs (SQLite): as import --mask-vault, without an
+                                          export file and without the source's vault or its key.
+                                          --files-from copies the files of that data store too.
+                                          Then checks the copy like verify.
 
 Run a node:
   kernable node <project.toml>            Runs one node of a project: the kernel and, with a
@@ -361,7 +379,7 @@ Continuous backup:
                                           the records chain from the base to the last segment.
                                           Prints the record a restore reaches and how old it is;
                                           exits 1 if the backup does not check out.
-  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--mask-vault [--with-files]] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
                                           Fills new, empty stores from a backup: the newest
                                           generation that begins before --at (UTC, like
                                           2026-11-04T13:40:00Z) or --at-record, its base, then its
@@ -377,6 +395,10 @@ Continuous backup:
                                           asked) writes them to <file> for kernable erasures apply.
                                           With --signer and --signer-key, it reads an s3:// target
                                           through a signer, as backup list, plan and check do.
+                                          With --mask-vault, and --vault-key naming a file that
+                                          does not exist yet, it makes a masked copy (a preview)
+                                          as import --mask-vault does, with the files only if
+                                          --with-files; no vault key of the source is needed.
   kernable backup signer --listen <addr> --to s3://<bucket>/<prefix> --allow <key.pub>[,<key.pub>] [--expires-seconds <s>]
                                           A reference backup signer: answers the signer protocol
                                           over plain HTTP on <addr> with requests presigned with the
@@ -540,6 +562,12 @@ async fn main() -> ExitCode {
         ["export", file, flags @ ..] if !file.starts_with("--") => export_stopped(file, flags),
         ["import", file, flags @ ..] if !file.starts_with("--") => {
             return import(file, flags).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            });
+        }
+        ["copy", from, flags @ ..] if !from.starts_with("--") => {
+            return copy_store(from, flags).unwrap_or_else(|e| {
                 eprintln!("error: {e}");
                 ExitCode::FAILURE
             });
@@ -1603,7 +1631,9 @@ fn backup_plan(to: &str, flags: &[&str]) -> Result<bool> {
 /// `kernable restore <target> [flags]`: lists the erasures after the point and asks whether to
 /// apply them again, fills new, empty stores, then checks the store.
 fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
-    // Every flag takes a value: the backup's go here, the stores' to StoreFlags.
+    let (mask, flags) = mask_flags(flags, "--with-files")?;
+    let flags = flags.as_slice();
+    // Every other flag takes a value: the backup's go here, the stores' to StoreFlags.
     const MINE: [&str; 6] = [
         "--backup-key",
         "--at",
@@ -1626,6 +1656,9 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
     let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
     let target = backup_target(from, &values, None)?;
     let flags = StoreFlags::parse(&rest, true)?;
+    if let Some(mask) = mask {
+        return restore_masked(from, target.as_ref(), &crypt, until, &flags, mask);
+    }
     // Before anything is written: the erasures the point leaves out. The restore is exact by
     // default (before an erasing event, nothing was erased); the operator may apply them again.
     let point = point_of(until);
@@ -1710,6 +1743,195 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
     }
     let report = stores.store.verify(&restored.kernel_keys)?;
     Ok(report_verify(&report))
+}
+
+/// `kernable restore <target> --mask-vault`: a masked copy (a preview) from a backup.
+fn restore_masked(
+    from: &str,
+    target: &dyn backup::target::Target,
+    crypt: &backup::crypt::BackupKey,
+    until: backup::Until,
+    flags: &StoreFlags,
+    mask: kernable_kernel::copy::Mask,
+) -> Result<ExitCode> {
+    let store = kernable_store::open_with(&flags.store, kernable_store::Durability::Normal)?;
+    if !export::empty(store.as_ref()).map_err(boxed)? {
+        return Err("the store holds data already: restore into new, empty stores".into());
+    }
+    let vault = masked_vault(flags)?;
+    let stores = standby::Stores {
+        store,
+        // The backup's vault values stay out; the copy's own vault is apart.
+        vault: None,
+        data: kernable_store::data::open(&flags.data)?,
+        snapshots: kernable_store::snapshots::open("memory:")?,
+    };
+    let kernel_keys = flags
+        .kernel_pubs
+        .iter()
+        .map(|k| key_id_of("--kernel-pub", k))
+        .collect::<Result<Vec<_>>>()?;
+    let restored = backup::restore_masked(target, crypt, &stores, until, &kernel_keys, Some(mask))
+        .map_err(boxed)?;
+    println!(
+        "restored generation {} as a masked copy: base at record {}, up to record {} (taken {})",
+        restored.generation,
+        restored.base,
+        restored.record,
+        config::utc(restored.taken_at)
+    );
+    if let Some(short) = &restored.short {
+        println!("note: {short}");
+    }
+    let source = format!(
+        "backup {from}, generation {}, record {}",
+        restored.generation, restored.record
+    );
+    masked_done(stores.store.as_ref(), &vault, &source, flags)?;
+    let report = stores.store.verify(&restored.kernel_keys)?;
+    Ok(report_verify(&report))
+}
+
+/// Takes `--mask-vault` and `with_files` (flags without a value) out of `flags`.
+fn mask_flags<'a>(
+    flags: &[&'a str],
+    with_files: &str,
+) -> Result<(Option<kernable_kernel::copy::Mask>, Vec<&'a str>)> {
+    let masked = flags.contains(&"--mask-vault");
+    let files = flags.contains(&with_files);
+    if files && !masked {
+        return Err(format!("{with_files} goes with --mask-vault").into());
+    }
+    let rest = flags
+        .iter()
+        .copied()
+        .filter(|f| *f != "--mask-vault" && *f != with_files)
+        .collect();
+    Ok((
+        masked.then_some(kernable_kernel::copy::Mask { with_files: files }),
+        rest,
+    ))
+}
+
+/// The copy's own vault: a new key at `--vault-key`, a new, empty vault at `--vault-store`.
+fn masked_vault(flags: &StoreFlags) -> Result<kernable_store::vault::Vault> {
+    let (store, key) = flags.vault.as_ref().ok_or(
+        "--mask-vault needs --vault-key <new file>: the copy's own vault key, which the copy makes",
+    )?;
+    kernable_kernel::copy::new_vault(store, key).map_err(boxed)
+}
+
+/// Marks the copy and says how to start it.
+fn masked_done(
+    store: &dyn kernable_store::Store,
+    vault: &kernable_store::vault::Vault,
+    source: &str,
+    flags: &StoreFlags,
+) -> Result<()> {
+    let mark = kernable_kernel::copy::mark(store, vault, source).map_err(boxed)?;
+    let (vault_store, vault_key) = flags.vault.clone().unwrap_or_default();
+    println!(
+        "masked copy of {}: no vault value of the source, so its personal values read as null. \
+         Its own vault key is {vault_key} (key ID {}); start it alone with --store {} \
+         --vault-store {vault_store} --vault-key {vault_key} and a new snapshot store",
+        kernable_kernel::copy::describe(&mark),
+        mark.vault_key,
+        flags.store,
+    );
+    Ok(())
+}
+
+/// `kernable copy <source store> --mask-vault [flags]`: a masked copy of a store on this
+/// machine, read in one view, without an export file.
+fn copy_store(from: &str, flags: &[&str]) -> Result<ExitCode> {
+    let (mask, flags) = mask_flags(flags, "--with-files")?;
+    let mut mask = mask.ok_or(
+        "kernable copy makes masked copies only: add --mask-vault (a full copy is kernable export \
+         and import)",
+    )?;
+    if flags.contains(&"--with-files") {
+        return Err("kernable copy takes --files-from <data store>".into());
+    }
+    let (mut files_from, mut rest) = (None, Vec::new());
+    let mut it = flags.iter();
+    while let Some(flag) = it.next() {
+        match *flag {
+            "--files-from" => {
+                files_from = Some(*it.next().ok_or("--files-from needs a value")?);
+            }
+            other => {
+                rest.push(other);
+                if let Some(v) = it.next() {
+                    rest.push(v);
+                }
+            }
+        }
+    }
+    mask.with_files = files_from.is_some();
+    let flags = StoreFlags::parse(&rest, true)?;
+    let source = kernable_store::open_read_only(from)?;
+    let store = kernable_store::open(&flags.store)?;
+    if !export::empty(store.as_ref()).map_err(boxed)? {
+        return Err("the store holds data already: copy into new, empty stores".into());
+    }
+    let vault = masked_vault(&flags)?;
+    let source_data = kernable_store::data::open(files_from.unwrap_or("memory:"))?;
+    let data = kernable_store::data::open(&flags.data)?;
+    let target = export::Target {
+        store: store.as_ref(),
+        vault: None,
+        data: data.as_ref(),
+        mask: Some(mask),
+    };
+    let mut end = None;
+    export::produce(
+        &export::Source {
+            store: source.as_ref(),
+            vault: None,
+            data: source_data.as_ref(),
+            partition: "",
+            masked: true,
+        },
+        &mut |frame| match frame.frame {
+            Some(kernable_core::proto::export_frame::Frame::Batch(batch)) => {
+                export::apply(&target, batch)
+            }
+            Some(kernable_core::proto::export_frame::Frame::End(e)) => {
+                end = Some(e);
+                Ok(())
+            }
+            _ => Ok(()),
+        },
+    )
+    .map_err(boxed)?;
+    let end = end.ok_or("the copy ended early")?;
+    println!(
+        "copied {} records and {} files from {from}",
+        end.records, end.files
+    );
+    masked_done(store.as_ref(), &vault, &format!("store {from}"), &flags)?;
+    let key_ids = kernel_keys_of(&flags, &end.kernel_keys, "the source")?;
+    let report = store.verify(&key_ids)?;
+    Ok(report_verify(&report))
+}
+
+/// The kernel keys to check a copied store with: those named, else those the source names.
+fn kernel_keys_of(flags: &StoreFlags, named: &[String], what: &str) -> Result<Vec<String>> {
+    if !flags.kernel_pubs.is_empty() {
+        return flags
+            .kernel_pubs
+            .iter()
+            .map(|k| key_id_of("--kernel-pub", k))
+            .collect();
+    }
+    if !named.is_empty() {
+        println!(
+            "checked with the kernel keys {what} names: {}; compare them with the source's \
+             kernel .pub files, or name those with --kernel-pub",
+            named.join(", ")
+        );
+    }
+    Ok(named.to_vec())
 }
 
 /// `kernable erasures apply <addr> <key> <file>`: submits each erasing command of the list
@@ -2168,7 +2390,14 @@ fn verify(store: &str, keys: &[&str]) -> Result<ExitCode> {
         .iter()
         .map(|k| Ok(signing::key_id(&signing::read_verifying_key(k)?)))
         .collect::<Result<Vec<_>>>()?;
-    let report = kernable_store::open_read_only(store)?.verify(&key_ids)?;
+    let store = kernable_store::open_read_only(store)?;
+    if let Some(mark) = store.copy_mark()? {
+        println!(
+            "a masked copy (a preview) of {}",
+            kernable_kernel::copy::describe(&mark)
+        );
+    }
+    let report = store.verify(&key_ids)?;
     Ok(report_verify(&report))
 }
 
@@ -2378,6 +2607,7 @@ fn export_stopped(file: &str, flags: &[&str]) -> Result<bool> {
         vault: vault.as_ref(),
         data: data.as_ref(),
         partition: "",
+        masked: false,
     };
     write_export(file, |write| {
         export::produce(&source, &mut |frame| {
@@ -2390,38 +2620,47 @@ fn export_stopped(file: &str, flags: &[&str]) -> Result<bool> {
 
 /// `kernable import <file> [flags]`: fills new, empty stores, then checks the store.
 fn import(file: &str, flags: &[&str]) -> Result<ExitCode> {
-    let flags = StoreFlags::parse(flags, true)?;
+    let (mask, flags) = mask_flags(flags, "--with-files")?;
+    let flags = StoreFlags::parse(&flags, true)?;
     let store = kernable_store::open(&flags.store)?;
-    let vault = flags.open_vault()?;
+    let (vault, masked) = match mask {
+        Some(_) => {
+            if !export::empty(store.as_ref()).map_err(boxed)? {
+                return Err("the store holds data already: import into new, empty stores".into());
+            }
+            (None, Some(masked_vault(&flags)?))
+        }
+        None => (flags.open_vault()?, None),
+    };
     let data = kernable_store::data::open(&flags.data)?;
     let target = export::Target {
         store: store.as_ref(),
         vault: vault.as_ref(),
         data: data.as_ref(),
+        mask,
     };
     let imported = export::import(Path::new(file), &target).map_err(boxed)?;
     let end = &imported.end;
-    println!(
-        "imported {} records, {} vault values and {} files",
-        end.records, end.vault_values, end.files
-    );
-    let key_ids = match flags.kernel_pubs.is_empty() {
-        false => flags
-            .kernel_pubs
-            .iter()
-            .map(|k| key_id_of("--kernel-pub", k))
-            .collect::<Result<Vec<_>>>()?,
-        true => {
-            if !end.kernel_keys.is_empty() {
-                println!(
-                    "checked with the kernel keys the export names: {}; compare them with the \
-                     source's kernel .pub files, or name those with --kernel-pub",
-                    end.kernel_keys.join(", ")
-                );
-            }
-            end.kernel_keys.clone()
+    match &masked {
+        Some(vault) => {
+            println!(
+                "imported {} records and {} files; left out {} vault values",
+                end.records,
+                if mask.is_some_and(|m| m.with_files) {
+                    end.files
+                } else {
+                    0
+                },
+                end.vault_values
+            );
+            masked_done(store.as_ref(), vault, &format!("export {file}"), &flags)?;
         }
-    };
+        None => println!(
+            "imported {} records, {} vault values and {} files",
+            end.records, end.vault_values, end.files
+        ),
+    }
+    let key_ids = kernel_keys_of(&flags, &end.kernel_keys, "the export")?;
     let report = store.verify(&key_ids)?;
     Ok(report_verify(&report))
 }

@@ -438,5 +438,6 @@ pub(crate) fn record_kind(record: &kernable_core::proto::log_record::Record) -> 
         Record::TenantIndex(_) => "a tenant's index",
         Record::Process(_) => "a process",
         Record::ProcessPosition(_) => "the process engine's position",
+        Record::Copy(_) => "the mark of a masked copy",
     }
 }

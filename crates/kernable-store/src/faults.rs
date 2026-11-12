@@ -318,6 +318,14 @@ impl Store for FaultyStore {
         self.inner.process_position()
     }
 
+    fn copy_mark(&self) -> Result<Option<kernable_core::proto::CopyRecord>> {
+        self.inner.copy_mark()
+    }
+
+    fn mark_copy(&self, mark: &kernable_core::proto::CopyRecord) -> Result<()> {
+        self.inner.mark_copy(mark)
+    }
+
     fn save_process_position(&self, position: u64) -> Result<()> {
         self.faults
             .write(|| self.inner.save_process_position(position))

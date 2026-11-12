@@ -353,6 +353,45 @@ fn process_versions_and_states_are_kept(store: &dyn Store) {
     );
 }
 
+/// The mark of a masked copy: the newest is kept, and an image carries it to another store.
+fn a_copy_mark_is_kept_and_carried_by_an_image(store: &dyn Store) {
+    use kernable_core::proto::{CopyRecord, log_record::Record};
+    assert_eq!(store.copy_mark().unwrap(), None);
+    store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+    store
+        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), None, 1)
+        .unwrap();
+    let mark = |n: i64| CopyRecord {
+        copied_at: n,
+        position: 1,
+        source: format!("store {n}"),
+        vault_key: "k".into(),
+    };
+    store.mark_copy(&mark(1)).unwrap();
+    store.mark_copy(&mark(2)).unwrap();
+    assert_eq!(store.copy_mark().unwrap(), Some(mark(2)));
+    let mut records = Vec::new();
+    match store.snapshot(&mut |r| {
+        records.push(r);
+        Ok(())
+    }) {
+        Err(Error::NoRecordLog) => return, // `memory:` makes no image
+        other => other.unwrap(),
+    }
+    assert!(records.contains(&Record::Copy(mark(2))));
+    static TARGETS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = TARGETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (_db, file) = file_store(&format!("copy-mark-target-{n}"));
+    for target in [
+        Box::new(SqliteStore::open_in_memory().unwrap()) as Box<dyn Store>,
+        file,
+    ] {
+        target.apply_image(&records).unwrap();
+        assert_eq!(target.copy_mark().unwrap(), Some(mark(2)));
+        assert_eq!(target.head_position().unwrap(), 1);
+    }
+}
+
 /// The process engine's position, and the streams of one domain that hold something.
 fn the_engine_position_and_a_domain_index_are_kept(store: &dyn Store) {
     assert_eq!(store.process_position().unwrap(), 0);
@@ -1214,6 +1253,7 @@ for_each_backend!(
     memberships_are_replaced_per_service,
     process_versions_and_states_are_kept,
     the_engine_position_and_a_domain_index_are_kept,
+    a_copy_mark_is_kept_and_carried_by_an_image,
     the_newest_grant_per_key_is_kept,
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,

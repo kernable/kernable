@@ -21,6 +21,7 @@ Short guides for tasks you meet once your application runs. They assume you know
 | [Deployments and rollbacks](./deployments) | Versions of your code run side by side, with their own read models, and you can switch back after checking what the newer one left behind. |
 | [Back up and restore](./backup) | You set up backups, or you need to restore. |
 | [Move a kernel with export and import](./export) | You leave a hosted kernel, move to another machine, or change the store backend. |
+| [Previews and copies](./previews) | A preview or a test needs production's history without its personal data: a masked copy. |
 | [Share tenants across kernels](./partitions) | One kernel is not enough for all your tenants: several share them by a signed map. |
 | [Run a standby](./standby) | A second kernel should hold every write and take over, with a witness by itself, when the primary's machine is lost. |
 | [Run a listener on several machines](./instances) | The same read models and reactors run on more than one machine, each with its own copy. |

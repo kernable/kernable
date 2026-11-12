@@ -309,6 +309,12 @@ fn system(kernel: &Kernel) -> Value {
             "scheduled": kernel.queue.scheduled_len(),
         },
         "partition": c.partition.as_ref().map(|p| json!({ "name": p.name, "control": p.control.is_none() })),
+        // A masked copy (a preview): where it was copied from.
+        "copy": kernel.store.copy_mark().ok().flatten().map(|m| json!({
+            "source": m.source,
+            "copiedAt": m.copied_at,
+            "position": m.position,
+        })),
         "limits": {
             "refused": kernel.metrics.refused(),
             "requestsPerSecondPerKey": c.limits.requests_per_second_per_key,

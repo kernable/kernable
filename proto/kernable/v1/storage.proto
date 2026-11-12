@@ -27,7 +27,20 @@ message LogRecord {
     TenantIndexRecord tenant_index = 16;
     ProcessRecord process = 17;
     ProcessPositionRecord process_position = 18;
+    CopyRecord copy = 19;
   }
+}
+
+// The store is a masked copy of another kernel's stores (a preview): made by `kernable copy`,
+// `kernable import --mask-vault` or `kernable restore --mask-vault`, with the source's events
+// and history but none of its vault values. A kernel runs such a store only alone (no standby,
+// pair, partition or backup follower), with the vault key the copy made; nothing restores or
+// replicates it as anything but a copy. The newest record wins.
+message CopyRecord {
+  int64 copied_at = 1;  // ms since epoch
+  uint64 position = 2;  // the last event of the source in the copy
+  string source = 3;    // where it was copied from, for people
+  string vault_key = 4; // the key ID of the copy's own, new vault key
 }
 
 // How far the process engine has handled the log (design/processes.md, "The engine"): after a

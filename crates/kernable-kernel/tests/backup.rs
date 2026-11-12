@@ -837,3 +837,193 @@ async fn a_backup_through_a_signer_falls_behind_while_it_is_away_and_catches_up(
     assert!(error.contains("refused list /: HTTP 403"), "{error}");
     drop(signing);
 }
+
+/// A masked copy (a preview) is restored from a backup without the source's vault key: through
+/// a signer, and with `kernable restore --mask-vault` from a directory. Its events are the
+/// source's, no vault value comes along, a kernel on it reads the source's personal values as
+/// null and keeps its own, and a plain restore of the source still needs the source's key.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_masked_copy_restores_from_a_backup_through_a_signer() {
+    use kernable_kernel::copy::{self, Mask};
+    let env = start_custom("backup-masked", |c, dir| {
+        c.replication.backup = true;
+        with_vault(c, dir);
+    })
+    .await;
+    let writes: VaultWriter = Arc::new(|cmd: &kernable_core::proto::Command| {
+        let email = format!("{}@example.com", cmd.aggregate_id);
+        (vec![vault_value(&cmd.aggregate_id, &email)], String::new())
+    });
+    let (tx, mut vaults) = tokio::sync::mpsc::unbounded_channel();
+    start_worker(
+        env.addr.clone(),
+        TestWorker {
+            writes_vault: Some(writes),
+            vaults: Some(tx),
+            ..TestWorker::honest()
+        },
+    )
+    .await;
+    place(&env, 0, 5).await;
+    while vaults.try_recv().is_ok() {}
+    let s3 = FakeS3::start().await;
+    let (addr, _signing) = start_signer(&s3, None).await;
+    let url = format!("http://{addr}/sign");
+    let to = format!("s3://{BUCKET}/shop/masked");
+    let target = move || -> Box<dyn target::Target> {
+        target::open(&to, Some(Signer::new(&url, key(9)).unwrap())).unwrap()
+    };
+    let mut f = follower(&env, "file:unused");
+    f.target = Arc::from(target());
+    let running = tokio::spawn(backup::run(f));
+    let head = env.kernel_head();
+    let mut reached = false;
+    for _ in 0..600 {
+        let t: Arc<dyn target::Target> = Arc::from(target());
+        if reach_of(t).await.is_ok_and(|r| r >= head) {
+            reached = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(reached, "backed up through the signer");
+    running.abort();
+    let _ = running.await;
+    let dir = env.dir.join("files");
+    let running = tokio::spawn(backup::run(follower(
+        &env,
+        &format!("file:{}", dir.display()),
+    )));
+    backed_up(&env, &format!("file:{}", dir.display())).await;
+    running.abort();
+
+    // Without the source's vault, only a masked restore goes through.
+    let plain = stores(&env, "plain");
+    let crypt = BackupKey::new(&[7; 32]);
+    let t = target();
+    let refused = backup::restore(t.as_ref(), &crypt, &plain, Until::End, &[id(&key(3))])
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("give the vault"), "{refused}");
+    let masked = stores(&env, "masked");
+    let done = tokio::task::spawn_blocking(move || {
+        let t = target();
+        let done = backup::restore_masked(
+            t.as_ref(),
+            &BackupKey::new(&[7; 32]),
+            &masked,
+            Until::End,
+            &[id(&key(3))],
+            Some(Mask::default()),
+        );
+        (done, masked)
+    })
+    .await
+    .unwrap();
+    let (done, masked) = (done.0.unwrap(), done.1);
+    assert!(done.record >= head);
+    let source = kernable_store::open_read_only(&env.store).unwrap();
+    assert_eq!(
+        masked.store.read_all(0, 100).unwrap(),
+        source.read_all(0, 100).unwrap(),
+        "the same events"
+    );
+    let path = env.dir.join("masked");
+    let vault = copy::new_vault(
+        &format!("sqlite:{}", path.join("vault.db").display()),
+        path.join("vault.key").to_str().unwrap(),
+    )
+    .unwrap();
+    copy::mark(masked.store.as_ref(), &vault, "backup").unwrap();
+    assert!(vault.overview(0).unwrap().personal == 0);
+    let store = format!("sqlite:{}", path.join("k.db").display());
+    drop((masked, vault));
+
+    // A kernel on it: the source's values are null, its own are kept.
+    let preview = start_custom("backup-masked-preview", |c, _| {
+        c.store = store;
+        c.vault = Some(kernable_kernel::config::VaultConfig {
+            store: format!("sqlite:{}", path.join("vault.db").display()),
+            key: path.join("vault.key"),
+        });
+    })
+    .await;
+    let writes: VaultWriter =
+        Arc::new(
+            |cmd: &kernable_core::proto::Command| match cmd.command_type.as_str() {
+                "PlaceOrder" => (vec![vault_value("p", "pat@example.com")], String::new()),
+                _ => (Vec::new(), String::new()),
+            },
+        );
+    let (tx, mut vaults) = tokio::sync::mpsc::unbounded_channel();
+    start_worker(
+        preview.addr.clone(),
+        TestWorker {
+            writes_vault: Some(writes),
+            vaults: Some(tx),
+            ..TestWorker::honest()
+        },
+    )
+    .await;
+    let add = signed(command("p1", "AddItem", "o0"), &key(1));
+    assert_eq!(
+        committed_versions(&submit(&preview.addr, add).await.unwrap()),
+        [2]
+    );
+    assert!(
+        vaults.recv().await.unwrap().is_empty(),
+        "o0's email reads as null"
+    );
+    let place = signed(command("p2", "PlaceOrder", "o9"), &key(1));
+    submit(&preview.addr, place).await.unwrap();
+    vaults.recv().await.unwrap();
+    let add = signed(command("p3", "AddItem", "o9"), &key(1));
+    submit(&preview.addr, add).await.unwrap();
+    assert_eq!(
+        vaults.recv().await.unwrap()[0].value,
+        b"\"pat@example.com\""
+    );
+
+    // The command line, from the directory: no source vault key, and the copy says what it is.
+    std::fs::write(env.dir.join("backup.key"), hex(&[7; 32])).unwrap();
+    std::fs::write(env.dir.join("kernel.pub"), id(&key(3))).unwrap();
+    let cli = env.dir.join("cli");
+    std::fs::create_dir_all(&cli).unwrap();
+    let args = [
+        "restore".to_owned(),
+        format!("file:{}", dir.display()),
+        "--backup-key".into(),
+        "backup.key".into(),
+        "--mask-vault".into(),
+        "--store".into(),
+        format!("sqlite:{}", cli.join("k.db").display()),
+        "--vault-store".into(),
+        format!("sqlite:{}", cli.join("vault.db").display()),
+        "--vault-key".into(),
+        cli.join("vault.key").display().to_string(),
+        "--data-store".into(),
+        format!("file:{}", cli.join("data").display()),
+        "--kernel-pub".into(),
+        "kernel.pub".into(),
+    ];
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kernable"))
+        .current_dir(&env.dir)
+        .args(&args)
+        .output()
+        .unwrap();
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{printed}");
+    assert!(printed.contains("as a masked copy"), "{printed}");
+    assert!(printed.contains("masked copy of backup file:"), "{printed}");
+    assert!(printed.lines().any(|l| l == "OK"), "{printed}");
+    let mark = kernable_store::open_read_only(&format!("sqlite:{}", cli.join("k.db").display()))
+        .unwrap()
+        .copy_mark()
+        .unwrap()
+        .unwrap();
+    assert!(mark.position >= 5, "{mark:?}");
+}

@@ -21,6 +21,7 @@ pub mod backup;
 mod cache;
 pub mod config;
 mod connections;
+pub mod copy;
 pub mod crash;
 pub mod demo;
 pub mod deployments;
@@ -362,6 +363,11 @@ impl Kernel {
         let workers = workers::Registry::load(store.workers()?);
         let schemas = store.event_schemas()?.into_iter().collect();
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
+        // A masked copy (a preview) runs alone, with its own vault and snapshots.
+        let copy = copy::check_config(&config, store.as_ref())?;
+        if let Some(mark) = &copy {
+            copy::check_snapshots(mark, snapshots.as_ref())?;
+        }
         let vault = match &config.vault {
             Some(v) => {
                 let key = config.read_secret(&v.key).map_err(|e| match e.kind() {
@@ -371,6 +377,9 @@ impl Kernel {
                     _ => BoxError::from(e),
                 })?;
                 let vault = Vault::open(&v.store, &key)?;
+                if let Some(mark) = &copy {
+                    copy::check_vault(mark, &vault)?;
+                }
                 let sealed = vault.sealed()?;
                 if sealed > kernable_store::vault::MAX_SEALED / 2 {
                     tracing::warn!(
@@ -488,6 +497,12 @@ impl Kernel {
             {
                 tracing::warn!(key = %key_id, error = %e.message(), "stored grant no longer valid");
             }
+        }
+        if let Some(mark) = &copy {
+            tracing::warn!(
+                copy = %copy::describe(mark),
+                "running a masked copy (a preview): the source's personal values read as null"
+            );
         }
         Ok(kernel)
     }

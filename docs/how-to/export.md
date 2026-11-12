@@ -6,7 +6,7 @@
 - **move to another machine**, or **change the store backend** (SQLite to the `file:` log, or back);
 - **hand a copy to someone** who checks it with `kernable verify`, without access to your machines.
 
-For regular backups, see [Back up and restore](./backup); an export is a full copy each time.
+For regular backups, see [Back up and restore](./backup); an export is a full copy each time. For a preview, a copy without the personal data, import with `--mask-vault` ([Previews and copies](./previews)).
 
 ## What an export holds
 

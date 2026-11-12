@@ -52,6 +52,9 @@ pub struct Source<'a> {
     pub data: &'a dyn DataStore,
     /// The kernel's `--partition`, if any.
     pub partition: &'a str,
+    /// Leave the vault values out, also where the store refers to them: for a masked copy
+    /// ([`crate::copy`]), which needs no vault key.
+    pub masked: bool,
 }
 
 /// Calls `f` with the frames of an export of `source`: the header, the batches, and the end
@@ -65,7 +68,7 @@ pub fn produce(
         format: FORMAT,
         created_at: now_ms(),
         partition: source.partition.to_owned(),
-        vault: source.vault.is_some(),
+        vault: source.vault.is_some() && !source.masked,
     })))?;
     let mut end = ExportEnd::default();
     let mut kernel_keys = BTreeSet::new();
@@ -80,6 +83,7 @@ pub fn produce(
         }
         let refs = vault_refs(batch.iter());
         let vault = match source.vault {
+            _ if source.masked => Vec::new(),
             Some(vault) => vault.export_sealed(&refs)?,
             None if refs.is_empty() => Vec::new(),
             None => {
@@ -285,6 +289,9 @@ pub struct Target<'a> {
     pub store: &'a dyn Store,
     pub vault: Option<&'a Vault>,
     pub data: &'a dyn DataStore,
+    /// A masked copy ([`crate::copy`]): the export's vault values are left out, and `vault`
+    /// is the copy's own, new one.
+    pub mask: Option<crate::copy::Mask>,
 }
 
 /// What [`import`] took.
@@ -303,6 +310,13 @@ pub fn import(file: &Path, target: &Target) -> Result<Imported, BoxError> {
         return Err("the store holds data already: import into new, empty stores".into());
     }
     read(file, &mut |batch| {
+        if target.mask.is_some() {
+            return Ok(());
+        }
+        crate::copy::refuse_marked(
+            batch.records.iter().filter_map(|l| l.record.as_ref()),
+            "the export",
+        )?;
         if let Some(row) = batch.vault.first() {
             let vault = target.vault.ok_or(
                 "the export holds vault values: give the vault and the source's vault key",
@@ -311,17 +325,24 @@ pub fn import(file: &Path, target: &Target) -> Result<Imported, BoxError> {
         }
         Ok(())
     })?;
-    read(file, &mut |batch| {
-        for file in &batch.files {
-            target.data.restore(&file.path, &file.data)?;
-        }
-        if let Some(vault) = target.vault {
-            vault.import(&batch.vault)?;
-        }
-        let records: Vec<Record> = batch.records.into_iter().filter_map(|l| l.record).collect();
-        target.store.apply_image(&records)?;
-        Ok(())
-    })
+    read(file, &mut |batch| apply(target, batch))
+}
+
+/// Applies one batch of an export to `target`: its files, its vault values (none for a masked
+/// copy), its records.
+pub fn apply(target: &Target, mut batch: ImageBatch) -> Result<(), BoxError> {
+    if let Some(mask) = &target.mask {
+        mask.image(&mut batch);
+    }
+    for file in &batch.files {
+        target.data.restore(&file.path, &file.data)?;
+    }
+    if let Some(vault) = target.vault {
+        vault.import(&batch.vault)?;
+    }
+    let records: Vec<Record> = batch.records.into_iter().filter_map(|l| l.record).collect();
+    target.store.apply_image(&records)?;
+    Ok(())
 }
 
 /// Reads the export in `file` and calls `f` with each batch; returns its header and end once
@@ -422,6 +443,7 @@ impl ExportService for Api {
                 vault: kernel.vault.as_ref(),
                 data: kernel.data.as_ref(),
                 partition: &partition,
+                masked: false,
             };
             let sent = produce(&source, &mut |frame| {
                 tx.blocking_send(Ok(frame))

@@ -39,9 +39,9 @@ use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    AggregateIndex, Command, CommandResult, EnqueuedRecord, Event, Grant, ListenerRecord,
-    MembershipRecord, NewEvent, PartitionMap, ProcessRecord, Rejected, ReplicatedRecord,
-    RevocationRecord, Signature, StreamIndex, TenantImportedRecord, WorkerRecord,
+    AggregateIndex, Command, CommandResult, CopyRecord, EnqueuedRecord, Event, Grant,
+    ListenerRecord, MembershipRecord, NewEvent, PartitionMap, ProcessRecord, Rejected,
+    ReplicatedRecord, RevocationRecord, Signature, StreamIndex, TenantImportedRecord, WorkerRecord,
     log_record::Record,
 };
 
@@ -491,6 +491,13 @@ pub trait Store: Send + Sync {
 
     /// Keeps how far the process engine has handled the log.
     fn save_process_position(&self, position: u64) -> Result<()>;
+
+    /// The mark of a masked copy ([`CopyRecord`]): the store holds another kernel's history
+    /// without its vault values. `None` for every other store.
+    fn copy_mark(&self) -> Result<Option<CopyRecord>>;
+
+    /// Marks the store as a masked copy; a newer mark replaces the one before. Never undone.
+    fn mark_copy(&self, mark: &CopyRecord) -> Result<()>;
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>>;

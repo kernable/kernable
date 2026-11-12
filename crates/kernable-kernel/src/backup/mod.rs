@@ -1197,6 +1197,20 @@ pub fn restore(
     until: Until,
     kernel_keys: &[String],
 ) -> Result<Restored, BoxError> {
+    restore_masked(target, crypt, stores, until, kernel_keys, None)
+}
+
+/// [`restore`], or with `mask` a masked copy ([`crate::copy`]): the backup's vault values are
+/// left out (`stores` has no vault; the copy's own comes after), and its files unless asked.
+/// Without `mask`, a backup of a masked copy is refused.
+pub fn restore_masked(
+    target: &dyn Target,
+    crypt: &BackupKey,
+    stores: &standby::Stores,
+    until: Until,
+    kernel_keys: &[String],
+    mask: Option<crate::copy::Mask>,
+) -> Result<Restored, BoxError> {
     if !crate::export::empty(stores.store.as_ref())? {
         return Err("the store holds data already: restore into new, empty stores".into());
     }
@@ -1205,6 +1219,7 @@ pub fn restore(
     let base = generation.base.clone().expect("usable");
     // The generation's vault values open with one vault key: the one it names.
     match &stores.vault {
+        _ if mask.is_some() => {}
         Some(vault) if !base.vault_key.is_empty() && vault.key_id() != base.vault_key => {
             return Err(format!(
                 "generation {} holds vault values sealed with vault key {}; the vault key given is {}: give the source's vault key of that time",
@@ -1251,7 +1266,14 @@ pub fn restore(
         let plain = crypt.open(&part, &target.get(&part)?)?;
         let mut rest = plain.as_slice();
         while !rest.is_empty() {
-            let batch = ImageBatch::decode_length_delimited(&mut rest)?;
+            let mut batch = ImageBatch::decode_length_delimited(&mut rest)?;
+            match &mask {
+                Some(mask) => mask.image(&mut batch),
+                None => crate::copy::refuse_marked(
+                    batch.records.iter().filter_map(|l| l.record.as_ref()),
+                    "the backup",
+                )?,
+            }
             let keys = learn(&mut batch.records.iter().filter_map(|l| l.record.as_ref()))?;
             check_vault(stores, &batch.vault)?;
             standby::apply_image(stores, batch, &keys)?;
@@ -1296,6 +1318,16 @@ pub fn restore(
                 if batch.records.is_empty() {
                     break 'segments;
                 }
+            }
+            let records = || {
+                batch
+                    .records
+                    .iter()
+                    .filter_map(|r| r.record.as_ref().and_then(|l| l.record.as_ref()))
+            };
+            match &mask {
+                Some(mask) => mask.records(&mut batch),
+                None => crate::copy::refuse_marked(records(), "the backup")?,
             }
             let keys = learn(
                 &mut batch

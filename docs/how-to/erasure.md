@@ -39,7 +39,7 @@ The subject is a string, such as the customer ID `c1`. An erasure deletes every 
    When it is committed, the kernel has deleted the person's values from the vault, in every stream and domain of its tenant, and dropped the snapshots of every stream that used them. Unique keys built from the person's data are free again ([personal keys](../concepts/uniqueness#personal-keys)). Secrets have no subject and are not affected. The kernel stores the erasing event first and erases right after, before it answers; after a crash in between, it finishes the erasure when it starts, before it serves anything. So the log records every erasure that happened, and a rejected erasing command erases nothing.
 3. **Read models** forget the person as they process the event; rebuilt, they read `null` where the values were.
 4. **Delete the person's files** if a reactor does not do it for you.
-5. **Backups** of the vault still hold the values until they expire ([Back up and restore](./backup#backups-and-erasure)).
+5. **Backups** of the vault still hold the values until they expire ([Back up and restore](./backup#backups-and-erasure)). Masked copies for previews never held them ([Previews and copies](./previews)).
 6. **Confirm** to the person.
 
 ## Check that it worked
