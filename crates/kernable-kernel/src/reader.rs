@@ -83,6 +83,9 @@ pub(crate) struct Reader {
     heard_at: AtomicI64,
     /// A channel to the writer for what it forwards, per address.
     channels: Mutex<HashMap<String, Channel>>,
+    /// Reactors connected here, waiting (they act on the writer only), by name: how many
+    /// connections. They count as connected for `/ready`.
+    reactors: Mutex<HashMap<String, usize>>,
 }
 
 impl Reader {
@@ -117,6 +120,7 @@ impl Reader {
             connected: AtomicBool::new(false),
             heard_at: AtomicI64::new(0),
             channels: Mutex::default(),
+            reactors: Mutex::default(),
         })
     }
 
@@ -190,6 +194,28 @@ impl Reader {
                 self.writer()
             ),
         })
+    }
+
+    /// Whether a reactor named `name` (its base name, without a deployment) waits here.
+    pub(crate) fn reactor_waits(&self, name: &str) -> bool {
+        self.reactors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .is_some_and(|n| *n > 0)
+    }
+
+    fn reactor_count(&self, name: &str, connected: bool) {
+        let mut reactors = self.reactors.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = reactors.entry(name.to_owned()).or_default();
+        if connected {
+            *n += 1;
+        } else {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                reactors.remove(name);
+            }
+        }
     }
 
     /// A channel to the writer it follows now, for what it forwards.
@@ -630,6 +656,18 @@ pub(crate) async fn waiting_reactor(
         .map(|r| r.writer())
         .unwrap_or_default();
     tracing::info!(listener = %name, %writer, "a reactor connected to this reader: it waits here, the writer's reactors act");
+    // Counted as connected for `/ready` while it waits, until it leaves.
+    struct Waits<'a>(&'a Reader, String);
+    impl Drop for Waits<'_> {
+        fn drop(&mut self) {
+            self.0.reactor_count(&self.1, false);
+        }
+    }
+    let base = crate::deployments::base(name).to_owned();
+    let _waits = kernel.reader.as_deref().map(|r| {
+        r.reactor_count(&base, true);
+        Waits(r, base)
+    });
     out.send(Ok(kernable_core::proto::ListenerDelivery {
         msg: Some(kernable_core::proto::listener_delivery::Msg::Waiting(
             kernable_core::proto::Waiting {

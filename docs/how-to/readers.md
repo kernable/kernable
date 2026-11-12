@@ -98,7 +98,7 @@ KERNABLE_INSTANCE=reader-1 KERNABLE_URL=https://10.0.0.5:7233 node app.ts
 
 | Where | What |
 |---|---|
-| `/ready` on a reader | 200 once it follows its writer (heard from it within 5 s: the writer sends a beat every second) and its read models and middlewares caught up; 503 with why otherwise |
+| `/ready` on a reader | 200 once it follows its writer (heard from it within 5 s: the writer sends a beat every second) and every listener and middleware its writer's memberships list has connected here and caught up (a reactor counts once it connected and waits); 503 with why otherwise, so no query reaches a reader before the code that answers it |
 | `/health` on a reader | `ok: a reader of <writer>, following, <n> records behind` |
 | `kernable_reader_following`, `kernable_reader_lag`, `kernable_reader_applied`, `kernable_reader_silent_ms` | on the reader |
 | `kernable_readers`, `kernable_readers_lag_max` | on the writer |

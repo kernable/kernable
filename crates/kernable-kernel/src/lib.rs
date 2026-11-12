@@ -900,13 +900,22 @@ impl Kernel {
         if self.draining.load(SeqCst) {
             return Err("shutting down".into());
         }
-        // A reader: following its writer, and its own listeners caught up. Workers and
-        // reactors are the writer's.
+        // A reader: following its writer, and every listener and middleware its writer lists
+        // connected here and caught up, so no query reaches it before the code that answers
+        // it. Workers are the writer's; a reactor counts once it connected here, where it
+        // waits (reactors act on the writer only).
         if let Some(reader) = &self.reader {
             if let Some(why) = reader.unready() {
                 return Err(why);
             }
-            return match self.listeners.behind(&[]).as_slice() {
+            let (_, listed) = self.memberships.listed();
+            let behind: Vec<String> = self
+                .listeners
+                .behind(&listed)
+                .into_iter()
+                .filter(|name| !reader.reactor_waits(deployments::base(name)))
+                .collect();
+            return match behind.as_slice() {
                 [] => Ok(()),
                 behind => Err(format!("waiting for listeners: {}", behind.join(", "))),
             };

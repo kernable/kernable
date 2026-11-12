@@ -415,6 +415,48 @@ async fn no_reactor_or_worker_runs_on_a_reader() {
     );
 }
 
+/// A reader reports ready only once every listener and middleware its writer lists connected
+/// here, so the ingress sends it no query before the code that answers it. A reactor counts once
+/// it connected here and waits (reactors act on the writer only).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_is_ready_only_once_the_listed_read_models_and_reactors_connected() {
+    let dir = Dir::new("readers-ready");
+    let writer_config = writer_config(&dir.0, false);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    apply(
+        &writer_config.listen,
+        membership("shop", &[], &["orders-count", "mailer"], &[]),
+    )
+    .await
+    .unwrap();
+    let reader_config = reader_config(&dir.0, "reader", 21, &writer_config.listen);
+    let reader = start_reader(&reader_config).await;
+
+    let waiting_for = |name: &str| {
+        reader
+            .readiness()
+            .err()
+            .is_some_and(|why| why.contains(name))
+    };
+    until(
+        "the reader waits for the listed read model and reactor",
+        || waiting_for("orders-count") && waiting_for("mailer"),
+    )
+    .await;
+
+    // The reactor connects and waits: it counts, the read model still missing.
+    let (seen, _got) = mpsc::unbounded_channel();
+    let _reactor = listener(&reader_config.listen, "mailer", true, seen);
+    until("the waiting reactor counts", || !waiting_for("mailer")).await;
+    assert!(waiting_for("orders-count"), "{:?}", reader.readiness());
+
+    // The read model connects and catches up: ready.
+    let _model = read_model(&reader_config.listen, "orders-count").await;
+    until("the reader is ready", || reader.readiness().is_ok()).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_reader_starts_from_the_backup_and_catches_up_from_the_writer() {
     let dir = Dir::new("readers-backup");
