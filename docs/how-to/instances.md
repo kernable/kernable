@@ -2,6 +2,8 @@
 
 Read this when the same read models and reactors run on more than one machine, for example on both machines of a [standby pair](./standby): each machine keeps its own copy of every read model, so a lost machine takes nothing with it.
 
+Beside a [reader](./readers) (a read-only copy) it is different: each reader is a kernel of its own, so the read models connected to it form their own group there, and its reactors and workers wait (the writer's act). Name the instance all the same, so the same code runs everywhere.
+
 Several processes then run one listener under one name, each as an **instance**. The kernel treats them as one listener:
 
 - **It is through an event once one instance has handled it.** A settling submit, a listener of a later order and `/ready` wait for the fastest instance, not for all of them. An instance that is gone, or rebuilding from the first event, holds nothing back.

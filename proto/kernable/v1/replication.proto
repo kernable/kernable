@@ -69,6 +69,12 @@ message FollowHello {
   // A kernel of a pair: the newest witness generation it has seen (absent: none), so the
   // primary learns it too.
   WitnessGeneration witness_generation = 7;
+  // A reader (a read-only copy, `kernable start --reader`), not a standby: its key needs
+  // `replicate` for `*` and the kernel `--readers on`. Any number follow at once; none counts
+  // for `--replication sync` and none is ever promoted. It gets only records the kernel may tell
+  // (with a standby, those the standby holds), and, while nothing new comes, a RecordBatch
+  // without records every second whose `head` says how far it may follow.
+  bool reader = 8;
 }
 
 message RecordPoint {

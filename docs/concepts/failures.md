@@ -25,6 +25,8 @@ kernable is built so that a crash anywhere loses nothing and does nothing twice.
 | The **disk** is full or fails a write | The request fails with `INTERNAL` and nothing half-written stays behind; a write that failed after it took effect is found and answered with its stored result. A command whose events cannot be stored waits in the queue and runs again after a pause that doubles each time, up to 5 s, until the disk takes it. If the file log cannot sync, it refuses every further write until a restart. | free space or fix the disk; resubmit with the same command ID. A file write that failed is signed anew (the same signature counts as tried: it may have taken effect) |
 | A **second kernel** opens the same store | It is refused: the file log and SQLite (`<store>.lock`) admit one writer. `kernable verify` and the inspection commands still read a running kernel's store. | run one kernel per store |
 | The **primary's machine** is lost (with a [standby](../how-to/standby)) | The standby holds every write anyone was told of: commits, listener acknowledgements, files. Writes the primary had not confirmed yet are gone, and nobody heard of them. With a witness, the standby takes over by itself within about 4 s. | point your processes at the new primary; without a witness, `kernable promote` it first |
+| A **reader** loses its writer | It answers queries from its copy and refuses commands with `UNAVAILABLE` `writer_away`; `/ready` answers 503 after 5 s. It follows whichever kernel is the primary once one answers, also after a failover. | nothing; the SDKs try again, and with several addresses turn to another copy |
+| A **reader** is behind | A query whose `min_position` it does not hold waits, then gets `UNAVAILABLE` `reader_behind`; a command sent to it is answered only once it holds the events. Nothing on the writer waits. | find out why (`kernable_reader_lag`); give clients several addresses |
 | The **standby** is away (`--replication sync`) | With a witness, the primary commits alone after `--standby-timeout-ms`. Without one, its writes wait: commands stay queued, submits time out, `/ready` answers 503. Back, the standby catches up. | bring it back; without a witness, or restart the primary without `--replication sync` (see [Run a standby](../how-to/standby)) |
 | A file is **damaged or changed** | Damage in the middle refuses to open; a consistent rewrite shows in `kernable verify`. | restore from a backup |
 | A process speaks an **old protocol** or meets a **newer event version** | It is refused with a message, or stops at that event. | update it |
@@ -64,7 +66,8 @@ The tests prove it, with both stores, in three ways, and check the same invarian
 
 ## What it does not
 
-- **One standby.** A pair has one primary and one standby; a second standby comes later.
+- **One standby.** A pair has one primary and one standby; a second standby comes later. [Readers](../how-to/readers) add read-only copies, any number, but none of them is ever promoted.
+- **One writer.** Readers spread queries, not writes: every command still runs on the writer.
 - Side effects of reactors (emails, calls to other systems) happen at least once. Make them idempotent, or record them as commands first.
 
 ## Finding the cause

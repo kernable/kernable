@@ -567,6 +567,7 @@ The outcome of a command; exactly one of `committed`, `rejected` or `accepted` i
 |---|---|---|---|
 | `events` | repeated `Event` | 1 | may be empty: a command can produce no events |
 | `settled` |  `bool` | 2 | True once every listener that counts has acknowledged the events (WAIT_SETTLED only). |
+| `position` |  `uint64` | 3 | The global position of the last event, 0 without events: a query with it as `min_position` sees the command's events on any copy (the writer or a reader). A reader answers a submit only once its own copy holds it. |
 
 ### Accepted
 
@@ -903,6 +904,7 @@ connections; it counts (see Membership) also while disconnected.
 | `instance` |  `string` | 11 | One of several processes that run this listener under one name, e.g. a read model on each node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`, unique in the group. Empty: the only one, and a second connection of the name is refused. The group counts for readiness, settling and the order of delivery as one listener: through an event once one instance acknowledged it, ready once one instance has caught up. Every instance of a group must agree on `single`. |
 | `single` |  `bool` | 12 | With `instance`: one instance at a time gets events, so a reactor's side effects happen once; the others get `Waiting`, and the first of them takes over after the group's position when the active one leaves. Without: every instance gets every event, from its own position, and queries and checks go to any instance that has reached what they need; such an instance cannot park events. Not for live listeners. |
 | `deployment` |  `string` | 13 | The code version (deployment) of the process: 1 to 128 letters, digits, `-`, `_` and `.`; empty: none. A listener that answers queries or checks requests (a read model or a middleware) is registered per name and deployment (shown as `name@deployment`): a new deployment's read model has its own position, starts from the first event when the name already has a position under another deployment, and runs beside the old one; its service's membership decides which deployment counts. Any other listener (a reactor) keeps one registration and position across deployments, so a new deployment goes on where the old one stopped and nothing is handled twice. |
+| `reactor` |  `bool` | 14 | The listener acts outward (a reactor, as the SDKs register one): a reader, a read-only copy of the writer, delivers nothing to it and answers `Waiting` with `reader_of`, so the same code runs beside a reader and only the writer's reactors act. |
 
 ### Waiting
 
@@ -913,6 +915,7 @@ deliveries when it takes over.
 |---|---|---|---|
 | `active` |  `string` | 1 | the active instance |
 | `serving` |  `string` | 2 | Set when a reactor waits for its own deployment to serve its service: the deployment that serves it now. A reactor (one registration for all deployments) acts only for the serving deployment, so a deployment warming up beside it sends nothing outward before its switch. |
+| `reader_of` |  `string` | 3 | Set by a reader (a read-only copy) for a reactor: reactors run on the writer only, at this address. The listener stays connected and gets nothing here. |
 
 ### Ready
 
@@ -1050,6 +1053,7 @@ Proof of key possession, for workers and listeners.
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `session_id` |  `string` | 1 | currently the worker_id of the Register message |
+| `reader_of` |  `string` | 2 | Set by a reader (a read-only copy): commands run on the writer at this address, so this worker gets none here. The session stays open and idle. |
 
 ### Execute
 

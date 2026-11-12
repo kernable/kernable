@@ -244,6 +244,7 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
         signing::verify(&sig, &signing::result_message(&cmd, version, &events))?;
         let stored = store.commit(&cmd.command_id, version, &events, &sig, None, 0)?;
         let outcome = Outcome::Committed(kernable_core::proto::Committed {
+            position: stored.last().map_or(0, |e| e.global_position),
             events: stored,
             settled: false,
         });

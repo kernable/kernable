@@ -10,6 +10,8 @@ What you get:
 
 Two ways to run it: [a pair with a witness](#a-pair-with-a-witness) (recommended), or [a fixed primary and standby](#a-fixed-primary-and-standby) that you promote by hand.
 
+A standby is the failover partner; it serves nothing. To spread queries over more machines, add [read-only copies](./readers) beside it: any number of readers follow whichever kernel is the primary, and nothing waits for them. Give both kernels `--readers on` then.
+
 ## How it works
 
 The primary sends the standby every record of its store, in order and chained by a hash, with the vault values and files they refer to. The standby checks every record before it writes it, and acknowledges what is on its disk. With `--replication sync` the primary waits for that acknowledgement before it tells anyone of a write. Design: `design/replication.md`.
@@ -204,6 +206,19 @@ Every write waits for one more round trip: to the standby, its own flush, and ba
 | file log, `normal` | 3,711/s | 2,535/s | 12,833/s | 7,253/s |
 
 With `full` durability on one disk, the two kernels' flushes queue behind each other; the row with a `normal` standby shows the cost without that, which is closer to two machines with their own disks. Measure on your own machines before you size them.
+
+## Standby or reader
+
+| | Standby | Reader |
+|---|---|---|
+| Started with | `--follow <primary>` (or `--witness`) | `--reader <writer>[,<writer>]` |
+| Writes wait for it | with `--replication sync` | never |
+| Gets | every record | what the writer may tell (what the standby holds) |
+| Serves | nothing until promoted | queries, subscriptions, read models; forwards commands |
+| Promoted | yes, by hand or by the witness | never |
+| How many | one | any number |
+
+See [Run read-only copies](./readers).
 
 ## A standby is not a backup
 

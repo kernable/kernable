@@ -313,6 +313,7 @@ fn committed(log: &Log, id: &str, positions: &[u64]) -> CommandResult {
                 .map(|p| log.event(*p).unwrap().clone())
                 .collect(),
             settled: true,
+            position: positions.last().copied().unwrap_or(0),
         })),
     }
 }

@@ -240,6 +240,7 @@ impl State {
                 self.complete(
                     &command_id,
                     Outcome::Committed(Committed {
+                        position: stored.last().map_or(0, |e| e.global_position),
                         events: stored,
                         settled: false,
                     }),
@@ -1467,10 +1468,14 @@ impl Store for FileStore {
             return Err(Error::NoRecordLog);
         }
         let (records, head) = replication::chained(&inner.log.head, records)?;
-        for record in records {
+        // A seal keeps the kernel's own writes out (a reader's); the records it follows apply.
+        let sealed = std::mem::replace(&mut inner.sealed, false);
+        let applied = records.into_iter().try_for_each(|record| {
             inner.state.admissible(record)?;
-            append(&mut inner, record.clone())?;
-        }
+            append(&mut inner, record.clone())
+        });
+        inner.sealed = sealed;
+        applied?;
         if inner.log.head != head {
             return Err(diverged(format!(
                 "record {} hashes differently here",

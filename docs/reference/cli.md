@@ -15,7 +15,7 @@ kernable start --root <root.pub> [<flag> <value>]...
 kernable start --dev [<flag> <value>]...
 ```
 
-Runs the kernel in the foreground, trusting grants signed by the root keys; the flags are listed by `kernable start --help`. On Unix, SIGHUP reads the kernel key again. SIGTERM or SIGINT refuses new requests, lets running ones finish and stops; SIGTERM to a pair's primary hands its role to the standby in sync first. SIGUSR1 stops the same way, never handing over (a new binary takes the stores over). `--dev` is for trying kernable out: it creates `root.key`, `kernel.key`, `vault.key`, `app.key` and `app.grant` in the working directory if missing (app may do everything) and defaults to `--root root.pub`, `--vault-key vault.key`, `--ui-listen 127.0.0.1:7234` and `--durability` normal. Exit 2 on invalid flags; exit 1 if the kernel stops on an error.
+Runs the kernel in the foreground, trusting grants signed by the root keys; the flags are listed by `kernable start --help`. On Unix, SIGHUP reads the kernel key again. SIGTERM or SIGINT refuses new requests, lets running ones finish and stops; SIGTERM to a pair's primary hands its role to the standby in sync first. SIGUSR1 stops the same way, never handing over (a new binary takes the stores over). `--dev` is for trying kernable out: it creates `root.key`, `kernel.key`, `vault.key`, `app.key` and `app.grant` in the working directory if missing (app may do everything) and defaults to `--root root.pub`, `--vault-key vault.key`, `--ui-listen 127.0.0.1:7234` and `--durability` normal. With `--reader <writer>[,<writer>]` it runs as a reader, a read-only copy of the writer (started with `--readers` on): it catches up, from `--from-backup` if it is new, then answers queries from its copy and forwards commands. Exit 2 on invalid flags; exit 1 if the kernel stops on an error (a reader whose copy no longer continues its writer's log: start it again).
 
 ### `kernable demo`
 
@@ -97,7 +97,7 @@ Moves `<tenant>` with its data to partition `<to>`: applies a map that marks it 
 kernable promote <addr> <key>
 ```
 
-Makes the standby at `<addr>` (started with `--follow`) the primary: it stops following and serves. `<key>` needs a grant for manage on `*`. Promote only a standby whose primary is gone: a primary that still runs is fenced (it tells nobody of a write from then on), and rejoins as a standby of the new one. Without a witness, a standby the primary never told it is in sync is refused: the primary may have told writes it lacks.
+Makes the standby at `<addr>` (started with `--follow`) the primary: it stops following and serves. A reader is never promoted. `<key>` needs a grant for manage on `*`. Promote only a standby whose primary is gone: a primary that still runs is fenced (it tells nobody of a write from then on), and rejoins as a standby of the new one. Without a witness, a standby the primary never told it is in sync is refused: the primary may have told writes it lacks.
 
 ### `kernable switchover`
 

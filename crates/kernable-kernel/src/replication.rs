@@ -561,6 +561,98 @@ impl Drop for BackupConnected<'_> {
     }
 }
 
+/// The readers that follow this kernel (`--readers on`): any number, each acknowledging what
+/// it applied. Nothing waits for them.
+#[derive(Default)]
+pub(crate) struct Readers {
+    state: Mutex<ReadersState>,
+}
+
+#[derive(Default)]
+struct ReadersState {
+    next: u64,
+    /// Connection -> (the reader's key, the record it acknowledged last, since when, ms).
+    connected: std::collections::BTreeMap<u64, (String, u64, i64)>,
+}
+
+/// One connected reader, as [`Readers::connected`] lists it.
+pub(crate) struct ReaderView {
+    pub(crate) key: String,
+    pub(crate) acked: u64,
+    pub(crate) since: i64,
+}
+
+impl Readers {
+    fn state(&self) -> MutexGuard<'_, ReadersState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn connect(&self, key_id: &str, from: u64) -> ReaderConnected<'_> {
+        let mut state = self.state();
+        state.next += 1;
+        let id = state.next;
+        state
+            .connected
+            .insert(id, (key_id.to_owned(), from, crate::now_ms()));
+        ReaderConnected(self, id)
+    }
+
+    fn ack(&self, id: u64, seq: u64) {
+        if let Some(r) = self.state().connected.get_mut(&id) {
+            r.1 = r.1.max(seq);
+        }
+    }
+
+    /// The readers connected now, in the order they connected.
+    pub(crate) fn connected(&self) -> Vec<ReaderView> {
+        self.state()
+            .connected
+            .values()
+            .map(|(key, acked, since)| ReaderView {
+                key: key.clone(),
+                acked: *acked,
+                since: *since,
+            })
+            .collect()
+    }
+
+    /// The oldest record a connected reader acknowledged; `None` without readers.
+    fn oldest(&self) -> Option<u64> {
+        self.state().connected.values().map(|r| r.1).min()
+    }
+}
+
+struct ReaderConnected<'a>(&'a Readers, u64);
+
+impl Drop for ReaderConnected<'_> {
+    fn drop(&mut self) {
+        if let Some((key, ..)) = self.0.state().connected.remove(&self.1) {
+            tracing::info!(reader = %key, "a reader disconnected");
+        }
+    }
+}
+
+/// The newest record this kernel may tell a reader of: with a standby that writes wait for,
+/// the newest one the standby holds (a reader never holds what a failover could lose); alone,
+/// its head.
+pub(crate) fn told(kernel: &Kernel) -> u64 {
+    let head = kernel.store.record_head().map_or(0, |h| h.seq);
+    match &kernel.replication {
+        Some(p) => {
+            let state = p.state();
+            if state.catching_up || state.alone_now() {
+                head
+            } else {
+                head.min(state.acked)
+            }
+        }
+        None => head,
+    }
+}
+
+/// How often a reader hears where the writer stands while nothing new comes.
+const BEAT: Duration = Duration::from_secs(1);
+
 /// Records SQLite keeps for a backup follower that is away, beyond what the standby needs: once
 /// it is further behind, it takes a full image again (a new generation of the backup).
 const BACKUP_RETAIN: u64 = 1_000_000;
@@ -580,6 +672,11 @@ fn prune_point(kernel: &Kernel) -> Option<u64> {
                 .acked()
                 .max(head.saturating_sub(BACKUP_RETAIN)),
         );
+    }
+    // A slow reader holds the log as a backup follower does, a million records at most; one
+    // further behind takes an image (or restarts from its backup).
+    if let Some(oldest) = kernel.readers.oldest() {
+        keep = keep.min(oldest.max(head.saturating_sub(BACKUP_RETAIN)));
     }
     keep.checked_sub(RETAIN).filter(|&p| p > 0)
 }
@@ -604,6 +701,14 @@ impl ReplicationService for Api {
         &self,
         request: Request<Streaming<FollowRequest>>,
     ) -> Result<Response<Self::FollowStream>, Status> {
+        // A reader keeps no followers: they follow the writer (its standby turns to the next
+        // address on `not_primary`).
+        if let Some(reader) = &self.0.reader {
+            return Err(Status::unavailable(format!(
+                "not_primary: this kernel is a reader of {}; follow the writer",
+                reader.writer()
+            )));
+        }
         let (out, rx) = mpsc::channel(4);
         let kernel = Arc::clone(&self.0);
         let metadata = request.metadata().clone();
@@ -621,9 +726,10 @@ impl ReplicationService for Api {
         &self,
         _request: Request<PromoteRequest>,
     ) -> Result<Response<PromoteResult>, Status> {
-        Err(Status::failed_precondition(
-            "this kernel is a primary already",
-        ))
+        Err(Status::failed_precondition(match &self.0.reader {
+            Some(_) => "this kernel is a reader, a read-only copy: readers are never promoted",
+            None => "this kernel is a primary already",
+        }))
     }
 
     async fn switchover(
@@ -631,6 +737,11 @@ impl ReplicationService for Api {
         request: Request<SwitchoverRequest>,
     ) -> Result<Response<SwitchoverResult>, Status> {
         let kernel = &self.0;
+        if kernel.reader.is_some() {
+            return Err(Status::failed_precondition(
+                "this kernel is a reader: ask the writer to switch over",
+            ));
+        }
         let metadata = request.metadata().clone();
         let req = request.into_inner();
         protocol(req.protocol)?;
@@ -704,15 +815,22 @@ async fn run(
     };
     protocol(hello.protocol)?;
     let backup = hello.backup;
-    let primary = match (backup, kernel.replication.clone()) {
-        (true, _) if !kernel.config().replication.backup => {
+    let reader = hello.reader && !backup;
+    let primary = match (backup, reader, kernel.replication.clone()) {
+        (true, _, _) if !kernel.config().replication.backup => {
             return Err(Status::failed_precondition(
                 "this kernel runs without --backup on: it keeps no backup follower",
             ));
         }
-        (true, _) => None,
-        (false, Some(primary)) => Some(primary),
-        (false, None) => {
+        (true, _, _) => None,
+        (false, true, _) if !kernel.config().replication.readers => {
+            return Err(Status::failed_precondition(
+                "this kernel runs without --readers on: it keeps no readers",
+            ));
+        }
+        (false, true, _) => None,
+        (false, false, Some(primary)) => Some(primary),
+        (false, false, None) => {
             return Err(Status::failed_precondition(
                 "this kernel runs without --replication sync: it keeps no standby",
             ));
@@ -770,9 +888,17 @@ async fn run(
     let _backup = backup
         .then(|| kernel.backup.connect(&hello.key_id))
         .transpose()?;
-    let acked = |kernel: &Kernel| match &primary {
-        Some(p) => p.acked_seq(),
-        None => kernel.backup.acked(),
+    let as_reader = reader.then(|| kernel.readers.connect(&hello.key_id, hello.seq));
+    let reader_id = as_reader.as_ref().map(|r| r.1);
+    let ack_reader = |kernel: &Kernel, seq: u64| {
+        if let Some(id) = reader_id {
+            kernel.readers.ack(id, seq);
+        }
+    };
+    let acked = |kernel: &Kernel| match (&primary, reader_id) {
+        (Some(p), _) => p.acked_seq(),
+        (None, Some(id)) => kernel.readers.state().connected.get(&id).map_or(0, |r| r.1),
+        (None, None) => kernel.backup.acked(),
     };
 
     // Where the standby stands against this log.
@@ -818,6 +944,8 @@ async fn run(
     }
     if backup {
         tracing::info!(key = %hello.key_id, from = hello.seq, mode = ?mode, "a backup follower follows");
+    } else if reader {
+        tracing::info!(reader = %hello.key_id, from = hello.seq, mode = ?mode, "a reader follows");
     } else {
         tracing::info!(standby = %hello.key_id, from = hello.seq, mode = ?mode, "a standby follows");
     }
@@ -838,13 +966,16 @@ async fn run(
         FollowMode::Follow => {
             match &primary {
                 Some(p) => p.ack(hello.seq, head.seq),
+                None if reader => ack_reader(&kernel, hello.seq),
                 None => kernel.backup.ack(hello.seq),
             }
             hello.seq
         }
-        FollowMode::Image => send_image(&kernel, out, backup).await?,
+        FollowMode::Image => send_image(&kernel, out, backup, reader).await?,
         _ => return Ok(()),
     };
+    // A reader hears at once how far it may follow: so it knows when it caught up.
+    let (mut beat_at, mut beat_head) = (Instant::now(), u64::MAX);
 
     let mut tick = tokio::time::interval(TICK);
     let mut pruned = 0;
@@ -887,13 +1018,17 @@ async fn run(
                 }
             }
         }
-        if handed_over() {
+        if handed_over()
+            || (primary.is_none() && kernel.replication.as_ref().is_some_and(|p| p.handed_over()))
+        {
             return Err(Status::unavailable(
                 "the primary handed its role over: ask the witness who serves now",
             ));
         }
-        if sent < acked(&kernel) + AHEAD {
-            let records = kernel
+        // A reader gets only what this kernel may tell.
+        let limit = if reader { told(&kernel) } else { u64::MAX };
+        if sent < acked(&kernel) + AHEAD && sent < limit {
+            let mut records = kernel
                 .store
                 .records_after(sent, BATCH)
                 .map_err(internal)?
@@ -902,12 +1037,17 @@ async fn run(
                         "the primary no longer keeps the records the standby needs; it takes an image",
                     )
                 })?;
+            records.retain(|r| r.seq <= limit);
             if !records.is_empty() {
                 let records = within_bytes(records);
                 sent = records.last().map_or(sent, |r| r.seq);
                 let inner: Vec<&Record> = records.iter().filter_map(inner).collect();
                 let (vault, files) = attachments(&kernel, inner.into_iter(), backup)?;
-                let head = kernel.store.record_head().map_err(internal)?.seq;
+                let head = if reader {
+                    limit
+                } else {
+                    kernel.store.record_head().map_err(internal)?.seq
+                };
                 send(
                     out,
                     follow_response::Msg::Records(RecordBatch {
@@ -919,8 +1059,20 @@ async fn run(
                 )
                 .await?;
                 crate::crash::point("replication.sent");
+                (beat_at, beat_head) = (Instant::now(), head);
                 continue;
             }
+        }
+        if reader && (limit != beat_head || beat_at.elapsed() >= BEAT) {
+            (beat_at, beat_head) = (Instant::now(), limit);
+            send(
+                out,
+                follow_response::Msg::Records(RecordBatch {
+                    head: limit,
+                    ..Default::default()
+                }),
+            )
+            .await?;
         }
         tokio::select! {
             message = next(inbound) => match message? {
@@ -948,6 +1100,7 @@ async fn run(
                     let head = kernel.store.record_head().map_err(internal)?.seq;
                     match &primary {
                         Some(p) => p.ack(seq, head),
+                        None if reader => ack_reader(&kernel, seq),
                         None => kernel.backup.ack(seq),
                     }
                     // What the standby holds is never to be taken back (design/rewind.md):
@@ -986,7 +1139,7 @@ async fn run(
                 None => return Ok(()),
                 Some(_) => return Err(Status::invalid_argument("unexpected message")),
             },
-            () = wrote(primary.as_deref()) => {}
+            () = wrote(primary.as_deref(), reader.then_some(&*kernel)) => {}
             Ok(()) = changes.changed() => {
                 // A revoked key, or a grant without replicate (backup): it follows no longer.
                 if !allowed(&kernel) {
@@ -1000,12 +1153,13 @@ async fn run(
     }
 }
 
-/// Resolves when the primary wrote records for its standby; never for a backup follower, which
-/// looks every tick.
-async fn wrote(primary: Option<&Primary>) {
-    match primary {
-        Some(p) => p.wrote.notified().await,
-        None => std::future::pending().await,
+/// Resolves when the primary wrote records for its standby, or for a reader when events were
+/// told; never for a backup follower, which looks every tick (as a reader does, for the rest).
+async fn wrote(primary: Option<&Primary>, reader: Option<&Kernel>) {
+    match (primary, reader) {
+        (Some(p), _) => p.wrote.notified().await,
+        (None, Some(kernel)) => kernel.appended.notified().await,
+        (None, None) => std::future::pending().await,
     }
 }
 
@@ -1102,7 +1256,12 @@ pub(crate) fn vault_refs<'a>(records: impl Iterator<Item = &'a Record>) -> Vec<S
 
 /// Sends a full image: the store's records, with the vault rows they refer to, then every file
 /// of the data store, then where the image stands. Returns that record's sequence number.
-async fn send_image(kernel: &Arc<Kernel>, out: &Outbox, sealed: bool) -> Result<u64, Status> {
+async fn send_image(
+    kernel: &Arc<Kernel>,
+    out: &Outbox,
+    sealed: bool,
+    reader: bool,
+) -> Result<u64, Status> {
     let (tx, mut rx) = mpsc::channel::<ImageBatch>(4);
     let k = Arc::clone(kernel);
     let reading = tokio::task::spawn_blocking(move || -> Result<Head, Status> {
@@ -1169,7 +1328,16 @@ async fn send_image(kernel: &Arc<Kernel>, out: &Outbox, sealed: bool) -> Result<
         send(out, follow_response::Msg::Image(batch)).await?;
     }
     let head = reading.await.map_err(internal)??;
-    tracing::info!(record = head.seq, "sent the standby a full image");
+    // A reader's image ends only once this kernel may tell all of it (its standby holds it).
+    while reader && told(kernel) < head.seq {
+        if kernel.replication.as_ref().is_some_and(|p| p.handed_over()) {
+            return Err(Status::unavailable(
+                "the primary handed its role over: ask the other kernel",
+            ));
+        }
+        tokio::time::sleep(TICK).await;
+    }
+    tracing::info!(record = head.seq, "sent a full image");
     send(
         out,
         follow_response::Msg::ImageEnd(ImageEnd {

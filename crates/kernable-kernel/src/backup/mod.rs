@@ -552,6 +552,7 @@ async fn follow_once(
     let (tx, rx) = mpsc::channel(16);
     let say = |msg| FollowRequest { msg: Some(msg) };
     tx.send(say(follow_request::Msg::Hello(FollowHello {
+        reader: false,
         key_id: signing::key_id(&follower.key.verifying_key()),
         seq: from.seq,
         hash: from.hash.clone(),

@@ -556,6 +556,10 @@ message Committed {
   repeated Event events = 1; // may be empty: a command can produce no events
   // True once every listener that counts has acknowledged the events (WAIT_SETTLED only).
   bool settled = 2;
+  // The global position of the last event, 0 without events: a query with it as
+  // `min_position` sees the command's events on any copy (the writer or a reader). A reader
+  // answers a submit only once its own copy holds it.
+  uint64 position = 3;
 }
 
 message Accepted {}
@@ -929,6 +933,10 @@ message Hello {
   // registration and position across deployments, so a new deployment goes on where the old
   // one stopped and nothing is handled twice.
   string deployment = 13;
+  // The listener acts outward (a reactor, as the SDKs register one): a reader, a read-only copy
+  // of the writer, delivers nothing to it and answers `Waiting` with `reader_of`, so the same
+  // code runs beside a reader and only the writer's reactors act.
+  bool reactor = 14;
 }
 
 // Another instance of the same `single` group is active; this one gets `Ready` and its
@@ -939,6 +947,9 @@ message Waiting {
   // serves it now. A reactor (one registration for all deployments) acts only for the serving
   // deployment, so a deployment warming up beside it sends nothing outward before its switch.
   string serving = 2;
+  // Set by a reader (a read-only copy) for a reactor: reactors run on the writer only, at this
+  // address. The listener stays connected and gets nothing here.
+  string reader_of = 3;
 }
 
 // The kernel accepted the listener; deliveries follow.
@@ -1083,6 +1094,9 @@ message ChallengeResponse {
 
 message Registered {
   string session_id = 1; // currently the worker_id of the Register message
+  // Set by a reader (a read-only copy): commands run on the writer at this address, so this
+  // worker gets none here. The session stays open and idle.
+  string reader_of = 2;
 }
 
 // A command for the worker to run. Answer with a Result or a Rejection of the same `lease_id`

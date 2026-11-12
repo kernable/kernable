@@ -277,6 +277,9 @@ impl From<PathBuf> for Options {
 pub(crate) struct Channels {
     all: Vec<Channel>,
     current: std::sync::atomic::AtomicUsize,
+    /// The newest position this client's own commands committed at on these kernels (one
+    /// partition): its queries wait for it, on whichever copy answers (read your writes).
+    seen: std::sync::atomic::AtomicU64,
 }
 
 /// What a client knows of the partitions: the map, read once (and again after a
@@ -410,6 +413,7 @@ impl Client {
                 let channels = Arc::new(Channels {
                     all,
                     current: Default::default(),
+                    seen: Default::default(),
                 });
                 cached.insert(addresses, Arc::clone(&channels));
                 channels
@@ -703,6 +707,7 @@ impl Kernable {
         let channels = Arc::new(Channels {
             all,
             current: Default::default(),
+            seen: Default::default(),
         });
         let service = options
             .service
@@ -1080,11 +1085,19 @@ impl Kernable {
             .routed(&tenant, |client| {
                 let request = request.clone();
                 async move {
-                    client
+                    let result = client
                         .call_with(timeout, request, true, |channel, r| async move {
                             CommandServiceClient::new(channel).submit(r).await
                         })
-                        .await
+                        .await?;
+                    if let Some(command_result::Outcome::Committed(c)) = &result.outcome {
+                        let last = c.events.last().map_or(0, |e| e.global_position);
+                        client
+                            .channels
+                            .seen
+                            .fetch_max(c.position.max(last), std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(result)
                 }
             })
             .await?)
@@ -1131,13 +1144,25 @@ impl Kernable {
             self.caught_up_everywhere(&request, timeout).await?;
             request.issued_at = issued_now();
         }
-        request.client_sig = Some(self.client.sign(&signing::query_message(&request)));
-        request.listener = handling();
+        let listener = handling();
         let tenant = request.tenant_id.clone();
         let res = self
             .client
             .routed(&tenant, |client| {
-                let request = request.clone();
+                let mut request = request.clone();
+                // Read your writes, on whichever copy answers: the query waits for this client's
+                // own newest command. Not from a handler, which must not wait behind its own
+                // listener.
+                if listener.is_empty() {
+                    request.min_position = request.min_position.max(
+                        client
+                            .channels
+                            .seen
+                            .load(std::sync::atomic::Ordering::SeqCst),
+                    );
+                }
+                request.client_sig = Some(client.sign(&signing::query_message(&request)));
+                request.listener = listener.clone();
                 async move {
                     client
                         .call_with(timeout, request, true, |channel, r| async move {

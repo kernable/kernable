@@ -137,7 +137,8 @@ export type WireWait = "WAIT_SETTLED" | "WAIT_COMMITTED" | "WAIT_ACCEPTED";
 export interface WireCommandResult {
   command_id: string;
   outcome: "committed" | "rejected" | "accepted";
-  committed?: { events: WireEvent[]; settled: boolean } | null;
+  /** `position`: the last event's global position (0 without events). */
+  committed?: { events: WireEvent[]; settled: boolean; position?: number } | null;
   rejected?: WireRejected | null;
 }
 
@@ -151,7 +152,8 @@ export interface WireSubscribeRequest {
 /** One message from the kernel on a worker session; exactly one field is set. */
 export interface KernelMessage {
   challenge?: { nonce: Buffer } | null;
-  registered?: { session_id: string } | null;
+  /** `reader_of`: set by a reader (a read-only copy): commands run on the writer at this address. */
+  registered?: { session_id: string; reader_of?: string } | null;
   execute?: {
     lease_id: string;
     command: WireCommand;
@@ -239,7 +241,8 @@ export interface ListenerDelivery {
   challenge?: { nonce: Buffer } | null;
   ready?: { after_position: number; head_position: number } | null;
   /** Instead of `ready`, while another instance of a single group is active. */
-  waiting?: { active: string; serving?: string } | null;
+  /** `reader_of`: set by a reader (a read-only copy) for a reactor: reactors act on the writer. */
+  waiting?: { active: string; serving?: string; reader_of?: string } | null;
   batch?: { events: WireEvent[]; up_to: number; vault: WireVaultValue[]; retries?: WireEvent[] } | null;
   query?: { call_id: string; query: WireQueryRequest } | null;
   check?: {
@@ -282,6 +285,8 @@ export type ListenerMessage =
         single: boolean;
         /** The process's code version; empty: none. See `Hello.deployment`. */
         deployment: string;
+        /** A reactor: a reader (a read-only copy) lets it wait. See `Hello.reactor`. */
+        reactor: boolean;
       };
     }
   | { challenge_response: { sig: Buffer } }
@@ -419,6 +424,13 @@ export interface Clients {
   processAct(req: WireProcessActing): Promise<{ changed: boolean }>;
   /** The partition map the kernel holds; `null` if it serves every tenant (no `--partition`). */
   map(timeoutMs?: number): Promise<WirePartitionMap | null>;
+  /**
+   * The newest position a command of this client committed at, on these kernels (one
+   * partition): its queries wait for it, on whichever copy answers (read your writes).
+   */
+  seen(): number;
+  /** Notes that a command of this client committed at `position`. */
+  saw(position: number): void;
   close(): void;
 }
 
@@ -668,6 +680,8 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
   }));
   type Target = (typeof targets)[number];
   let current = 0;
+  // The newest position this client's own commands committed at (see `Clients.seen`).
+  let seen = 0;
   // Turns to the next address, unless another call did so since `from`.
   const next = (from: number) => {
     if (targets.length > 1 && current === from) current = (from + 1) % targets.length;
@@ -758,6 +772,10 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
         if (code === grpc.status.NOT_FOUND || code === grpc.status.UNIMPLEMENTED) return null;
         throw err;
       }
+    },
+    seen: () => seen,
+    saw: (position) => {
+      if (position > seen) seen = position;
     },
     close: () => {
       for (const t of targets) for (const client of Object.values(t)) client.close();

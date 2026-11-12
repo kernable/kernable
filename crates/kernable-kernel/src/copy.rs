@@ -123,8 +123,12 @@ pub fn check_config(config: &Config, store: &dyn Store) -> Result<Option<CopyRec
         return Ok(None);
     };
     let r = &config.replication;
-    let role = if r.follow.is_some() {
+    let role = if r.reader {
+        Some("--reader")
+    } else if r.follow.is_some() {
         Some("--follow")
+    } else if r.readers {
+        Some("--readers on")
     } else if r.pair.is_some() {
         Some("--witness")
     } else if r.sync {

@@ -367,6 +367,8 @@ struct Settings {
 struct ListenerInner {
     domain: Domain,
     name: String,
+    /// Defined as a reactor ([`Domain::reactor`]): a reader (a read-only copy) lets it wait.
+    reactor: bool,
     settings: Mutex<Settings>,
     /// Qualified event type or `Domain.*` -> handler and whether it is raw.
     handlers: RwLock<HashMap<String, (EventHandler, bool)>>,
@@ -445,6 +447,7 @@ impl Listener {
             inner: Arc::new(ListenerInner {
                 domain: domain.clone(),
                 name: name.to_owned(),
+                reactor: single,
                 settings: Mutex::new(Settings {
                     order,
                     start,
@@ -1256,6 +1259,7 @@ impl ListenerHandle {
             instance,
             single,
             deployment: client.deployment.clone(),
+            reactor: self.inner.listener.inner.reactor,
         };
         tx.send(msg(Reply::Hello(hello))).await?;
         let (at, channel) = client.channel();
@@ -1303,7 +1307,12 @@ impl ListenerHandle {
                     // Another instance runs the group, or (a reactor) another deployment
                     // serves: this one is ready to take over.
                     client.log.info(&what, || {
-                        if w.serving.is_empty() {
+                        if !w.reader_of.is_empty() {
+                            format!(
+                                "waiting: this kernel is a reader; reactors act on the writer ({})",
+                                w.reader_of
+                            )
+                        } else if w.serving.is_empty() {
                             format!("waiting: instance {} is active", w.active)
                         } else {
                             format!(

@@ -49,8 +49,13 @@ Run the kernel:
                                           app.grant in the working directory if missing (app may do
                                           everything) and defaults to --root root.pub, --vault-key
                                           vault.key, --ui-listen 127.0.0.1:7234 and --durability
-                                          normal. Exit 2 on invalid flags; exit 1 if the kernel
-                                          stops on an error.
+                                          normal. With --reader <writer>[,<writer>] it runs as a
+                                          reader, a read-only copy of the writer (started with
+                                          --readers on): it catches up, from --from-backup if it
+                                          is new, then answers queries from its copy and forwards
+                                          commands. Exit 2 on invalid flags; exit 1 if the kernel
+                                          stops on an error (a reader whose copy no longer
+                                          continues its writer's log: start it again).
   kernable demo [--ui-listen <addr>]      Runs kernable for presentations: a kernel on a new store
                                           in a temporary directory, with a small bank built in,
                                           shown step by step on the Stage at http://<addr>/demo
@@ -117,7 +122,8 @@ Keys and trust:
                                           requests are answered UNAVAILABLE. Run it again to finish
                                           a move it did not. <key> needs manage on *.
   kernable promote <addr> <key>           Makes the standby at <addr> (started with --follow) the
-                                          primary: it stops following and serves. <key> needs a
+                                          primary: it stops following and serves. A reader is
+                                          never promoted. <key> needs a
                                           grant for manage on *. Promote only a standby whose
                                           primary is gone: a primary that still runs is fenced (it
                                           tells nobody of a write from then on), and rejoins as a

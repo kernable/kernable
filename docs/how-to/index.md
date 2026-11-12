@@ -24,6 +24,7 @@ Short guides for tasks you meet once your application runs. They assume you know
 | [Previews and copies](./previews) | A preview or a test needs production's history without its personal data: a masked copy. |
 | [Share tenants across kernels](./partitions) | One kernel is not enough for all your tenants: several share them by a signed map. |
 | [Run a standby](./standby) | A second kernel should hold every write and take over, with a witness by itself, when the primary's machine is lost. |
+| [Run read-only copies](./readers) | Queries and reads should spread over more machines, each with its own copy of the store and of your code, while one writer takes the commands. |
 | [Run a listener on several machines](./instances) | The same read models and reactors run on more than one machine, each with its own copy. |
 | [Run a node from one file](./node) | One file says what runs on a machine: the kernel and its backup follower, started again when they exit or the file changes. |
 | [Run kernable on your own servers](./self-host) | From a bare Linux machine to a node that starts with it: install, a user, keys, the node's file, systemd, the firewall. |

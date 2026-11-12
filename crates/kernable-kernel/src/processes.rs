@@ -181,6 +181,21 @@ impl Processes {
 
     /// Takes a process record of the control partition: a version this kernel lacks, or a
     /// state that differs from the one it holds.
+    /// A reader takes a process record its writer stored, in memory (for its UI): its engine
+    /// runs on the writer.
+    pub(crate) fn replicated(&self, record: ProcessRecord) {
+        let _changing = self.changing();
+        let mut entry = self.get(&record.name).unwrap_or_default();
+        if record.version == 0 {
+            entry.removed = record.removed;
+            entry.acting = record.acting.clone();
+        } else if !entry.versions.iter().any(|v| v.version == record.version) {
+            entry.versions.push(record.clone());
+            entry.versions.sort_by_key(|v| v.version);
+        }
+        self.set(&record.name, entry);
+    }
+
     pub(crate) fn take(&self, kernel: &Kernel, record: ProcessRecord) -> Result<(), Status> {
         let _changing = self.changing();
         let mut entry = self.get(&record.name).unwrap_or_default();

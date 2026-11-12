@@ -242,7 +242,15 @@ impl Worker {
                         .await?;
                     continue;
                 }
-                Some(Out::Registered(_)) => {
+                Some(Out::Registered(r)) => {
+                    if !r.reader_of.is_empty() {
+                        client.log.info("worker", || {
+                            format!(
+                                "connected to a reader: commands run on the writer ({}); this worker gets none here",
+                                r.reader_of
+                            )
+                        });
+                    }
                     if self.inner.connects.fetch_add(1, Ordering::SeqCst) > 0 {
                         client.log.info("worker", || "connected again".into());
                     } else if self.inner.announce.load(Ordering::SeqCst) {

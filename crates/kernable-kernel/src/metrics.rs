@@ -255,6 +255,52 @@ pub(crate) fn render(kernel: &Kernel) -> String {
             vec![(String::new(), primary.catching_up() as u64)],
         );
     }
+    if kernel.config().replication.readers {
+        let head = kernel.store.record_head().map_or(0, |h| h.seq);
+        let readers = kernel.readers.connected();
+        metric(
+            "kernable_readers",
+            "Readers (read-only copies) following this kernel now (--readers on).",
+            vec![(String::new(), readers.len() as u64)],
+        );
+        metric(
+            "kernable_readers_lag_max",
+            "Records the furthest behind of the connected readers lacks of this kernel's record log (0 without readers).",
+            vec![(
+                String::new(),
+                readers
+                    .iter()
+                    .map(|r| head.saturating_sub(r.acked))
+                    .max()
+                    .unwrap_or(0),
+            )],
+        );
+    }
+    if let Some(reader) = &kernel.reader {
+        metric(
+            "kernable_reader_following",
+            "On a reader: 1 while it follows its writer (connected, and heard from it within 5 s).",
+            vec![(String::new(), reader.following() as u64)],
+        );
+        metric(
+            "kernable_reader_applied",
+            "On a reader: the newest record of its writer's log it holds.",
+            vec![(String::new(), reader.applied())],
+        );
+        metric(
+            "kernable_reader_lag",
+            "On a reader: records it is behind what its writer may tell, as last heard.",
+            vec![(String::new(), reader.lag())],
+        );
+        metric(
+            "kernable_reader_silent_ms",
+            "On a reader: milliseconds since its writer last sent anything (it sends at least every second).",
+            vec![(
+                String::new(),
+                reader.silent_ms().map_or(u64::MAX, |ms| ms as u64),
+            )],
+        );
+    }
     let limits = &kernel.config().limits;
     metric(
         "kernable_store_bytes",
@@ -277,9 +323,21 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     out
 }
 
-/// What a standby serves at `GET /metrics`: it has no kernel to render.
-pub(crate) fn render_standby(applied: u64, primary_head: u64) -> String {
+/// What a standby, or a reader catching up, serves at `GET /metrics`: it has no kernel to
+/// render yet.
+pub(crate) fn render_standby(applied: u64, primary_head: u64, reader: bool) -> String {
     let mut out = String::new();
+    if reader {
+        let _ = write!(
+            out,
+            "# HELP kernable_reader_following On a reader: 0 while it catches up.\n# TYPE kernable_reader_following gauge\nkernable_reader_following 0\n\
+             # HELP kernable_reader_applied On a reader: the newest record of its writer's log it holds.\n# TYPE kernable_reader_applied gauge\nkernable_reader_applied {applied}\n\
+             # HELP kernable_reader_lag On a reader: records it is behind what its writer may tell, as last heard.\n# TYPE kernable_reader_lag gauge\nkernable_reader_lag {}\n\
+             # HELP kernable_ready 0 on a reader catching up.\n# TYPE kernable_ready gauge\nkernable_ready 0\n",
+            primary_head.saturating_sub(applied)
+        );
+        return out;
+    }
     let mut metric = |name: &str, kind: &str, help: &str, value: u64| {
         let _ = writeln!(
             out,
@@ -322,7 +380,25 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
             render(kernel).as_bytes(),
         )
     } else if request.starts_with(b"GET /health ") {
-        reply("200 OK", "text/plain", b"ok\n")
+        match &kernel.reader {
+            // A reader's process runs; how it stands, for whoever looks.
+            Some(r) => reply(
+                "200 OK",
+                "text/plain",
+                format!(
+                    "ok: a reader of {}, {}, {} records behind\n",
+                    r.writer(),
+                    if r.following() {
+                        "following"
+                    } else {
+                        "away from its writer"
+                    },
+                    r.lag()
+                )
+                .as_bytes(),
+            ),
+            None => reply("200 OK", "text/plain", b"ok\n"),
+        }
     } else if let Some(rest) = request.strip_prefix(b"GET /ready?deployment=".as_slice()) {
         // How far a deployment is from taking over: 200 once it could.
         let end = rest.iter().position(|b| *b == b' ').unwrap_or(rest.len());

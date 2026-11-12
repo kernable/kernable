@@ -252,6 +252,33 @@ pub(crate) struct Switching {
 /// For `Apply` after its age was checked, and for the
 /// memberships a partition takes from the control partition, which are older (forced: the
 /// control partition decided).
+/// A reader takes a membership its writer applied (and checked): its listeners count as it
+/// says, a reactor of the deployment that serves now would start here.
+pub(crate) fn replicated(kernel: &Kernel, m: Membership) {
+    let before = kernel
+        .memberships
+        .all
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&m.service)
+        .cloned();
+    if before.as_ref().is_some_and(|b| b.issued_at > m.issued_at) {
+        return;
+    }
+    if before.as_ref().map_or("", |b| b.deployment.as_str()) != m.deployment {
+        let head = kernel.store.head_position().unwrap_or(0);
+        kernel
+            .memberships
+            .switched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(m.service.clone(), head);
+    }
+    kernel.memberships.set(m.clone());
+    kernel.listeners.apply(&m);
+    kernel.listeners.progress.notify_waiters();
+}
+
 pub(crate) fn take(
     kernel: &Arc<Kernel>,
     m: Membership,

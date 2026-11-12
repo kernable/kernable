@@ -20,7 +20,7 @@ kernable is an **application kernel**: storage, ordering, trust and delivery in 
 | What a service consists of | memberships: the kernel waits for exactly what is listed (`/ready`) | your deploy tooling | your deploy tooling | your deploy tooling | your deploy tooling |
 | Seeing what runs | a built-in UI: map, connections, any aggregate's history; metrics | dashboards you assemble | a database UI | depends on the setup | tools around the cluster |
 | Operating it | one binary and a SQLite file (or a log file) | a database and a message bus | a database server or cluster | a server or cluster, plus your application | a cluster |
-| Scale | one kernel per tenant's partition, with a standby; tenants spread over partitions | as far as you build it | clusters | clusters | clusters, very large |
+| Scale | one writer per tenant's partition, with a standby and any number of read-only copies; tenants spread over partitions | as far as you build it | clusters | clusters | clusters, very large |
 | License | MIT | — | open source and commercial editions | open source and commercial editions | open source, and commercial offerings |
 
 **Choose kernable** when the logic of one application is spread over teams or languages, when you need to prove what happened and who asked for it, and when "write, then read it back" must simply work.
@@ -29,7 +29,7 @@ kernable is an **application kernel**: storage, ordering, trust and delivery in 
 
 ## Where kernable is young
 
-- **One kernel per store.** A kernel restarts in seconds and loses nothing, and a [pair with a witness](../how-to/standby) fails over by itself; but every write goes through the one primary.
+- **One writer per store.** A kernel restarts in seconds and loses nothing, a [pair with a witness](../how-to/standby) fails over by itself, and [read-only copies](../how-to/readers) answer queries on as many machines as you like; but every write goes through the one primary.
 - **No compaction.** The log only grows; that is what keeps it verifiable. Expiring data belongs in the cache.
 - **SQLite sets the limits of one store**: a single writer on one machine. Commands of different aggregates run in parallel on the workers, but every commit goes through that one writer.
 - **Three SDKs.** Other languages speak the gRPC protocol directly ([Write an SDK](../how-to/new-sdk)).

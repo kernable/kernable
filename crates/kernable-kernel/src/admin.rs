@@ -7,6 +7,9 @@
 //! What it serves, plain HTTP/1 with one request per connection:
 //!
 //! - `GET /metrics`, `/health`, `/ready`, `/ready?deployment=<d>`: as on `--metrics-listen`.
+//! - `GET /api/role`: what this kernel is (`writer`, `reader`, or while it follows `standby`)
+//!   and how it stands, as JSON ([`crate::reader::role`]). A standby and a reader catching up
+//!   serve it too, with `/health`, `/ready` and `/metrics`.
 //! - `GET /api/deployments`, `/api/deployments/warm-up?deployment=<d>`,
 //!   `/api/deployments/since?position=<n>|time=<ms>[&version=<v>]`: as in the UI.
 //! - `POST /api/deployments/drop?deployment=<d>[&force=true]`: drops a deployment's read models
@@ -26,6 +29,30 @@ use crate::{
 /// Binds `path` (replacing a stale socket, never another file; making its directory if
 /// missing), owner only, and serves it until the listener fails.
 pub(crate) async fn serve(kernel: Arc<Kernel>, path: &str) -> Result<(), BoxError> {
+    let limited = Arc::clone(&kernel);
+    serve_on(
+        path,
+        move |reason| limited.metrics.limited(reason),
+        move |request| respond(&kernel, request),
+    )
+    .await
+}
+
+/// Like [`serve`], answering with `respond`: for a standby or a reader catching up, which have
+/// no kernel yet.
+pub(crate) async fn serve_with(
+    path: &str,
+    respond: impl Fn(&[u8]) -> Vec<u8> + Send + Sync + 'static,
+) -> Result<(), BoxError> {
+    serve_on(path, |_| {}, respond).await
+}
+
+async fn serve_on(
+    path: &str,
+    limited: impl Fn(&'static str) + Send + Sync + 'static,
+    respond: impl Fn(&[u8]) -> Vec<u8> + Send + Sync + 'static,
+) -> Result<(), BoxError> {
+    let respond = Arc::new(respond);
     let listener = bind(path).map_err(|e| format!("--admin-socket {path}: {e}"))?;
     tracing::info!(%path, "serving the local socket");
     let permits = Arc::new(Semaphore::new(CONNECTIONS));
@@ -39,10 +66,10 @@ pub(crate) async fn serve(kernel: Arc<Kernel>, path: &str) -> Result<(), BoxErro
             }
         };
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-            kernel.metrics.limited("http_connections");
+            limited("http_connections");
             continue;
         };
-        let kernel = Arc::clone(&kernel);
+        let respond = Arc::clone(&respond);
         tokio::spawn(async move {
             let _permit = permit;
             let request = match tokio::time::timeout(READ_TIMEOUT, read_head(&mut conn)).await {
@@ -58,7 +85,7 @@ pub(crate) async fn serve(kernel: Arc<Kernel>, path: &str) -> Result<(), BoxErro
                 }
                 _ => return,
             };
-            let answer = tokio::task::spawn_blocking(move || respond(&kernel, &request))
+            let answer = tokio::task::spawn_blocking(move || respond(&request))
                 .await
                 .unwrap_or_else(|_| {
                     reply(
@@ -101,6 +128,11 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     match (method, path) {
         ("GET", "/metrics" | "/health" | "/ready") => crate::metrics::respond(kernel, request),
+        ("GET", "/api/role") => reply(
+            "200 OK",
+            "application/json",
+            crate::reader::role(kernel).to_string().as_bytes(),
+        ),
         ("GET", "/api/deployments" | "/api/deployments/warm-up" | "/api/deployments/since") => {
             crate::ui::respond(kernel, request)
         }

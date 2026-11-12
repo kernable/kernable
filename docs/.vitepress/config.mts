@@ -59,6 +59,7 @@ const SIDEBAR = [
       { text: "Move a kernel", link: "/how-to/export" },
       { text: "Previews and copies", link: "/how-to/previews" },
       { text: "Run a standby", link: "/how-to/standby" },
+      { text: "Run read-only copies", link: "/how-to/readers" },
       { text: "Run a listener on several machines", link: "/how-to/instances" },
       { text: "Run a node from one file", link: "/how-to/node" },
       { text: "Run kernable on your own servers", link: "/how-to/self-host" },

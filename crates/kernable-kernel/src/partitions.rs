@@ -67,7 +67,7 @@ impl Maps {
             .clone()
     }
 
-    fn set(&self, map: PartitionMap) {
+    pub(crate) fn set(&self, map: PartitionMap) {
         *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(map);
         self.1.notify_waiters();
     }

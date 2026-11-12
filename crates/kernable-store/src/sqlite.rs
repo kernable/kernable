@@ -1988,10 +1988,14 @@ fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandRe
     let outcome = match row {
         None => return Ok(None),
         Some((status, positions, code, message, key, requirement)) => match status.as_str() {
-            "committed" => Outcome::Committed(Committed {
-                events: events_at(conn, command_id, &positions)?,
-                settled: false,
-            }),
+            "committed" => {
+                let events = events_at(conn, command_id, &positions)?;
+                Outcome::Committed(Committed {
+                    position: events.last().map_or(0, |e| e.global_position),
+                    events,
+                    settled: false,
+                })
+            }
             "rejected" => Outcome::Rejected(Rejected {
                 code: code.unwrap_or_default(),
                 message: message.unwrap_or_default(),

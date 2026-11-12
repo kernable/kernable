@@ -280,6 +280,49 @@ impl Registry {
         }
     }
 
+    /// A reader's registry at its start: only the writer's middlewares, from the first event,
+    /// none connected. They count (a query or check waits for them, and they refuse while
+    /// away, failing closed) until the same middleware connects to the reader.
+    pub(crate) fn load_middlewares(
+        records: Vec<ListenerRecord>,
+        memberships: &Memberships,
+    ) -> Self {
+        let middlewares = records
+            .into_iter()
+            .filter(|r| !r.removed && !r.middlewares.is_empty())
+            .map(|r| ListenerRecord {
+                position: 0,
+                parked: Vec::new(),
+                parked_changed: false,
+                ..r
+            })
+            .collect();
+        Self::load(middlewares, memberships)
+    }
+
+    /// A reader takes a listener record its writer stored: a middleware it does not know yet
+    /// counts here from then on; one removed, or no longer a middleware, goes unless one of it
+    /// is connected here.
+    pub(crate) fn replicated(&self, record: ListenerRecord, memberships: &Memberships) {
+        let mut entries = self.entries();
+        let middleware = !record.removed && !record.middlewares.is_empty();
+        match entries.get(&record.name) {
+            None if middleware => {
+                let mut loaded = Self::load_middlewares(vec![record], memberships)
+                    .entries
+                    .into_inner()
+                    .unwrap_or_else(PoisonError::into_inner);
+                entries.extend(loaded.drain());
+            }
+            Some(e) if !middleware && !e.connected() && !e.live => {
+                entries.remove(&record.name);
+            }
+            _ => return,
+        }
+        drop(entries);
+        self.progress.notify_waiters();
+    }
+
     fn entries(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -1065,6 +1108,10 @@ impl Registry {
 /// Writes changed listener positions to the store.
 pub(crate) fn flush(kernel: &Kernel) -> Result<(), BoxError> {
     let dirty = kernel.listeners.take_dirty();
+    // A reader keeps its listeners' positions in memory only.
+    if kernel.reader.is_some() {
+        return Ok(());
+    }
     if !dirty.is_empty() {
         if let Err(e) = kernel.store.save_listeners(&dirty) {
             // Tried again at the next flush.
@@ -1241,6 +1288,11 @@ pub(crate) async fn run(
     signing::verify(&proof, &signing::challenge_message(&nonce))
         .map_err(|_| Status::unauthenticated("challenge failed"))?;
 
+    // A reader delivers nothing to a reactor: reactors act on the writer only.
+    if kernel.reader.is_some() && hello.reactor && !hello.live {
+        return crate::reader::waiting_reactor(&kernel, &hello.name, out, inbound).await;
+    }
+
     // A read model or middleware of a deployment has a registration of its own.
     let versioned = !hello.deployment.is_empty()
         && !hello.live
@@ -1401,8 +1453,9 @@ pub(crate) async fn run(
                 // with the registration.
                 parked_changed: previous.is_some_and(|e| e.record.parked_changed),
             };
-            // Registration is stored right away; positions follow with the periodic flush.
-            if !hello.live {
+            // Registration is stored right away; positions follow with the periodic flush. A
+            // reader keeps its listeners in memory: its store is its writer's.
+            if !hello.live && kernel.reader.is_none() {
                 kernel
                     .store
                     .save_listeners(std::slice::from_ref(&record))
@@ -1455,7 +1508,15 @@ pub(crate) async fn run(
                         &hello.name,
                         &hello.deployment,
                     ));
-                    send(out, Out::Waiting(Waiting { active, serving })).await?;
+                    send(
+                        out,
+                        Out::Waiting(Waiting {
+                            active,
+                            serving,
+                            reader_of: String::new(),
+                        }),
+                    )
+                    .await?;
                 }
                 tokio::select! {
                     _ = progressed => {}
@@ -1469,6 +1530,7 @@ pub(crate) async fn run(
                     send(
                         out,
                         Out::Waiting(Waiting {
+                            reader_of: String::new(),
                             active,
                             serving: String::new(),
                         }),

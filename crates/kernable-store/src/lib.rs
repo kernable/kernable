@@ -694,7 +694,9 @@ pub trait Store: Send + Sync {
     /// Seals the record log (`true`): every write that would add a record fails with
     /// [`Error::Sealed`] from now on, and the head returned is the last one; a write that was
     /// under way is in it. For a kernel that hands its role over: the standby takes over at that
-    /// head, so the log stays the new primary's beginning. `false` unseals it again.
+    /// head, so the log stays the new primary's beginning; and for a reader, which writes
+    /// nothing of its own. Records applied from a primary ([`Store::apply`]) still go in.
+    /// `false` unseals it again.
     fn seal_records(&self, sealed: bool) -> Result<Head> {
         let _ = sealed;
         Err(Error::NoRecordLog)

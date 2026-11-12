@@ -1,6 +1,10 @@
 //! The standby (design/replication.md): it follows a primary, applies its records, serves
 //! nothing else, and becomes the primary when `kernable promote` asks it to.
 //!
+//! A reader (`--reader`, `reader.rs`) catches up here first: it follows the writer (from a
+//! backup, if it is new and one is given) until it holds what the writer may tell, and [`run`]
+//! returns; the kernel then opens its stores read-only and follows on.
+//!
 //! [`run`] returns once the standby was promoted, with its stores closed: the caller then
 //! opens them as a kernel does after a restart. Every request but `ReplicationService` is
 //! refused with `UNAVAILABLE` and `not_primary`, which the SDKs retry.
@@ -57,7 +61,24 @@ pub struct Stores {
     pub snapshots: Box<dyn SnapshotStore>,
 }
 
+/// The stores records are applied to: a standby's [`Stores`], or a reader's kernel.
+pub(crate) struct Parts<'a> {
+    pub(crate) store: &'a dyn Store,
+    pub(crate) vault: Option<&'a Vault>,
+    pub(crate) data: &'a dyn DataStore,
+    pub(crate) snapshots: &'a dyn SnapshotStore,
+}
+
 impl Stores {
+    pub(crate) fn parts(&self) -> Parts<'_> {
+        Parts {
+            store: self.store.as_ref(),
+            vault: self.vault.as_ref(),
+            data: self.data.as_ref(),
+            snapshots: self.snapshots.as_ref(),
+        }
+    }
+
     fn open(config: &Config) -> Result<Self, BoxError> {
         Self::open_on(
             config,
@@ -112,6 +133,11 @@ struct Standby {
     /// With `--witness`: this kernel towards the witness, through which it claims the
     /// primary's place.
     link: Option<Arc<Link>>,
+    /// A reader catching up (`--reader`): it never becomes the primary; once it holds what the
+    /// writer may tell, [`run`] returns.
+    reader: bool,
+    /// The address it follows now; a reader turns to the next of its addresses when one fails.
+    current: Mutex<String>,
 }
 
 impl Standby {
@@ -265,8 +291,74 @@ impl Standby {
         }
     }
 
+    /// The address it follows now.
+    fn current(&self) -> String {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A reader turns to its next address (both kernels of a pair: it follows the primary).
+    fn next_address(&self) {
+        let addresses = crate::reader::addresses(&self.follow.primary);
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = addresses.iter().position(|a| *a == *current).unwrap_or(0);
+        *current = addresses[(at + 1) % addresses.len()].clone();
+    }
+
+    /// A reader caught up: the kernel opens its stores next.
+    fn caught_up(&self) {
+        if let Some(done) = self
+            .promote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            tracing::info!(
+                record = self.applied.load(SeqCst),
+                "the reader caught up with the writer: it serves from its copy now"
+            );
+            let _ = done.send(());
+        }
+    }
+
+    /// A new reader with `--from-backup` fills its empty stores from the backup's newest
+    /// generation; whether it did. If the restore fails, the stores start over empty and the
+    /// reader takes an image from the writer instead.
+    async fn restore_from_backup(&self) -> Result<bool, BoxError> {
+        let Some(from) = self.config.replication.from_backup.clone() else {
+            return Ok(false);
+        };
+        self.close_stores().await;
+        let (config, keys) = (self.config.clone(), self.follow.primary_kernel_keys.clone());
+        let restored =
+            tokio::task::spawn_blocking(move || restore_into(&config, &from, &keys)).await?;
+        *self.lock_stores() = Some(Arc::new(Stores::open(&self.config)?));
+        match restored {
+            Ok(r) => {
+                tracing::info!(
+                    generation = %r.generation,
+                    record = r.record,
+                    "the reader restored the backup; it catches up the rest from the writer"
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                self.start_over(&format!(
+                    "restoring the backup failed ({e}); the reader takes an image from the writer"
+                ))
+                .await?;
+                Ok(false)
+            }
+        }
+    }
+
     /// Why this standby may not become the primary, if it may not.
     fn unpromotable(&self) -> Option<String> {
+        if self.reader {
+            return Some("it is a reader, a read-only copy: readers are never promoted".into());
+        }
         if image_marker(&self.config.store).is_some_and(|m| m.exists()) {
             return Some("its image from the primary is not complete".into());
         }
@@ -320,6 +412,11 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         Stores::open_on(&config, store)
     })?;
     let (promoted, promoted_rx) = oneshot::channel();
+    let reader = config.replication.reader;
+    let first = crate::reader::addresses(&follow.primary)
+        .first()
+        .cloned()
+        .ok_or("--reader needs the writer's address")?;
     let standby = Arc::new(Standby {
         follow: follow.clone(),
         stores: Mutex::new(Some(Arc::new(stores))),
@@ -327,6 +424,8 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         applied: AtomicU64::new(0),
         primary_head: AtomicU64::new(0),
         link,
+        reader,
+        current: Mutex::new(first),
         config,
     });
     // Following, it is no primary that handed over. Its note that it is in sync stays
@@ -351,7 +450,17 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
             let _ = std::fs::remove_file(marker);
         }
     }
-    tracing::info!(primary = %follow.primary, listen = %standby.config.listen, "standby starting");
+    // A new reader with a backup to start from fills its stores from it first.
+    let mut tried_backup = false;
+    if reader && standby.stores().empty()? {
+        tried_backup = true;
+        standby.restore_from_backup().await?;
+    }
+    if reader {
+        tracing::info!(writer = %follow.primary, listen = %standby.config.listen, "reader catching up");
+    } else {
+        tracing::info!(primary = %follow.primary, listen = %standby.config.listen, "standby starting");
+    }
     let (stop_serving, stopped) = oneshot::channel::<()>();
     let server = tokio::spawn(serve(Arc::clone(&standby), stopped));
     let metrics = match standby.config.metrics_listen.clone() {
@@ -365,16 +474,41 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         }
         None => None,
     };
+    let admin = match standby.config.admin_socket.clone() {
+        Some(path) => {
+            let standby = Arc::clone(&standby);
+            Some(crate::AbortOnDrop(tokio::spawn(async move {
+                if let Err(e) = serve_admin(standby, &path).await {
+                    tracing::error!(error = %e, "the standby's local socket stopped");
+                }
+            })))
+        }
+        None => None,
+    };
     let following = async {
         // The first try again comes soon: a primary whose binary was replaced serves again
         // within a moment, and a pair's writes wait for its standby meanwhile.
         let mut delay = Duration::from_millis(100);
         loop {
-            match follow_once(&standby, &key, &grant).await {
+            let followed = follow_once(&standby, &key, &grant, &mut tried_backup).await;
+            // A reader that caught up is done here: its kernel opens the stores next.
+            if standby.reader
+                && standby
+                    .promote
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_none()
+            {
+                return std::future::pending().await;
+            }
+            match followed {
                 Ok(()) => tracing::warn!("the primary ended the stream; connecting again"),
                 Err(e) => {
                     let why = with_causes(&*e);
-                    tracing::warn!(error = %why, "following the primary failed; connecting again in {delay:?}")
+                    tracing::warn!(error = %why, primary = %standby.current(), "following the primary failed; connecting again in {delay:?}");
+                    if standby.reader {
+                        standby.next_address();
+                    }
                 }
             }
             if let Some(link) = &standby.link {
@@ -401,16 +535,19 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
     }
     let _ = stop_serving.send(());
     drop(metrics);
+    drop(admin);
     // Every handle on the stores closes before the kernel opens them, also one held by a
     // request still being answered (the promotion itself).
     standby.close_stores().await;
     // A primary now, no standby in sync: the note would outlast it beside stores it may leave
     // (a move away) and tell of a standby in sync when one starts on them again (a move back).
     standby.forget_in_sync();
-    tracing::warn!(
-        record = standby.applied.load(SeqCst),
-        "promoted: this kernel is the primary now"
-    );
+    if !standby.reader {
+        tracing::warn!(
+            record = standby.applied.load(SeqCst),
+            "promoted: this kernel is the primary now"
+        );
+    }
     Ok(())
 }
 
@@ -472,47 +609,29 @@ fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
 }
 
 /// One connection to the primary: catch up, then apply its records as they come.
-async fn follow_once(
-    standby: &Arc<Standby>,
+/// A follower's stream to a primary, opened: where to send acknowledgements, what comes, and
+/// how the primary started it.
+pub(crate) struct Opened {
+    pub(crate) tx: mpsc::Sender<FollowRequest>,
+    pub(crate) inbound: Streaming<FollowResponse>,
+    pub(crate) start: kernable_core::proto::FollowStart,
+}
+
+/// Opens a `Follow` stream to `addr` with `hello`: the challenge answered with `key`, `grant`
+/// presented. Pinged every `every`, so a primary the network cut off ends it.
+pub(crate) async fn open_stream(
+    addr: &str,
     key: &SigningKey,
     grant: &str,
-) -> Result<(), BoxError> {
-    let follow = &standby.follow;
-    // A primary the network cut off sends nothing more, and TCP tells nothing for minutes: pings
-    // end the stream within two thirds of a lease, so a pair's standby claims in time.
-    let every = standby
-        .link
-        .as_ref()
-        .map_or(Duration::from_secs(5), |link| link.lease() / 3);
-    let mut client =
-        ReplicationServiceClient::new(connect_pinging(&follow.primary, Some(every)).await?)
-            .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
-            .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
-    let head = standby.stores().store.record_head()?;
-    // Where it could go back to, should its newest records be ones the primary lacks.
-    let rewind_points = standby
-        .stores()
-        .store
-        .rewind_points()?
-        .into_iter()
-        .skip(1)
-        .map(|p| RecordPoint {
-            seq: p.seq,
-            hash: p.hash,
-        })
-        .collect();
+    hello: FollowHello,
+    every: Duration,
+) -> Result<Opened, BoxError> {
+    let mut client = ReplicationServiceClient::new(connect_pinging(addr, Some(every)).await?)
+        .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
     let (tx, rx) = mpsc::channel(16);
     let say = |msg| FollowRequest { msg: Some(msg) };
-    tx.send(say(follow_request::Msg::Hello(FollowHello {
-        key_id: signing::key_id(&key.verifying_key()),
-        seq: head.seq,
-        hash: head.hash.clone(),
-        protocol: kernable_core::PROTOCOL,
-        backup: false,
-        rewind_points,
-        witness_generation: standby.link.as_ref().and_then(|l| l.generations.newest()),
-    })))
-    .await?;
+    tx.send(say(follow_request::Msg::Hello(hello))).await?;
     let mut request = Request::new(ReceiverStream::new(rx));
     request.metadata_mut().insert(GRANT_HEADER, grant.parse()?);
     let mut inbound = client.follow(request).await?.into_inner();
@@ -527,17 +646,76 @@ async fn follow_once(
     let Some(follow_response::Msg::Start(start)) = next(&mut inbound).await? else {
         return Err("the primary did not start the stream".into());
     };
+    Ok(Opened { tx, inbound, start })
+}
+
+async fn follow_once(
+    standby: &Arc<Standby>,
+    key: &SigningKey,
+    grant: &str,
+    tried_backup: &mut bool,
+) -> Result<(), BoxError> {
+    let follow = &standby.follow;
+    // A primary the network cut off sends nothing more, and TCP tells nothing for minutes: pings
+    // end the stream within two thirds of a lease, so a pair's standby claims in time.
+    let every = standby
+        .link
+        .as_ref()
+        .map_or(Duration::from_secs(5), |link| link.lease() / 3);
+    let head = standby.stores().store.record_head()?;
+    // Where it could go back to, should its newest records be ones the primary lacks.
+    let rewind_points = standby
+        .stores()
+        .store
+        .rewind_points()?
+        .into_iter()
+        .skip(1)
+        .map(|p| RecordPoint {
+            seq: p.seq,
+            hash: p.hash,
+        })
+        .collect();
+    let say = |msg| FollowRequest { msg: Some(msg) };
+    let hello = FollowHello {
+        key_id: signing::key_id(&key.verifying_key()),
+        seq: head.seq,
+        hash: head.hash.clone(),
+        protocol: kernable_core::PROTOCOL,
+        backup: false,
+        rewind_points,
+        witness_generation: standby.link.as_ref().and_then(|l| l.generations.newest()),
+        reader: standby.reader,
+    };
+    let Opened {
+        tx,
+        mut inbound,
+        start,
+    } = open_stream(&standby.current(), key, grant, hello, every).await?;
     *GOODBYE.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
     let _following = Following;
     // Whether it is in sync now, the primary tells it again once it caught up.
     standby.forget_in_sync();
     match start.mode() {
         FollowMode::Follow => {
-            tracing::info!(from = head.seq, "following the primary");
+            tracing::info!(from = head.seq, primary = %standby.current(), "following the primary");
+            standby.applied.fetch_max(head.seq, SeqCst);
             // Everything it holds the primary holds too: nothing of it is taken back any more.
             confirmed(&standby.stores(), head.seq)?;
         }
         FollowMode::Image => {
+            // A reader that has not tried its backup yet starts from it rather than from an
+            // image of the writer.
+            if standby.reader && !*tried_backup && standby.config.replication.from_backup.is_some()
+            {
+                *tried_backup = true;
+                if !standby.stores().empty()? {
+                    standby
+                        .start_over("the writer no longer keeps the records after this reader's")
+                        .await?;
+                }
+                standby.restore_from_backup().await?;
+                return Ok(());
+            }
             if !standby.stores().empty()? {
                 standby
                     .start_over("the primary no longer keeps the records after this standby's")
@@ -561,6 +739,14 @@ async fn follow_once(
     }
     loop {
         match next(&mut inbound).await? {
+            // Where the writer stands, nothing new: a reader that holds it has caught up.
+            Some(follow_response::Msg::Records(batch)) if batch.records.is_empty() => {
+                standby.primary_head.store(batch.head, SeqCst);
+                if standby.reader && standby.applied.load(SeqCst) >= batch.head {
+                    standby.caught_up();
+                    return Ok(());
+                }
+            }
             Some(follow_response::Msg::Records(batch)) => {
                 crate::copy::refuse_marked(
                     batch
@@ -577,6 +763,10 @@ async fn follow_once(
                 standby.applied.store(seq, SeqCst);
                 tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
                     .await?;
+                if standby.reader && seq >= standby.primary_head.load(SeqCst) {
+                    standby.caught_up();
+                    return Ok(());
+                }
             }
             Some(follow_response::Msg::InSync(_)) => {
                 crate::crash::point("standby.in_sync");
@@ -695,13 +885,13 @@ pub(crate) fn apply_image(
     for file in &batch.files {
         stores.data.restore(&file.path, &file.data)?;
     }
-    import(stores, &batch.vault)?;
+    import(stores.vault.as_ref(), &batch.vault)?;
     stores.store.apply_image(&records)?;
     Ok(())
 }
 
-fn import(stores: &Stores, rows: &[kernable_core::proto::VaultRow]) -> Result<(), BoxError> {
-    match &stores.vault {
+fn import(vault: Option<&Vault>, rows: &[kernable_core::proto::VaultRow]) -> Result<(), BoxError> {
+    match vault {
         Some(vault) => Ok(vault.import(rows)?),
         None if rows.is_empty() => Ok(()),
         None => Err("the primary sends vault values: start the standby with --vault-key".into()),
@@ -750,6 +940,15 @@ struct Around {
 /// to them), erasures noted, the records, then what the vault drops after a commit. Returns the
 /// last record applied.
 pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Result<u64, BoxError> {
+    apply_to(stores.parts(), batch, keys)
+}
+
+/// [`apply`] to any [`Parts`]: a standby's stores, or a reader's kernel.
+pub(crate) fn apply_to(
+    stores: Parts<'_>,
+    batch: RecordBatch,
+    keys: &[String],
+) -> Result<u64, BoxError> {
     let last = batch.records.last().map_or(0, |r| r.seq);
     let records: Vec<&Record> = batch
         .records
@@ -775,8 +974,8 @@ pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Res
             )?;
         }
     }
-    import(stores, &batch.vault)?;
-    let store = &stores.store;
+    import(stores.vault, &batch.vault)?;
+    let store = stores.store;
     let mut around = Vec::new();
     let mut completed = Vec::new();
     for record in &records {
@@ -824,7 +1023,7 @@ pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Res
     store.apply(&batch.records)?;
     store.sync()?;
     crate::crash::point("standby.applied");
-    let Some(vault) = &stores.vault else {
+    let Some(vault) = stores.vault else {
         return Ok(last);
     };
     for command_id in &completed {
@@ -845,7 +1044,7 @@ pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Res
         if !a.erasing.is_empty() {
             erase_subjects(
                 vault,
-                stores.snapshots.as_ref(),
+                stores.snapshots,
                 &a.tenant,
                 &a.command_id,
                 &a.erasing,
@@ -856,6 +1055,42 @@ pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Res
         }
     }
     Ok(last)
+}
+
+/// Restores the newest generation of the backup `from` into the reader's empty stores, with
+/// the backup's vault key, and encrypts the values with the reader's own vault key after.
+fn restore_into(
+    config: &Config,
+    from: &config::FromBackup,
+    kernel_keys: &[String],
+) -> Result<crate::backup::Restored, BoxError> {
+    let target = crate::backup::target::open(&from.target, None)?;
+    let crypt = crate::backup::crypt::BackupKey::read(&from.key)?;
+    let vault = match (&config.vault, &from.vault_key) {
+        (Some(v), Some(backup_key)) => {
+            Some(Vault::open(&v.store, &*config.read_secret(backup_key)?)?)
+        }
+        (Some(v), None) => Some(Vault::open(&v.store, &*config.read_secret(&v.key)?)?),
+        (None, _) => None,
+    };
+    let stores = Stores {
+        store: kernable_store::open_with(&config.store, kernable_store::Durability::Normal)?,
+        vault,
+        data: kernable_store::data::open(&config.data)?,
+        snapshots: kernable_store::snapshots::open("memory:")?,
+    };
+    let restored = crate::backup::restore(
+        target.as_ref(),
+        &crypt,
+        &stores,
+        crate::backup::Until::End,
+        kernel_keys,
+    )?;
+    if let (Some(vault), Some(v), Some(_)) = (&stores.vault, &config.vault, &from.vault_key) {
+        vault.rekey(&*config.read_secret(&v.key)?)?;
+    }
+    stores.store.sync()?;
+    Ok(restored)
 }
 
 /// Where a store marks an image in progress: `<path>.image`.
@@ -999,7 +1234,7 @@ impl ReplicationService for Api {
         &self,
         _request: Request<Streaming<FollowRequest>>,
     ) -> Result<Response<Self::FollowStream>, Status> {
-        Err(not_primary(&self.0.follow.primary))
+        Err(not_primary(&self.0.follow.primary, self.0.reader))
     }
 
     async fn switchover(
@@ -1136,7 +1371,12 @@ fn may_manage(
     Ok(())
 }
 
-fn not_primary(primary: &str) -> Status {
+fn not_primary(primary: &str, reader: bool) -> Status {
+    if reader {
+        return Status::unavailable(format!(
+            "reader_catching_up: this kernel is a reader of {primary} and has not caught up yet; ask another kernel or try again"
+        ));
+    }
     Status::unavailable(format!(
         "not_primary: this kernel is a standby of {primary}; connect to the primary"
     ))
@@ -1158,10 +1398,12 @@ async fn serve(standby: Arc<Standby>, stop: oneshot::Receiver<()>) -> Result<(),
         )?;
     }
     let primary: Arc<str> = standby.follow.primary.as_str().into();
+    let reader = standby.reader;
     let router = builder
         .layer(tower::layer::layer_fn(move |inner| NotPrimary {
             inner,
             primary: Arc::clone(&primary),
+            reader,
         }))
         .add_service(ReplicationServiceServer::new(Api(Arc::clone(&standby))));
     let stopped = async {
@@ -1199,25 +1441,62 @@ async fn serve_metrics(standby: Arc<Standby>, addr: &str) -> Result<(), BoxError
         |_| {},
         move |request: Vec<u8>| {
             let standby = Arc::clone(&standby);
-            async move {
-                use crate::http::reply;
-                if request.starts_with(b"GET /health ") {
-                    reply("200 OK", "text/plain", b"ok\n")
-                } else if request.starts_with(b"GET /ready ") {
-                    let why = format!("a standby of {}\n", standby.follow.primary);
-                    reply("503 Service Unavailable", "text/plain", why.as_bytes())
-                } else if request.starts_with(b"GET /metrics ") {
-                    let applied = standby.applied.load(SeqCst);
-                    let head = standby.primary_head.load(SeqCst);
-                    let body = crate::metrics::render_standby(applied, head);
-                    reply("200 OK", "text/plain; version=0.0.4", body.as_bytes())
-                } else {
-                    reply("404 Not Found", "text/plain", b"")
-                }
-            }
+            async move { respond(&standby, &request) }
         },
     )
     .await
+}
+
+/// What a standby, or a reader catching up, answers on its metrics address and its local
+/// socket: `/health`, `/ready` (always 503: it serves nothing yet), `/metrics`, `/api/role`.
+fn respond(standby: &Standby, request: &[u8]) -> Vec<u8> {
+    use crate::http::reply;
+    let applied = standby.applied.load(SeqCst);
+    let head = standby.primary_head.load(SeqCst);
+    let lag = head.saturating_sub(applied);
+    let role = if standby.reader { "reader" } else { "standby" };
+    if request.starts_with(b"GET /health ") {
+        let body = match standby.reader {
+            true => format!(
+                "ok: a reader of {}, catching up, {lag} records behind\n",
+                standby.current()
+            ),
+            false => format!(
+                "ok: a standby of {}, {lag} records behind\n",
+                standby.current()
+            ),
+        };
+        reply("200 OK", "text/plain", body.as_bytes())
+    } else if request.starts_with(b"GET /ready ") {
+        let why = match standby.reader {
+            true => format!(
+                "a reader of {} catching up: {lag} records behind\n",
+                standby.current()
+            ),
+            false => format!("a standby of {}\n", standby.follow.primary),
+        };
+        reply("503 Service Unavailable", "text/plain", why.as_bytes())
+    } else if request.starts_with(b"GET /metrics ") {
+        let body = crate::metrics::render_standby(applied, head, standby.reader);
+        reply("200 OK", "text/plain; version=0.0.4", body.as_bytes())
+    } else if request.starts_with(b"GET /api/role ") {
+        let body = serde_json::json!({
+            "role": role,
+            "state": if standby.reader { "catching-up" } else { "following" },
+            "following": standby.current(),
+            "applied": applied,
+            "head": head,
+            "lag": lag,
+        });
+        reply("200 OK", "application/json", body.to_string().as_bytes())
+    } else {
+        reply("404 Not Found", "text/plain", b"")
+    }
+}
+
+/// Serves [`respond`] on `--admin-socket` while the standby follows.
+async fn serve_admin(standby: Arc<Standby>, path: &str) -> Result<(), BoxError> {
+    crate::admin::serve_with(path, move |request| respond(&standby, request)).await
 }
 
 /// Answers every request but the replication service's with `UNAVAILABLE`, `not_primary`.
@@ -1225,6 +1504,7 @@ async fn serve_metrics(standby: Arc<Standby>, addr: &str) -> Result<(), BoxError
 struct NotPrimary<S> {
     inner: S,
     primary: Arc<str>,
+    reader: bool,
 }
 
 type Answer<R, E> = Pin<Box<dyn std::future::Future<Output = Result<R, E>> + Send>>;
@@ -1250,7 +1530,7 @@ where
         {
             return Box::pin(self.inner.call(request));
         }
-        let answer = not_primary(&self.primary).into_http();
+        let answer = not_primary(&self.primary, self.reader).into_http();
         Box::pin(async move { Ok(answer) })
     }
 }

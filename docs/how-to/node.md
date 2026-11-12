@@ -146,9 +146,13 @@ With `metrics-listen`, `GET /metrics` answers in Prometheus' text format, a line
 
 The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](./monitor)). The address is read when the node starts; a change applies after a restart of the node.
 
+## Where the stores live
+
+Keep the project directory, and with it the event store, the vault and the snapshots, on a local disk, never on a network file system such as NFS or SMB. One kernel per store rests on a file lock (`<store>.lock`), and such file systems do not hold file locks reliably: two kernels could then write one store.
+
 ## The kernel's local socket
 
-The node starts the kernel with `--admin-socket admin.sock` in the project directory (`[node] admin-socket` names another place in it; `[kernel] flags` takes no `admin-socket`). It serves `GET /metrics`, `/health`, `/ready` and `/ready?deployment=<d>`, the [deployments](./deployments)' warm-up, list and since-report, and `POST /api/deployments/drop` (`kernable deployments drop --socket`), with no login, like a loopback metrics address, but only to the kernel's own user (mode 0600) and root. A tool on the machine reaches it through the file system, without entering the pod's network:
+The node starts the kernel with `--admin-socket admin.sock` in the project directory (`[node] admin-socket` names another place in it; `[kernel] flags` takes no `admin-socket`). It serves `GET /metrics`, `/health`, `/ready` and `/ready?deployment=<d>`, `/api/role` (whether the kernel is the writer or a [reader](./readers), with its standby, readers or lag), the [deployments](./deployments)' warm-up, list and since-report, and `POST /api/deployments/drop` (`kernable deployments drop --socket`), with no login, like a loopback metrics address, but only to the kernel's own user (mode 0600) and root. A tool on the machine reaches it through the file system, without entering the pod's network:
 
 ```sh
 curl --unix-socket /srv/shop/admin.sock 'http://localhost/ready?deployment=2026-11-12.1'

@@ -1034,7 +1034,8 @@ class Domain:
         cannot park events. Live listeners are never single. Raises `ValueError` if the domain
         has a listener of that name already."""
         return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live,
-                                       park_after=park_after, instance=instance, single=single))
+                                       park_after=park_after, instance=instance, single=single,
+                                       reactor=True))
 
     def _listener(self, listener: "Listener") -> "Listener":
         if any(l.name == listener.name for l in self.listeners):
@@ -1887,6 +1888,9 @@ class Kernable:
         self._channel = channel_for(url)
         # With partitions, each tenant's requests go to its partition.
         self._parts = _Partitioned(self._channel, channel_for, timeout_s)
+        # The newest position this client's own commands committed at, per partition's channel:
+        # its queries wait for it, on whichever copy (writer or reader) answers.
+        self._seen: dict[int, int] = {}
         self._key = Key.from_file(key)
         self._log = _Log(given_url, key, self._key.id)
         # Whoever can read the key file can sign as this process.
@@ -2170,9 +2174,14 @@ class Kernable:
         if all_partitions:
             self._caught_up_everywhere(q, timeout_s)
             q.issued_at = _issued_now()
-        q.client_sig.CopyFrom(self._key.sign(query_message(q)))
-        res = self._parts.route(q.tenant_id, lambda ch: _idempotent(
-            timeout_s or self._timeout_s, lambda left: rpc.QueryServiceStub(ch).Query(q, timeout=left)))
+        def ask(ch):
+            # Read your writes: wait for this client's own newest command, on whichever copy
+            # answers. Not from a handler, which must not wait behind its own listener.
+            if not q.listener:
+                q.min_position = max(min_position, self._seen.get(id(ch), 0))
+            q.client_sig.CopyFrom(self._key.sign(query_message(q)))
+            return _idempotent(timeout_s or self._timeout_s, lambda left: rpc.QueryServiceStub(ch).Query(q, timeout=left))
+        res = self._parts.route(q.tenant_id, ask)
         if res.WhichOneof("outcome") == "rejected":
             raise Rejected(res.rejected.message, res.rejected.code)
         return _decode(res.response)
@@ -2237,8 +2246,15 @@ class Kernable:
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
         request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get(),
                                    vault=values)
-        return self._parts.route(cmd.tenant_id, lambda ch: _idempotent(
-            timeout_s or self._timeout_s, lambda left: rpc.CommandServiceStub(ch).Submit(request, timeout=left)))
+        def send(ch):
+            res = _idempotent(timeout_s or self._timeout_s,
+                              lambda left: rpc.CommandServiceStub(ch).Submit(request, timeout=left))
+            if res.WhichOneof("outcome") == "committed":
+                events = res.committed.events
+                position = max(res.committed.position, events[-1].global_position if events else 0)
+                self._seen[id(ch)] = max(self._seen.get(id(ch), 0), position)
+            return res
+        return self._parts.route(cmd.tenant_id, send)
 
 
 class DataClient:
@@ -2946,6 +2962,9 @@ class Worker(_Stream):
             sig = self._key.sign(challenge_message(msg.challenge.nonce)).sig
             return pb.WorkerMessage(challenge_response=pb.ChallengeResponse(sig=sig))
         if kind == "registered":
+            if msg.registered.reader_of:
+                self._log.print("info", self._what, "connected to a reader: commands run on the writer "
+                                f"({msg.registered.reader_of}); this worker gets none here")
             if self._connects > 0:
                 self._log.print("info", self._what, "connected again")
             elif self.announce:
@@ -3117,8 +3136,10 @@ class Listener:
 
     def __init__(self, domain: Domain, name: str, order: int, start: int | None, reconnect_s: float,
                  store: str | None = None, schema: str = "1", *, live: bool = False, park_after: int = 0,
-                 instance: str | None = None, single: bool = False):
+                 instance: str | None = None, single: bool = False, reactor: bool = False):
         """Use `Domain.read_model` or `Domain.reactor`."""
+        #: Defined with `Domain.reactor`: a reader (a read-only copy of the writer) lets it wait.
+        self.reactor = reactor
         #: The instance ID it connects with (`None`: `KERNABLE_INSTANCE`, else none); see `Domain.read_model`.
         self.instance = instance
         #: Whether the instances take turns; see `Domain.reactor`.
@@ -3375,7 +3396,8 @@ class ListenerHandle(_Stream):
                          middlewares=[spec for spec, _ in d._middlewares.values()], live=d.live,
                          service=self._service, instance=instance,
                          single=bool(instance) and d.single and not d.live,
-                         deployment=self._kernable._deployment if self._kernable else "")
+                         deployment=self._kernable._deployment if self._kernable else "",
+                         reactor=d.reactor)
         # Reconnects resume after the last handled event, once the kernel sent one (an instance
         # that only waited has none).
         start = self.position if self._connects > 0 else self._start
@@ -3409,7 +3431,10 @@ class ListenerHandle(_Stream):
         elif kind == "waiting":
             # Another instance runs the group, or (a reactor) another deployment serves: this one
             # is ready to take over.
-            if msg.waiting.serving:
+            if msg.waiting.reader_of:
+                self._log.print("info", self._what, "waiting: this kernel is a reader; reactors act on the "
+                                f"writer ({msg.waiting.reader_of})")
+            elif msg.waiting.serving:
                 self._log.print("info", self._what, f"waiting: deployment {msg.waiting.serving} serves; "
                                 "this reactor acts once its own deployment does")
             else:

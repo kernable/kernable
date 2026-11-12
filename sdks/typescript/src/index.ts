@@ -1069,7 +1069,7 @@ export class Domain {
    * already.
    */
   reactor(name: string, options: ListenerOptions = {}): Listener {
-    return this.listen(new Listener(this, name, { order: 10, parkAfter: PARK_AFTER, single: true, ...options }));
+    return this.listen(new Listener(this, name, { order: 10, parkAfter: PARK_AFTER, single: true, ...options }, true));
   }
 
   /**
@@ -2296,12 +2296,14 @@ export class Kernable {
       await Promise.all(parts.map((p) => p.clients.query(signedWait, options.timeoutMs)));
       request.issued_at = issuedNow();
     }
-    const signed = {
-      ...request,
-      client_sig: this.key.sign(queryMessage(request)),
-      listener: handling.getStore() ?? "",
-    };
-    const res = await this.clients.route(request.tenant_id, (c) => c.query(signed, options.timeoutMs));
+    const listener = handling.getStore() ?? "";
+    const res = await this.clients.route(request.tenant_id, (c) => {
+      // Read your writes, on whichever copy answers: the query waits for this client's own
+      // newest command. Not from a handler, which must not wait behind its own listener.
+      const asked = listener ? request : { ...request, min_position: Math.max(request.min_position, c.seen()) };
+      const signed = { ...asked, client_sig: this.key.sign(queryMessage(asked)), listener };
+      return c.query(signed, options.timeoutMs);
+    });
     if (res.outcome === "rejected") throw new Rejected(res.rejected!.message, res.rejected!.code);
     return decode(res.response!);
   }
@@ -2336,7 +2338,12 @@ export class Kernable {
     };
     const signed = { ...cmd, client_sig: this.key.sign(commandMessage(cmd)) };
     const listener = handling.getStore();
-    return this.clients.route(signed.tenant_id, (c) => c.submit(signed, wait, listener, sealed.values, options.timeoutMs));
+    return this.clients.route(signed.tenant_id, async (c) => {
+      const res = await c.submit(signed, wait, listener, sealed.values, options.timeoutMs);
+      const events = res.committed?.events ?? [];
+      c.saw(Math.max(res.committed?.position ?? 0, Number(events[events.length - 1]?.global_position ?? 0)));
+      return res;
+    });
   }
 
   /**
@@ -2809,10 +2816,14 @@ export class Listener {
   /** The domains whose event schemas upcast events, by name: the own domain and those it `use`s. */
   readonly domains = new Map<string, Domain>();
 
-  constructor(domain: Domain, name: string, options: ListenerOptions = {}) {
+  /** Defined with `Domain.reactor`: a reader (a read-only copy of the writer) lets it wait. */
+  readonly reactor: boolean;
+
+  constructor(domain: Domain, name: string, options: ListenerOptions = {}, reactor = false) {
     this.domain = domain;
     this.name = name;
     this.options = options;
+    this.reactor = reactor;
     this.domains.set(domain.name, domain);
   }
 
@@ -3178,6 +3189,7 @@ export class ListenerHandle {
           instance,
           single,
           deployment: this.deployment,
+          reactor: this.listener.reactor,
           middlewares: [...middlewares].map(([when, m]) => ({
             order: m.options.order ?? 0,
             types: m.options.types,
@@ -3203,7 +3215,9 @@ export class ListenerHandle {
       this.log.print(
         "info",
         this.what,
-        m.waiting.serving
+        m.waiting.reader_of
+          ? `waiting: this kernel is a reader; reactors act on the writer (${m.waiting.reader_of})`
+          : m.waiting.serving
           ? `waiting: deployment ${m.waiting.serving} serves; this reactor acts once its own deployment does`
           : `waiting: instance ${m.waiting.active} is active`,
       );
@@ -3626,6 +3640,7 @@ export class Worker {
     if (m.challenge) {
       call.write({ challenge_response: { sig: this.key.sign(challengeMessage(m.challenge.nonce)).sig } });
     } else if (m.registered) {
+      if (m.registered.reader_of) this.log.print("info", "worker", `connected to a reader: commands run on the writer (${m.registered.reader_of}); this worker gets none here`);
       if (this.connects++ > 0) this.log.print("info", "worker", "connected again");
       else if (this.announce) this.log.print("info", "worker", `connected to ${this.log.peer} · runs ${[...this.byCommand.keys()].sort().join(", ")}`);
       this.markReady();

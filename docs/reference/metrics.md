@@ -33,6 +33,12 @@ Counters and durations count since the kernel started and begin at 0 again after
 | `kernable_standby_acknowledged` | gauge |  | The newest record the standby holds on its disk; writes after it wait. |
 | `kernable_standby_in_sync` | gauge |  | 1 while a standby is connected and has caught up; without it, writes wait. |
 | `kernable_standby_catching_up` | gauge |  | 1 while no standby has caught up yet (without a witness): writes are told without one. |
+| `kernable_readers` | gauge |  | Readers (read-only copies) following this kernel now (--readers on). |
+| `kernable_readers_lag_max` | gauge |  | Records the furthest behind of the connected readers lacks of this kernel's record log (0 without readers). |
+| `kernable_reader_following` | gauge |  | On a reader: 1 while it follows its writer (connected, and heard from it within 5 s). |
+| `kernable_reader_applied` | gauge |  | On a reader: the newest record of its writer's log it holds. |
+| `kernable_reader_lag` | gauge |  | On a reader: records it is behind what its writer may tell, as last heard. |
+| `kernable_reader_silent_ms` | gauge |  | On a reader: milliseconds since its writer last sent anything (it sends at least every second). |
 | `kernable_store_bytes` | gauge |  | Bytes the event store, the vault and the files take on the disk, measured every 10 s. |
 | `kernable_store_bytes_max` | gauge |  | --max-store-bytes: at it, new commands and file puts are refused (quota_storage). |
 | `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |

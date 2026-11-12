@@ -15,7 +15,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--store",
         "KERNABLE_STORE",
         "sqlite:kernable.db",
-        "The event store. It also holds the command queue and results, checkpoints, revocations and registrations. `sqlite:<path>` or a bare path: SQLite. `file:<path>`: an append-only log file. `memory:`: nothing survives the process, for tests.",
+        "The event store. It also holds the command queue and results, checkpoints, revocations and registrations. `sqlite:<path>` or a bare path: SQLite. `file:<path>`: an append-only log file. `memory:`: nothing survives the process, for tests. Keep it, the vault and the snapshots on a local disk, never on a network file system such as NFS or SMB: one kernel per store rests on a file lock (`<store>.lock`), which such file systems do not hold reliably, so two kernels could write one store.",
     ),
     (
         "--listen",
@@ -87,7 +87,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--admin-socket",
         "KERNABLE_ADMIN_SOCKET",
         "",
-        "A Unix socket for the operator's tools on this machine (mode 0600: the kernel's user, and root): `GET /metrics`, `/health`, `/ready` and `/ready?deployment=<d>` as on `--metrics-listen`, the UI's `GET /api/deployments`, `/api/deployments/warm-up` and `/api/deployments/since`, and `POST /api/deployments/drop?deployment=<d>[&force=true]` (`kernable deployments drop --socket`). Reached through the file system, so a tool need not enter the network namespace the kernel runs in. A stale socket at the path is replaced, a missing directory made (0700). Off when empty; `kernable node` sets it to `admin.sock` in the project directory. A standby serves it once it takes over. If it cannot be bound, the kernel stops.",
+        "A Unix socket for the operator's tools on this machine (mode 0600: the kernel's user, and root): `GET /metrics`, `/health`, `/ready` and `/ready?deployment=<d>` as on `--metrics-listen`, the UI's `GET /api/deployments`, `/api/deployments/warm-up` and `/api/deployments/since`, and `POST /api/deployments/drop?deployment=<d>[&force=true]` (`kernable deployments drop --socket`). Reached through the file system, so a tool need not enter the network namespace the kernel runs in. `GET /api/role` says what the kernel is (`writer` or `reader`) and how it stands (its standby and readers, or its writer and lag), as JSON. A stale socket at the path is replaced, a missing directory made (0700). Off when empty; `kernable node` sets it to `admin.sock` in the project directory. A standby and a reader catching up serve `/health`, `/ready` (503), `/metrics` and `/api/role` (`standby`, or `reader` catching up) on it until they serve in full. If it cannot be bound, the kernel stops.",
     ),
     (
         "--ui-listen",
@@ -106,6 +106,36 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "KERNABLE_BACKUP",
         "off",
         "`on`: a backup follower (`kernable backup`, a key granted `backup`) may follow the kernel and write its records to object storage; the kernel keeps its record log for it, as for a standby. `off`: no backup follower.",
+    ),
+    (
+        "--readers",
+        "KERNABLE_READERS",
+        "off",
+        "`on`: readers (read-only copies, `kernable start --reader`, each with a key granted `replicate`) may follow this kernel, any number of them; the kernel keeps its record log for them, as for a standby. A reader gets only what the kernel may tell (with `--replication sync`, what the standby holds), and nothing waits for it. Give both kernels of a pair `--readers on`. `off`: no readers.",
+    ),
+    (
+        "--reader",
+        "KERNABLE_READER",
+        "",
+        "Run as a reader, a read-only copy of the writer at these addresses (comma-separated: both kernels of a pair; it follows whichever is the primary). It applies the writer's records as a standby does, answers queries, subscriptions and live listeners from its own copy, forwards commands and every other write to the writer, and is never promoted. Reactors and workers that connect to it wait (`reader_of`); scheduled commands and business processes run on the writer. Needs `--follow-key` (granted `replicate`) and `--primary-kernel-key`; the writer needs `--readers on`. Not with `--follow`, `--witness`, `--replication sync`, `--backup on` or `--readers on`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
+    ),
+    (
+        "--from-backup",
+        "KERNABLE_FROM_BACKUP",
+        "",
+        "With `--reader`: a new or empty reader first restores the newest generation of this backup (a target as for `kernable restore`) and then catches up the rest from the writer, so a large store need not come from the writer. Needs `--from-backup-key`; if the backup holds vault values, also `--from-backup-vault-key`. If the writer no longer keeps the records after the backup, or the backup cannot be read, the reader takes a full image from the writer instead.",
+    ),
+    (
+        "--from-backup-key",
+        "KERNABLE_FROM_BACKUP_KEY",
+        "",
+        "With `--from-backup`: the backup key file (`kernable backup key`).",
+    ),
+    (
+        "--from-backup-vault-key",
+        "KERNABLE_FROM_BACKUP_VAULT_KEY",
+        "",
+        "With `--from-backup`: the vault key the backup's values are encrypted with, the writer's when it was taken. The reader encrypts them with its own `--vault-key` right after the restore.",
     ),
     (
         "--partition",
@@ -405,6 +435,24 @@ pub struct Replication {
     pub pair: Option<Pair>,
     /// `--backup on`: a backup follower may follow the kernel.
     pub backup: bool,
+    /// `--readers on`: readers may follow the kernel.
+    pub readers: bool,
+    /// `--reader`: run as a reader of the writer at `follow.primary` (comma-separated
+    /// addresses), not as its standby.
+    pub reader: bool,
+    /// `--from-backup`: where a new reader restores from before it catches up.
+    pub from_backup: Option<FromBackup>,
+}
+
+/// A backup a new reader starts from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FromBackup {
+    /// The backup's target, as for `kernable restore`.
+    pub target: String,
+    /// The backup key.
+    pub key: PathBuf,
+    /// The vault key its values are sealed with; `None` if it holds none.
+    pub vault_key: Option<PathBuf>,
 }
 
 /// A kernel of a pair.
@@ -583,12 +631,45 @@ impl Config {
                 .map(|k| key_id("--primary-kernel-key", k))
                 .collect()
         };
-        let follow = match get("--follow") {
-            None => None,
-            Some(primary) => Some(Follow {
+        let reader = get("--reader");
+        let follow = match (get("--follow"), reader.clone()) {
+            (Some(_), Some(_)) => {
+                return Err(
+                    "--follow runs a standby, --reader a read-only copy: give one of them".into(),
+                );
+            }
+            (Some(primary), None) if primary.contains(',') => {
+                return Err(format!(
+                    "--follow {primary}: a standby follows one primary (a pair's standby is started with --witness)"
+                )
+                .into());
+            }
+            (Some(primary), None) | (None, Some(primary)) => Some(Follow {
                 primary,
                 key: get("--follow-key").expect("has a default").into(),
                 primary_kernel_keys: kernel_keys()?,
+            }),
+            (None, None) => None,
+        };
+        let from_backup = match (get("--from-backup"), &reader) {
+            (None, _) => {
+                if get("--from-backup-key").is_some() || get("--from-backup-vault-key").is_some() {
+                    return Err(
+                        "--from-backup-key and --from-backup-vault-key go with --from-backup"
+                            .into(),
+                    );
+                }
+                None
+            }
+            (Some(_), None) => {
+                return Err("--from-backup is for a reader: give --reader too".into());
+            }
+            (Some(target), Some(_)) => Some(FromBackup {
+                target,
+                key: get("--from-backup-key")
+                    .ok_or("--from-backup needs --from-backup-key: the backup key file")?
+                    .into(),
+                vault_key: get("--from-backup-vault-key").map(PathBuf::from),
             }),
         };
         let pair = match get("--witness") {
@@ -602,7 +683,11 @@ impl Config {
             }
             None => None,
             Some(_) if follow.is_some() => {
-                return Err("--witness decides the roles: drop --follow".into());
+                return Err(if reader.is_some() {
+                    "a reader is never a kernel of a pair: drop --witness (give --reader both kernels' addresses)".into()
+                } else {
+                    "--witness decides the roles: drop --follow".into()
+                });
             }
             Some(_) if get("--witness-generation").is_none() => {
                 return Err("a kernel of a pair needs --witness-generation: the witness's generation, signed by the root key (kernable witness generation <root.key> 1 <witness address> for a new pair)".into());
@@ -632,7 +717,27 @@ impl Config {
                 "off" => false,
                 other => return Err(format!("--backup: {other} is neither on nor off").into()),
             },
+            readers: match get("--readers").expect("has a default").as_str() {
+                "on" => true,
+                "off" => false,
+                other => return Err(format!("--readers: {other} is neither on nor off").into()),
+            },
+            reader: reader.is_some(),
+            from_backup,
         };
+        if replication.reader {
+            let wrong = [
+                (replication.sync, "--replication sync"),
+                (replication.backup, "--backup on"),
+                (replication.readers, "--readers on"),
+            ];
+            if let Some((_, flag)) = wrong.iter().find(|(set, _)| *set) {
+                return Err(format!(
+                    "a reader is a read-only copy: it keeps no standby, backup follower or readers of its own, drop {flag} (the writer has them)"
+                )
+                .into());
+            }
+        }
         let tls = match (get("--tls-cert"), get("--tls-key"), get("--tls-client-ca")) {
             (Some(cert), Some(key), Some(client_ca)) => Some(Tls {
                 cert: cert.into(),

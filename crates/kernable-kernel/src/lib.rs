@@ -44,6 +44,7 @@ mod process_model;
 mod process_view;
 mod processes;
 mod queue;
+mod reader;
 mod replays;
 mod replication;
 pub use replication::{MAX_MESSAGE_BYTES, refuse_if_handed_over, switchover_keeper};
@@ -318,6 +319,10 @@ pub struct Kernel {
     replication: Option<Arc<replication::Primary>>,
     /// The backup follower, with `--backup on`.
     backup: replication::Backup,
+    /// The readers that follow this kernel, with `--readers on`.
+    readers: replication::Readers,
+    /// With `--reader`: this kernel is a read-only copy of the writer.
+    reader: Option<Arc<reader::Reader>>,
     /// The primary of a pair takes switchover requests here; None otherwise.
     switchover: Mutex<Option<tokio::sync::mpsc::Sender<node::SwitchoverAsk>>>,
     /// Bytes of the event store, the vault and the files, measured every 10 s.
@@ -360,7 +365,13 @@ impl Kernel {
             .collect();
         let memberships = memberships::Memberships::load(store.memberships()?);
         let processes = processes::Processes::load(store.processes()?);
-        let listeners = listeners::Registry::load(store.listeners()?, &memberships);
+        let is_reader = config.replication.reader;
+        // A reader's listeners are its own: only the writer's middlewares count here from the
+        // start, so a query is checked by them (failing closed) until they connect here too.
+        let listeners = match is_reader {
+            true => listeners::Registry::load_middlewares(store.listeners()?, &memberships),
+            false => listeners::Registry::load(store.listeners()?, &memberships),
+        };
         let workers = workers::Registry::load(store.workers()?);
         let schemas = store.event_schemas()?.into_iter().collect();
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
@@ -404,9 +415,23 @@ impl Kernel {
         let data = kernable_store::data::open(&config.data)?;
         let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
         let durable = AtomicU64::new(store.head_position()?);
-        // A standby and a backup follower continue the record log (design/replication.md);
-        // without either it is not kept.
-        store.keep_record_log(config.replication.sync || config.replication.backup)?;
+        // A standby, a backup follower and readers continue the record log
+        // (design/replication.md); without any it is not kept. A reader's own is its writer's.
+        let replication_config = &config.replication;
+        store.keep_record_log(
+            replication_config.sync
+                || replication_config.backup
+                || replication_config.readers
+                || is_reader,
+        )?;
+        // A reader writes nothing of its own: only what it applies from its writer.
+        let reader = match is_reader {
+            true => {
+                let head = store.seal_records(true)?;
+                Some(Arc::new(reader::Reader::open(&config, head.seq)?))
+            }
+            false => None,
+        };
         let replication = config.replication.sync.then(|| {
             Arc::new(match config.replication.pair {
                 Some(_) => replication::Primary::new(),
@@ -427,7 +452,8 @@ impl Kernel {
                 .collect(),
             _ => Vec::new(),
         };
-        for pending in store.pending()? {
+        // A reader runs no command: its writer does.
+        for pending in store.pending()?.into_iter().filter(|_| !is_reader) {
             let scheduled = queue::scheduled(&pending.command, pending.received_at);
             // A write of the process engine a crash cut short: no worker runs it; the engine
             // writes it again under the same ID.
@@ -452,6 +478,8 @@ impl Kernel {
             failed_commits: AtomicU32::new(0),
             appended: Notify::new(),
             backup: replication::Backup::default(),
+            readers: replication::Readers::default(),
+            reader,
             switchover: Mutex::default(),
             stored_bytes: AtomicU64::new(0),
             usage_base,
@@ -570,7 +598,8 @@ impl Kernel {
     /// Sessions are checked again when it replaces another grant.
     pub fn grant(&self, grant: Grant) -> Result<(), Status> {
         self.check_grant(&grant)?;
-        self.keep(grant, true)
+        // A reader keeps it in memory: what it stores comes from its writer.
+        self.keep(grant, self.reader.is_none())
     }
 
     fn check_grant(&self, grant: &Grant) -> Result<(), Status> {
@@ -835,6 +864,17 @@ impl Kernel {
         if self.draining.load(SeqCst) {
             return Err("shutting down".into());
         }
+        // A reader: following its writer, and its own listeners caught up. Workers and
+        // reactors are the writer's.
+        if let Some(reader) = &self.reader {
+            if let Some(why) = reader.unready() {
+                return Err(why);
+            }
+            return match self.listeners.behind(&[]).as_slice() {
+                [] => Ok(()),
+                behind => Err(format!("waiting for listeners: {}", behind.join(", "))),
+            };
+        }
         if let Some(primary) = &self.replication
             && !primary.in_sync()
         {
@@ -849,6 +889,12 @@ impl Kernel {
             [] => Ok(()),
             behind => Err(format!("waiting for listeners: {}", behind.join(", "))),
         }
+    }
+
+    /// What this kernel is (`writer` or `reader`) and how it stands, as `GET /api/role` on the
+    /// local socket answers.
+    pub fn role(&self) -> serde_json::Value {
+        reader::role(self)
     }
 
     /// Whether `deployment` could take over now (`deployments::warm_up`): every read model and
@@ -1163,6 +1209,10 @@ impl Kernel {
     /// after a restart, every unfinished command is delivered again right away.
     pub fn shutdown(&self) -> Result<(), BoxError> {
         usage::write(self);
+        // A reader writes nothing to its stores: they are its writer's.
+        if self.reader.is_some() {
+            return Ok(());
+        }
         // Handed over, it writes nothing more: its log stays the new primary's beginning, so it
         // follows it without an image. The new primary holds every position acknowledged.
         if self.replication.as_ref().is_some_and(|p| p.handed_over()) {
@@ -1497,10 +1547,16 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     let max = limits.message_bytes;
     let data_max = max.max(kernel.config.limits.data_bytes + (64 << 10));
     let cache_max = max.max(MAX_CACHE_BYTES + (64 << 10));
+    let forward_to = kernel.reader.clone();
     let router = builder
         .max_concurrent_streams(Some(limits.streams_per_connection))
         .http2_keepalive_interval(Some(KEEPALIVE_INTERVAL))
         .http2_keepalive_timeout(Some(KEEPALIVE_TIMEOUT))
+        // A reader forwards writes to its writer as they come.
+        .layer(tower::layer::layer_fn(move |inner| reader::Forward {
+            inner,
+            reader: forward_to.clone(),
+        }))
         .add_service(
             CommandServiceServer::new(api.clone())
                 .max_decoding_message_size(max)
@@ -1602,19 +1658,23 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         }
         Ok(())
     };
+    // A reader writes nothing and acts outward in nothing: no checkpoints, listener positions,
+    // timers, processes or partition work; it follows its writer instead.
+    let writer = kernel.reader.is_none();
     tokio::select! {
         result = server => result,
-        _ = checkpoints(&kernel) => unreachable!(),
+        _ = checkpoints(&kernel), if writer => unreachable!(),
         _ = usage::keep(&kernel) => unreachable!(),
         _ = measure_stores(&kernel) => unreachable!(),
-        () = retire_deployments(&kernel) => unreachable!(),
-        _ = flush_listeners(&kernel) => unreachable!(),
+        () = retire_deployments(&kernel), if writer => unreachable!(),
+        _ = flush_listeners(&kernel), if writer => unreachable!(),
         () = keep_sealed_while_fenced(&kernel) => unreachable!(),
         _ = sample_trend(&kernel) => unreachable!(),
-        () = partitions::follow_control(&kernel) => unreachable!(),
-        () = moves::follow_moves(&kernel) => unreachable!(),
-        () = timers::run(&kernel) => unreachable!(),
-        () = process_engine::run(&kernel) => unreachable!(),
+        () = partitions::follow_control(&kernel), if writer => unreachable!(),
+        () = moves::follow_moves(&kernel), if writer => unreachable!(),
+        () = timers::run(&kernel), if writer => unreachable!(),
+        () = process_engine::run(&kernel), if writer => unreachable!(),
+        why = reader::follow_writer(&kernel) => Err(why),
         result = serve_metrics(&kernel) => result,
         result = serve_admin(&kernel) => result,
         result = serve_ui(&kernel) => result,
@@ -1826,6 +1886,12 @@ impl Kernel {
                 "a deployment has 1 to 128 letters, digits, `-`, `_` and `.`".into(),
             ));
         }
+        if self.reader.is_some() {
+            return Err(refused(
+                "unavailable",
+                "this kernel is a reader: drop the deployment on the writer".into(),
+            ));
+        }
         if self.fenced() || sealed(self) {
             return Err(refused(
                 "unavailable",
@@ -1963,6 +2029,11 @@ impl CommandService for Api {
         let metadata = request.metadata().clone();
         let request = request.into_inner();
         protocol(request.protocol)?;
+        if kernel.reader.is_some() {
+            return reader::submit(kernel, &metadata, request)
+                .await
+                .map(Response::new);
+        }
         let _running = kernel.request()?;
         let wait = request.wait();
         let listener = request.listener;
@@ -2155,6 +2226,10 @@ impl CommandService for Api {
                 kernel.metrics.settle.record(started.elapsed());
                 crash::point("settle.done");
             }
+        }
+        // Where the events are: a query with it as min_position sees them on any copy.
+        if let Some(Outcome::Committed(c)) = &mut result.outcome {
+            c.position = c.events.last().map_or(0, |e| e.global_position);
         }
         Ok(Response::new(result))
     }
@@ -2582,10 +2657,13 @@ async fn wait_only(
         }
     })
     .await
-    .map_err(|_| {
-        Status::deadline_exceeded(format!(
+    .map_err(|_| match &kernel.reader {
+        Some(reader) if kernel.durable.load(SeqCst) < target => {
+            reader::behind(kernel, reader, target)
+        }
+        _ => Status::deadline_exceeded(format!(
             "no read model that answers {name} reached position {target} in time"
-        ))
+        )),
     })?;
     Ok(Response::new(QueryResult {
         query_id: query.query_id,
@@ -2730,6 +2808,12 @@ async fn run_query(
         }
         Err(_) => {
             kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+            // A reader that does not hold min_position yet says so: the SDKs try again.
+            if let Some(reader) = &kernel.reader
+                && kernel.durable.load(SeqCst) < query.min_position
+            {
+                return Err(reader::behind(kernel, reader, query.min_position));
+            }
             return Err(Status::deadline_exceeded(
                 "no read model answered in time (or none has caught up to min_position)",
             ));
@@ -2849,7 +2933,11 @@ impl WorkerGateway for Api {
         let metadata = request.metadata().clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = run_session(kernel, &metadata, &mut inbound, &out).await {
+            let ran = match kernel.reader.is_some() {
+                true => reader::idle_worker(kernel, &metadata, &mut inbound, &out).await,
+                false => run_session(kernel, &metadata, &mut inbound, &out).await,
+            };
+            if let Err(status) = ran {
                 let _ = out.send(Err(status)).await;
             }
         });
@@ -3146,6 +3234,7 @@ async fn run_session(
     send(
         out,
         Out::Registered(Registered {
+            reader_of: String::new(),
             session_id: reg.worker_id.clone(),
         }),
     )
@@ -3770,6 +3859,7 @@ impl Session {
                     let result = CommandResult {
                         command_id: f.command.command_id.clone(),
                         outcome: Some(Outcome::Committed(Committed {
+                            position: events.last().map_or(0, |e| e.global_position),
                             events,
                             settled: false,
                         })),
