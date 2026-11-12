@@ -37,12 +37,15 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                        [--expires <days>] | revoke <id>]
                                           Tokens for CI (KERNABLE_CLOUD_TOKEN), never an owner's;
                                           shown once
-  kernable cloud projects [--team <team>] [create <name> [--plan <plan>] | show <name>
+  kernable cloud projects [--team <team>] [create <name> [--plan <plan>] [--escrow-key <age1…>] | show <name>
                        | usage <name> [--month <yyyy-mm>] | stop <name> | start <name>
                        | domain add <name> <host> | domain remove <name> <host>]
                                           A new project is placed at once, past the checks before
-                                          a team's first project. A host name of your own: set the
-                                          TXT record `domain add` names, then run it again
+                                          a team's first project. --escrow-key: your age key
+                                          (age-keygen) its vault key is kept sealed for beside its
+                                          backups, only you can open it; set when it is created,
+                                          never after. A host name of your own: set the TXT record
+                                          `domain add` names, then run it again
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
 const DEFAULT_API: &str = "https://api.kernable.com";
@@ -797,6 +800,7 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
     let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
     let plan = flag(&mut rest, "--plan")?;
     let month = flag(&mut rest, "--month")?;
+    let escrow = flag(&mut rest, "--escrow-key")?;
     let t = team(&mut s, team_flag)?;
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -821,7 +825,11 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
             let v = s.call(
                 "POST",
                 &format!("/v1/teams/{t}/projects"),
-                Some(json!({ "name": name, "plan": plan.as_deref().unwrap_or("preview") })),
+                Some(json!({
+                    "name": name,
+                    "plan": plan.as_deref().unwrap_or("preview"),
+                    "escrow_key": escrow,
+                })),
             )?;
             s.show(&v, |v| {
                 println!(
