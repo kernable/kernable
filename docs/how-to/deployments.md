@@ -33,7 +33,7 @@ A service's [membership](./deploy#a-new-version-of-a-service) names the deployme
 A new deployment does not take over the moment its processes start: its read models first rebuild from the events beside the serving deployment's, while the serving one goes on. The kernel switches a service to another deployment only once that deployment has **caught up**:
 
 - for every aggregate the membership lists, a worker of the deployment is connected;
-- every read model and middleware it lists is registered for the deployment (`carts@2026-11-11.2`) and within `--deployment-switch-lag` events (default 100) of the newest one. A reactor keeps one registration across deployments and needs no warm-up; one that waits for the deployment to serve counts as ready.
+- every read model and middleware it lists is registered for the deployment (`carts@2026-11-11.2`) and within `--deployment-switch-lag` events (default 100) of the newest one, and has not stopped at an event since its connection last ended with events outstanding (a handler that may fail there). A reactor keeps one registration across deployments and needs no warm-up; one that waits for the deployment to serve counts as ready.
 
 A deployment that never served does not take over at all, however long it waits, while
 
@@ -227,7 +227,7 @@ The deployment commands print JSON with `--json`, for a platform or a script. Fi
   "caughtUp": false, "waitingFor": "deployment 2026-11-11.2 has not caught up: carts@2026-11-11.2 at 1990 of 2215",
   "failed": [],
   "listeners": [ { "name": "carts", "registration": "carts@2026-11-11.2", "position": 1990,
-                   "behind": 225, "connected": true, "caughtUp": false } ],
+                   "behind": 225, "connected": true, "stalled": false, "caughtUp": false } ],
   "workers": [ { "aggregate": "shop.Cart", "connected": true } ]
 }
 ```

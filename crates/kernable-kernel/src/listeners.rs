@@ -215,6 +215,9 @@ pub(crate) struct Warming {
     pub(crate) versioned: bool,
     pub(crate) position: u64,
     pub(crate) connected: bool,
+    /// A connection of it ended with events outstanding, and it has not acknowledged past them
+    /// since: its handler may fail there, so it is not caught up, however close to the head.
+    pub(crate) stalled: bool,
 }
 
 #[derive(Default)]
@@ -360,6 +363,7 @@ impl Registry {
             versioned: e.versioned,
             position: e.record.position,
             connected: e.connected(),
+            stalled: e.stall.is_some(),
         };
         let of_service = |e: &Entry| service.is_none_or(|s| e.record.service == s) && !e.live;
         let mut all: Vec<(String, Option<Warming>)> = match names {
@@ -379,6 +383,7 @@ impl Registry {
                                 versioned: false,
                                 position: 0,
                                 connected: false,
+                                stalled: false,
                             })
                     };
                     (n.clone(), own.or(shared).map(warming).or_else(waits))

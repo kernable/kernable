@@ -485,7 +485,9 @@ pub(crate) struct WarmUp {
 
 impl WarmUp {
     fn warm(&self, w: &crate::listeners::Warming) -> bool {
-        !w.versioned || self.served_before || w.position.saturating_add(self.lag) >= self.head
+        !w.versioned
+            || self.served_before
+            || (!w.stalled && w.position.saturating_add(self.lag) >= self.head)
     }
 
     /// Why the deployment may not take over yet; `None` once every listener it takes over
@@ -497,8 +499,15 @@ impl WarmUp {
             match w {
                 None => waiting.push(format!("{name} has not connected")),
                 Some(w) if !self.warm(w) => waiting.push(format!(
-                    "{} at {} of {}",
-                    w.registration, w.position, self.head
+                    "{} at {} of {}{}",
+                    w.registration,
+                    w.position,
+                    self.head,
+                    if w.stalled {
+                        ", its connection ended there with events outstanding"
+                    } else {
+                        ""
+                    }
                 )),
                 Some(_) => {}
             }
@@ -536,6 +545,7 @@ impl WarmUp {
                     "position": w.position,
                     "behind": self.head.saturating_sub(w.position),
                     "connected": w.connected,
+                    "stalled": w.stalled,
                     "caughtUp": self.warm(w),
                 }),
                 None => json!({ "name": name, "registration": null, "caughtUp": false }),
@@ -963,6 +973,34 @@ mod tests {
         let store = store_with(&[("a", "Opened", 1, "v1")]);
         assert_eq!(drop_state(store.as_ref(), "v1").unwrap(), (vec![], true));
         assert_eq!(drop_state(store.as_ref(), "v2").unwrap(), (vec![], false));
+    }
+
+    #[test]
+    fn a_read_model_whose_connection_ended_with_events_outstanding_is_not_caught_up() {
+        let w = |stalled| crate::listeners::Warming {
+            registration: "carts@v2".into(),
+            versioned: true,
+            position: 95,
+            connected: true,
+            stalled,
+        };
+        let warm_up = |listener| WarmUp {
+            deployment: "v2".into(),
+            head: 100,
+            lag: 100,
+            served_before: false,
+            listeners: vec![("carts".into(), Some(listener))],
+            workers: vec![("shop.cart".into(), true)],
+            failed: Vec::new(),
+        };
+        assert!(warm_up(w(false)).why_not().is_none(), "within the lag");
+        let why = warm_up(w(true)).why_not().unwrap();
+        assert!(
+            why.contains(
+                "carts@v2 at 95 of 100, its connection ended there with events outstanding"
+            ),
+            "{why}"
+        );
     }
 
     #[test]
