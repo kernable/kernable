@@ -977,6 +977,104 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
     drop(new);
 }
 
+/// One request to a kernel's local socket: the whole response.
+async fn local(socket: &Path, method: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut conn = tokio::net::UnixStream::connect(socket).await.unwrap();
+    conn.write_all(format!("{method} {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    conn.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+/// A switchover on the primary's local socket, with no key: the same checks as over the
+/// network. Refused without a standby (`kernable switchover --socket`), and with one in sync
+/// it hands the role over without losing a told write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switchover_on_the_local_socket_needs_no_key_and_makes_the_same_checks() {
+    let dir = Dir::new("repl-switchover-local");
+    // Alone, without --replication sync: refused, by the CLI too.
+    let mut alone = config(&dir.0, "alone", 3);
+    let alone_socket = dir.0.join("alone-admin.sock");
+    alone.admin_socket = Some(alone_socket.display().to_string());
+    let _alone = open(&alone).await;
+    until("the local socket is up", || alone_socket.exists()).await;
+    assert!(
+        local(&alone_socket, "GET", "/api/switchover")
+            .await
+            .starts_with("HTTP/1.1 405")
+    );
+    let refused = local(&alone_socket, "POST", "/api/switchover").await;
+    assert!(refused.starts_with("HTTP/1.1 409"), "{refused}");
+    assert!(refused.contains("without --replication sync"), "{refused}");
+    let socket = alone_socket.display().to_string();
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_kernable"))
+            .args(["switchover", "--socket", &socket])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("without --replication sync"),
+        "{out:?}"
+    );
+
+    // A primary with a standby in sync hands over, asked on its socket.
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary_socket = dir.0.join("primary-admin.sock");
+    primary_config.admin_socket = Some(primary_socket.display().to_string());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let primary = {
+        let _primary_runtime = runtime.enter();
+        Kernel::open(primary_config.clone()).unwrap()
+    };
+    runtime.spawn(serve(Arc::clone(&primary)));
+    wait_for(&primary_config.listen).await;
+    let handed = runtime
+        .spawn(kernable_kernel::switchover_keeper(&primary).expect("a primary without a witness"));
+    for seed in [1, 2] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
+    let mut standby_config = standby_config(&dir.0, &primary_config);
+    standby_config.replication.sync = true;
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
+    let mut told = Vec::new();
+    for i in 0..5 {
+        told.push(submit(&primary_config.listen, place(i)).await.unwrap());
+    }
+    let answer = local(&primary_socket, "POST", "/api/switchover").await;
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(answer.contains(&id(&key(7))), "names the standby: {answer}");
+    let why = handed.await.unwrap();
+    assert!(why.to_string().contains("handed over"), "{why}");
+    following.await.unwrap().unwrap();
+    primary.shutdown().unwrap();
+    drop(primary);
+    runtime.shutdown_background();
+
+    // The standby serves, with everything the primary told.
+    let _new = open(&standby_config).await;
+    start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
+    for (i, result) in told.iter().enumerate() {
+        let again = submit(&standby_config.listen, place(i as u32))
+            .await
+            .unwrap();
+        assert_eq!(events(&again), events(result), "c{i}");
+    }
+}
+
 /// A standby whose own tail completed a command that brought vault values (design/rewind.md):
 /// the command is put back to pending if the vault still holds its values, and the standby
 /// takes the tail back; with them gone (a crash dropped them), it starts over.

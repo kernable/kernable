@@ -15,6 +15,10 @@
 //! - `POST /api/deployments/drop?deployment=<d>[&force=true]`: drops a deployment's read models
 //!   and snapshots while the kernel runs ([`Kernel::drop_deployment`]); 200 with what went, 409
 //!   with `{"error": <code>, "message": …}` when refused.
+//! - `POST /api/switchover`: the primary hands its role to its standby in sync, with the checks
+//!   of `kernable switchover` over the network (standby in sync, a handover without loss) but no
+//!   key: reaching the socket is the permission. 200 with `{"standby", "seq"}` once handed over,
+//!   409 with `{"error": "refused", "message": …}` when refused.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -162,6 +166,28 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         (_, "/api/deployments/drop") => {
             reply("405 Method Not Allowed", "text/plain", b"POST only\n")
         }
+        ("POST", "/api/switchover") => {
+            // On a blocking thread of the runtime (see serve_on): it may wait for the handover.
+            let asked = tokio::runtime::Handle::current()
+                .block_on(crate::replication::switch_over(kernel, "the local socket"));
+            match asked {
+                Ok(result) => reply(
+                    "200 OK",
+                    "application/json",
+                    json!({ "standby": result.standby, "seq": result.seq })
+                        .to_string()
+                        .as_bytes(),
+                ),
+                Err(status) => reply(
+                    "409 Conflict",
+                    "application/json",
+                    json!({ "error": "refused", "message": status.message() })
+                        .to_string()
+                        .as_bytes(),
+                ),
+            }
+        }
+        (_, "/api/switchover") => reply("405 Method Not Allowed", "text/plain", b"POST only\n"),
         _ => reply("404 Not Found", "text/plain", b"not found\n"),
     }
 }

@@ -94,6 +94,14 @@ With `kernable switchover`, the primary hands its role over to the standby at on
 
 If the standby is not in sync, or does not hold everything within 10 s, the switchover is refused and the primary serves on. Under [`kernable node`](./node), the stopped kernel is started again by itself.
 
+On the primary's machine, the same works without a key, on its local socket ([`--admin-socket`](../reference/configuration)), which only the kernel's user and root can reach:
+
+```sh
+kernable switchover --socket /srv/kernable/admin.sock
+```
+
+It makes the same checks (a standby in sync, a handover without loss) and answers the same way (`POST /api/switchover` on the socket: 200 once handed over, 409 with why not). Use it where no key granted `manage` should be at hand, for example from a tool that runs on the server.
+
 A **planned stop** does the same: SIGTERM to the primary of a pair (`systemctl stop`, a node stopping) hands its role to the standby in sync first, then the primary drains and stops. The standby serves at once instead of after the lease. Without a standby in sync, the primary stops as before. A primary of a pair whose lease at the witness ran out while no standby in sync holds its writes (cut off by the network, say) tells nothing more: a write waiting for the standby, and every new request, is answered `UNAVAILABLE` within about a lease, so clients with both addresses turn to the other kernel and submit again there (safe: commands are idempotent by ID). While it is fenced like this it writes nothing in the background either (no checkpoint, listener position or worker), so all its log can hold that the new primary lacks are the commits that were under way. Its standby notices the silence within two thirds of a lease (pings on its connection) and takes over. A standby stopped with SIGTERM tells its primary that it leaves, and the primary of a pair commits alone at once instead of after `--standby-timeout-ms`. SIGUSR1 stops a kernel without handing over; [`kernable node`](./node) sends it when a new kernel binary on the same machine takes the stores over.
 
 ## A fixed primary and standby

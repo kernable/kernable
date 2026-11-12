@@ -146,6 +146,10 @@ Keys and trust:
                                           --follow. For updates and moves: update or start the
                                           standby, switch over, update or retire the old primary.
                                           <key> needs a grant for manage on *.
+  kernable switchover --socket <admin.sock>
+                                          The same on the primary's local socket (--admin-socket),
+                                          with the same checks and no key: whoever reaches the
+                                          socket (the kernel's user, root) may switch over.
   kernable certs new <dir> <client>...    Writes a development CA (ca.tls.crt), a kernel certificate
                                           (kernel.tls.crt, kernel.tls.key) and a certificate per
                                           <client> (<client>.tls.crt, <client>.tls.key) to <dir>,
@@ -552,6 +556,7 @@ async fn main() -> ExitCode {
         }
         ["revoke", addr, root, key, since] => revoke(addr, root, key, since).await,
         ["promote", addr, key] => promote(addr, key).await,
+        ["switchover", "--socket", socket] => switchover_local(socket),
         ["switchover", addr, key] => switchover(addr, key).await,
         ["partitions", "apply", addr, key, map] => partitions_apply(addr, key, map).await,
         ["partitions", "show", addr, key] => partitions_show(addr, key).await,
@@ -2404,6 +2409,27 @@ async fn switchover(addr: &str, key_path: &str) -> Result<bool> {
     println!(
         "switched over: {} is the primary now, from record {}; {addr} stops (to follow it, start it again: in a pair as before, otherwise with --follow)",
         result.standby, result.seq
+    );
+    Ok(true)
+}
+
+/// `kernable switchover --socket <admin.sock>`: the same, on the kernel's local socket, with no
+/// key: whoever may reach the socket (the kernel's user and root) may switch over.
+fn switchover_local(socket: &str) -> Result<bool> {
+    let (status, body) = local_request(socket, "POST", "/api/switchover")?;
+    let answer: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| format!("{socket}: {}", String::from_utf8_lossy(&body).trim()))?;
+    if status != 200 {
+        return Err(answer["message"]
+            .as_str()
+            .unwrap_or("the kernel refused the switchover")
+            .to_owned()
+            .into());
+    }
+    println!(
+        "switched over: {} is the primary now, from record {}; the kernel at {socket} stops (to follow it, start it again: in a pair as before, otherwise with --follow)",
+        answer["standby"].as_str().unwrap_or_default(),
+        answer["seq"]
     );
     Ok(true)
 }

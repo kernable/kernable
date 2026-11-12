@@ -761,28 +761,42 @@ impl ReplicationService for Api {
                 "the key may not switch over: its grant needs manage for *",
             ));
         }
-        let asks = kernel
-            .switchover
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-            .ok_or_else(|| {
-                Status::failed_precondition(
-                    "this kernel runs without --replication sync: it has no standby to hand over to",
-                )
-            })?;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tracing::warn!(key = %sig.key_id, "switchover asked by an operator");
-        asks.send(tx)
+        switch_over(kernel, &format!("key {}", sig.key_id))
             .await
-            .map_err(|_| Status::failed_precondition("this kernel is no longer the primary"))?;
-        match rx.await {
-            Ok(Ok(result)) => Ok(Response::new(result)),
-            Ok(Err(why)) => Err(Status::failed_precondition(why)),
-            Err(_) => Err(Status::failed_precondition(
-                "this kernel is no longer the primary",
-            )),
-        }
+            .map(Response::new)
+    }
+}
+
+/// Hands the primary role to the standby in sync, as asked by `who` (a key over the network,
+/// or the local socket): the same checks either way, the standby in sync and a handover without
+/// loss (`hand_over_when_asked`). Ends once it handed over, or with why not.
+pub(crate) async fn switch_over(kernel: &Kernel, who: &str) -> Result<SwitchoverResult, Status> {
+    if kernel.reader.is_some() {
+        return Err(Status::failed_precondition(
+            "this kernel is a reader: ask the writer to switch over",
+        ));
+    }
+    let asks = kernel
+        .switchover
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| {
+            Status::failed_precondition(
+                "this kernel runs without --replication sync: it has no standby to hand over to",
+            )
+        })?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tracing::warn!(%who, "switchover asked by an operator");
+    asks.send(tx)
+        .await
+        .map_err(|_| Status::failed_precondition("this kernel is no longer the primary"))?;
+    match rx.await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(why)) => Err(Status::failed_precondition(why)),
+        Err(_) => Err(Status::failed_precondition(
+            "this kernel is no longer the primary",
+        )),
     }
 }
 

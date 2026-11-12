@@ -107,6 +107,14 @@ kernable switchover <addr> <key>
 
 Hands the primary role over to the standby in sync now: the primary at `<addr>` refuses new requests (the SDKs retry them on the other kernel), lets running ones finish, and waits until the standby holds every record (at most 10 s). In a pair (`--witness`) it tells the witness; without one it tells the standby on its stream. The standby serves at once, and the old primary stops: in a pair, started again, it follows; without a witness, it starts only with `--follow`. For updates and moves: update or start the standby, switch over, update or retire the old primary. `<key>` needs a grant for manage on `*`.
 
+### `kernable switchover`
+
+```text
+kernable switchover --socket <admin.sock>
+```
+
+The same on the primary's local socket (`--admin-socket`), with the same checks and no key: whoever reaches the socket (the kernel's user, root) may switch over.
+
 ### `kernable certs new`
 
 ```text
