@@ -475,6 +475,13 @@ Scripting:
                                           vault fields: not for commands with personal or secret
                                           values.
 
+kernable Cloud:
+  kernable cloud login | logout | whoami | teams | members | tokens | projects
+                                          Signs in to a kernable Cloud installation by device
+                                          code and manages its teams, members, CI tokens and
+                                          projects through its account API (--api <url>);
+                                          kernable cloud help lists them all.
+
 Arguments and exit codes:
   <addr> is host:port, http://host:port, or unix:<path> on Unix. To reach a kernel over mutual TLS,
   set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY to PEM files, as for the SDKs. <store>
@@ -708,6 +715,19 @@ async fn main() -> ExitCode {
                 vault_refs: Vec::new(),
             };
             submit(addr, key, cmd).await
+        }
+        ["cloud", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| (*a).to_owned()).collect();
+            // It blocks on HTTP and waits for the browser: off the async workers.
+            match tokio::task::spawn_blocking(move || kernable_kernel::cloud::run(&rest)).await {
+                Ok(Ok(true)) => Ok(true),
+                Ok(Ok(false)) => {
+                    eprintln!("{}", kernable_kernel::cloud::USAGE);
+                    return ExitCode::from(2);
+                }
+                Ok(Err(e)) => Err(e.into()),
+                Err(e) => Err(e.to_string().into()),
+            }
         }
         _ => {
             eprintln!("{USAGE}");
