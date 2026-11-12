@@ -69,6 +69,10 @@ __all__ = ["PROTOCOL", "waits_for_switch", "Event", "Command", "Query", "StoredE
            "Process", "QueryContext", "QueryMeta", "QueryOutcome", "RegisteredProcess", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Subscription", "Tls", "Worker",
            "Value", "domain", "reindex_type", "value"]
 
+#: The key of a channel in `Kernable._seen`: the builtin `id`, which a parameter named `id` (a
+#: command ID) would hide inside the method that keeps it.
+_channel_id = id
+
 #: Time zero (UTC): the default of times not known.
 _EPOCH = datetime.fromtimestamp(0, timezone.utc)
 
@@ -2178,7 +2182,7 @@ class Kernable:
             # Read your writes: wait for this client's own newest command, on whichever copy
             # answers. Not from a handler, which must not wait behind its own listener.
             if not q.listener:
-                q.min_position = max(min_position, self._seen.get(id(ch), 0))
+                q.min_position = max(min_position, self._seen.get(_channel_id(ch), 0))
             q.client_sig.CopyFrom(self._key.sign(query_message(q)))
             return _idempotent(timeout_s or self._timeout_s, lambda left: rpc.QueryServiceStub(ch).Query(q, timeout=left))
         res = self._parts.route(q.tenant_id, ask)
@@ -2252,7 +2256,7 @@ class Kernable:
             if res.WhichOneof("outcome") == "committed":
                 events = res.committed.events
                 position = max(res.committed.position, events[-1].global_position if events else 0)
-                self._seen[id(ch)] = max(self._seen.get(id(ch), 0), position)
+                self._seen[_channel_id(ch)] = max(self._seen.get(_channel_id(ch), 0), position)
             return res
         return self._parts.route(cmd.tenant_id, send)
 
