@@ -1,5 +1,7 @@
-//! The check before switching (docs/how-to/deployments.md, "Check a deployment before
-//! switching"): `kernable replay` sends the commands a source stored after a point, in their
+//! Commands replayed on a developer's own masked copy (docs/how-to/deployments.md, "Replay
+//! commands on your own copy"), a developer tool: the commands run their handlers, so code that
+//! calls out does, and it is never meant for production or as a gate before a switch (that
+//! check uses the events only, in the deployment's warm-up). `kernable replay` sends the commands a source stored after a point, in their
 //! original order and with their original times, to a kernel on a masked copy of that point
 //! (`--replay on`) where the new deployment's workers run, and compares each outcome with the
 //! original one: the events (types, schemas, number, payload fields) or the rejection code.

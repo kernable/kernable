@@ -1300,9 +1300,17 @@ impl ListenerHandle {
                     continue;
                 }
                 Some(Delivery::Waiting(w)) => {
-                    // Another instance runs the group: this one is ready to take over.
+                    // Another instance runs the group, or (a reactor) another deployment
+                    // serves: this one is ready to take over.
                     client.log.info(&what, || {
-                        format!("waiting: instance {} is active", w.active)
+                        if w.serving.is_empty() {
+                            format!("waiting: instance {} is active", w.active)
+                        } else {
+                            format!(
+                                "waiting: deployment {} serves; this reactor acts once its own deployment does",
+                                w.serving
+                            )
+                        }
                     });
                     inner.ready.send_replace(true);
                     continue;

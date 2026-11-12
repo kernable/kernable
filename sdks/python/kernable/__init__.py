@@ -3407,8 +3407,13 @@ class ListenerHandle(_Stream):
             self._log_connected(msg.ready.after_position)
             self.ready.set()
         elif kind == "waiting":
-            # Another instance runs the group: this one is ready to take over.
-            self._log.print("info", self._what, f"waiting: instance {msg.waiting.active} is active")
+            # Another instance runs the group, or (a reactor) another deployment serves: this one
+            # is ready to take over.
+            if msg.waiting.serving:
+                self._log.print("info", self._what, f"waiting: deployment {msg.waiting.serving} serves; "
+                                "this reactor acts once its own deployment does")
+            else:
+                self._log.print("info", self._what, f"waiting: instance {msg.waiting.active} is active")
             self.ready.set()
         elif kind == "batch":
             # A kernel that goes back (a bug, or not the kernel) must not make a store apply

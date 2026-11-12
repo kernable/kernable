@@ -28,6 +28,9 @@ pub(crate) struct Memberships {
     /// Held while a membership is applied, so that the newest one wins in whatever order they
     /// arrive.
     applying: Mutex<()>,
+    /// Per service, the newest position when another deployment last took it over (in memory:
+    /// since the kernel started). A reactor that waited for its deployment to serve starts here.
+    switched: Mutex<HashMap<String, u64>>,
 }
 
 impl Memberships {
@@ -40,6 +43,7 @@ impl Memberships {
         Memberships {
             all: RwLock::new(all),
             applying: Mutex::default(),
+            switched: Mutex::default(),
         }
     }
 
@@ -74,6 +78,16 @@ impl Memberships {
     fn set(&self, m: Membership) {
         let mut all = self.all.write().unwrap_or_else(PoisonError::into_inner);
         all.insert(m.service.clone(), m);
+    }
+
+    /// The newest position when another deployment last took `service` over, since the kernel
+    /// started.
+    pub(crate) fn switched_at(&self, service: &str) -> Option<u64> {
+        self.switched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(service)
+            .copied()
     }
 
     /// Whether the listener `name` of `service` counts: listed, or no membership decides.
@@ -315,6 +329,16 @@ pub(crate) fn take(
     kernel.store.save_membership(&record).map_err(internal)?;
     kernel.sync(0);
     crate::crash::point("membership.stored");
+    if before.as_ref().map_or("", |b| b.deployment.as_str()) != m.deployment {
+        // Reactors of the deployment that serves now start acting here (`listeners::run`).
+        let head = kernel.store.head_position().map_err(internal)?;
+        kernel
+            .memberships
+            .switched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(m.service.clone(), head);
+    }
     kernel.memberships.set(m.clone());
     let sig = record.sig.clone().unwrap_or_default();
     kernel

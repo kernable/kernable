@@ -137,7 +137,8 @@ async fn a_rollback_keeps_old_code_off_newer_history_and_its_listeners_skip_or_p
     let (shop1, cart1) = shop(1, Arc::clone(&runs1));
     let (_, cart2) = shop(2, Arc::clone(&runs2));
 
-    // v1's read model and reactor: they know `ItemAdded` up to schema 1.
+    // v1's read model and reactor: they know `ItemAdded` up to schema 1. The read model answers
+    // a query, so it is v1's own and runs beside v2; the reactor is one for all deployments.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let s = Arc::clone(&seen);
     let carts = shop1
@@ -147,15 +148,17 @@ async fn a_rollback_keeps_old_code_off_newer_history_and_its_listeners_skip_or_p
                 .unwrap()
                 .push((evt.aggregate_id.clone(), evt.deployment));
             async { Ok(()) }
-        });
+        })
+        .query("Seen", |_: Value, _qry, _ctx| async { Ok(0) });
     let mails = shop1
         .reactor("mails")
         .park_after(3)
         .on("ItemAdded", |_: Value, _evt, _ctx| async { Ok(()) });
     let (carts, mails) = (v1.listener(&carts), v1.listener(&mails));
 
-    // v2 serves: its workers run the commands.
-    v2.apply(Manifest::new().worker(&cart2)).await.unwrap();
+    // v1 serves first; then an operator switches to v2 by force: v2's workers run the commands,
+    // and v1's reactor stops acting (only the serving deployment's reactors receive events).
+    v1.apply(Manifest::new().worker(&cart1)).await.unwrap();
     let (worker1, worker2) = (v1.worker(&cart1), v2.worker(&cart2));
     let running = [
         spawn_worker(&worker1),
@@ -168,6 +171,10 @@ async fn a_rollback_keeps_old_code_off_newer_history_and_its_listeners_skip_or_p
     }
     carts.ready().await;
     mails.ready().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    v2.apply(Manifest::new().worker(&cart2).switch(kernable::Switch::Now))
+        .await
+        .unwrap();
     let outcome = kernable.submit(add("A")).await.unwrap();
     let written = &outcome.events()[0];
     assert_eq!((written.schema, written.deployment.as_str()), (2, "v2"));
@@ -176,13 +183,26 @@ async fn a_rollback_keeps_old_code_off_newer_history_and_its_listeners_skip_or_p
         (0, 1)
     );
 
-    // The read model skips the event it cannot read and counts it; the reactor parks it.
+    // The read model, running beside, skips the event it cannot read and counts it; v1's
+    // reactor got nothing while v2 served.
     let a = written.position;
     eventually(|| carts.position() >= a).await;
     assert_eq!(carts.skipped(), 1);
     assert!(seen.lock().unwrap().is_empty());
+    assert!(
+        mails.position() < a,
+        "v1's reactor does not act while v2 serves"
+    );
+
+    // Back to v1 by force (it never served, and it does not read A's schema): A holds a schema
+    // v1 does not read, so the kernel rejects its command before v1's worker sees it; a fresh
+    // aggregate works. v1's reactor acts again from where it stopped, and parks A's event.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    v1.apply(Manifest::new().worker(&cart1).switch(kernable::Switch::Now))
+        .await
+        .unwrap();
     let mut parked = String::new();
-    for _ in 0..100 {
+    for _ in 0..500 {
         let (ok, out) = kernel.cli(&["listeners", "parked", "{store}"]);
         assert!(ok);
         parked = out;
@@ -199,11 +219,6 @@ async fn a_rollback_keeps_old_code_off_newer_history_and_its_listeners_skip_or_p
     );
     assert!(parked.contains("shop.ItemAdded schema 2"), "{parked}");
     assert_eq!(mails.skipped(), 0);
-
-    // Back to v1, applied later: A holds a schema v1 does not read, so the kernel rejects its
-    // command before v1's worker sees it; a fresh aggregate works.
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    v1.apply(Manifest::new().worker(&cart1)).await.unwrap();
     match kernable.submit(add("A")).await.unwrap() {
         Outcome::Rejected(r) => assert_eq!(r.code, "unknown_history", "{r:?}"),
         committed => panic!("{committed:?}"),

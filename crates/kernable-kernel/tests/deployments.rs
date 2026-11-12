@@ -35,11 +35,15 @@ fn worker(deployment: &str, schema: u32) -> (TestWorker, mpsc::UnboundedReceiver
     (w, rx)
 }
 
-/// The membership of `shop` naming `deployment`.
+/// The membership of `shop` naming `deployment`, forced: a deployment whose workers do not
+/// know the history's events never takes over by itself (`unknown_history` in its warm-up);
+/// forced, the kernel refuses commands aggregate by aggregate.
 async fn serve(env: &Env, deployment: &str) {
     let mut m = membership("shop", &["orders.Order"], &[], &[]);
     m.deployment = deployment.into();
-    apply(&env.addr, m).await.unwrap();
+    apply_switching(&env.addr, m, true, false, false)
+        .await
+        .unwrap();
 }
 
 fn store(env: &Env) -> Box<dyn kernable_store::Store> {
@@ -221,6 +225,22 @@ struct Listener {
 }
 
 impl Listener {
+    /// The next message within 2 s.
+    async fn message(&mut self) -> Result<Option<Out>, tonic::Status> {
+        match tokio::time::timeout(Duration::from_secs(2), self.inbound.message()).await {
+            Ok(m) => m.map(|m| m.and_then(|m| m.msg)),
+            Err(_) => panic!("no message within 2 s"),
+        }
+    }
+
+    /// Nothing arrives for `ms`.
+    async fn quiet(&mut self, ms: u64) {
+        if let Ok(m) = tokio::time::timeout(Duration::from_millis(ms), self.inbound.message()).await
+        {
+            panic!("expected nothing, got {m:?}");
+        }
+    }
+
     async fn next(&mut self) -> Batch {
         match tokio::time::timeout(Duration::from_secs(2), self.inbound.message()).await {
             Ok(Ok(Some(m))) => match m.msg.unwrap() {
@@ -260,6 +280,17 @@ impl Listener {
 /// A read model `name` of `deployment` in service `shop` (it answers a query, so it is
 /// registered per deployment), or a reactor when `reactor`.
 async fn listen(env: &Env, name: &str, deployment: &str, reactor: bool) -> Listener {
+    let mut l = connect(env, name, deployment, reactor).await;
+    l.start = match l.inbound.message().await.unwrap().and_then(|m| m.msg) {
+        Some(Out::Ready(r)) => r.after_position,
+        other => panic!("expected Ready, got {other:?}"),
+    };
+    l
+}
+
+/// The same, up to the handshake: what the kernel says next (`Ready`, `Waiting`) is the
+/// test's to read.
+async fn connect(env: &Env, name: &str, deployment: &str, reactor: bool) -> Listener {
     let (tx, rx) = mpsc::channel(16);
     let hello = In::Hello(Hello {
         protocol: kernable_core::PROTOCOL,
@@ -289,14 +320,10 @@ async fn listen(env: &Env, name: &str, deployment: &str, reactor: bool) -> Liste
         }
         other => panic!("unexpected handshake message {other:?}"),
     }
-    let start = match inbound.message().await.unwrap().and_then(|m| m.msg) {
-        Some(Out::Ready(r)) => r.after_position,
-        other => panic!("expected Ready, got {other:?}"),
-    };
     Listener {
         acks: tx,
         inbound,
-        start,
+        start: 0,
     }
 }
 
@@ -352,15 +379,25 @@ async fn read_models_run_per_deployment_and_only_the_serving_one_counts() {
         "every event, for itself"
     );
 
-    // The reactor keeps one registration: v2's goes on after v1's position, once v1's is gone.
+    // The reactor keeps one registration, and only the serving deployment's acts: v2's waits
+    // while v1 serves, also with v1's away.
     drop(mailer);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let mailer2 = listen(&env, "mailer", "v2", true).await;
-    assert_eq!(mailer2.start, 3, "nothing is handled twice");
+    let mut mailer2 = connect(&env, "mailer", "v2", true).await;
+    match mailer2.message().await.unwrap() {
+        Some(Out::Waiting(w)) => assert_eq!(w.serving, "v1"),
+        other => panic!("expected Waiting, got {other:?}"),
+    }
+    mailer2.quiet(200).await;
 
-    // v2 serves now: its read model counts, v1's no longer does.
+    // v2 serves now: its reactor goes on after v1's position, its read model counts, v1's no
+    // longer does.
     m.deployment = "v2".into();
     apply(&env.addr, m).await.unwrap();
+    match mailer2.message().await.unwrap() {
+        Some(Out::Ready(r)) => assert_eq!(r.after_position, 3, "nothing is handled twice"),
+        other => panic!("expected Ready, got {other:?}"),
+    }
     drop(carts1);
     let cmd = signed(command("c4", "AddItem", "o1"), &key(1));
     let submitting = tokio::spawn({
@@ -368,7 +405,6 @@ async fn read_models_run_per_deployment_and_only_the_serving_one_counts() {
         async move { submit(&addr, cmd).await.unwrap() }
     });
     carts2.through(4).await;
-    let mut mailer2 = mailer2;
     mailer2.through(4).await;
     assert!(
         settled(&submitting.await.unwrap()),
@@ -519,6 +555,154 @@ async fn a_new_deployment_takes_over_only_once_caught_up_and_only_an_operator_ro
     apply_switching(&env.addr, m3, true, false, false)
         .await
         .unwrap();
+    drop((carts1, carts2));
+}
+
+/// Submits a command for `aggregate` through spawn_worker's honest worker, waiting until it
+/// committed (not settled: the test's listeners acknowledge).
+async fn commit(env: &Env, id: &str, aggregate: &str) {
+    let cmd = signed(command(id, "PlaceOrder", aggregate), &key(1));
+    submit_with(&env.addr, cmd, Wait::Committed).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_serving_deployment_s_reactors_act_and_a_new_one_starts_at_the_switch() {
+    let env = start_custom("deployments-reactors", |config, _| {
+        config.deployment_switch_lag = 0;
+    })
+    .await;
+    let mut m1 = membership("shop", &[], &["mailer"], &[]);
+    m1.deployment = "v1".into();
+    apply(&env.addr, m1.clone()).await.unwrap();
+    spawn_worker(&env).await;
+    let mut mailer1 = listen(&env, "mailer", "v1", true).await;
+    commit(&env, "c1", "o1").await;
+    mailer1.through(1).await;
+
+    // v2 warms up beside v1: its reactors, of v1's name and of a new one, wait and get nothing.
+    let mut mailer2 = connect(&env, "mailer", "v2", true).await;
+    let mut notifier2 = connect(&env, "notifier", "v2", true).await;
+    for r in [&mut mailer2, &mut notifier2] {
+        match r.message().await.unwrap() {
+            Some(Out::Waiting(w)) => assert_eq!(w.serving, "v1"),
+            other => panic!("expected Waiting, got {other:?}"),
+        }
+    }
+    commit(&env, "c2", "o2").await;
+    mailer1.through(2).await;
+    mailer2.quiet(300).await;
+    notifier2.quiet(0).await;
+    // After a kernel restart or a reconnect it would race v1's: it still waits.
+    drop(mailer1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    commit(&env, "c3", "o3").await;
+    mailer2.quiet(300).await;
+    let mut mailer1 = listen(&env, "mailer", "v1", true).await;
+    assert_eq!(mailer1.start, 2);
+    mailer1.through(3).await;
+
+    // The warm-up counts a waiting reactor as ready: it takes over at the switch.
+    let mut m2 = m1.clone();
+    m2.deployment = "v2".into();
+    m2.listeners = vec!["mailer".into(), "notifier".into()];
+    apply(&env.addr, m2).await.unwrap();
+    // v1's reactor is ended; v2's goes on after v1's position, the new one starts at the switch.
+    let ended = loop {
+        match mailer1.message().await {
+            Ok(Some(Out::Batch(_))) => continue,
+            other => break other,
+        }
+    };
+    let status = ended.expect_err("v1's reactor is ended");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(
+        status
+            .message()
+            .contains("deployment v1 no longer serves shop"),
+        "{status:?}"
+    );
+    for r in [&mut mailer2, &mut notifier2] {
+        match r.message().await.unwrap() {
+            Some(Out::Ready(ready)) => assert_eq!(ready.after_position, 3),
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+    commit(&env, "c4", "o4").await;
+    assert_eq!(mailer2.through(4).await, [4]);
+    assert_eq!(notifier2.through(4).await, [4]);
+
+    // v1's reactor connecting again waits in turn.
+    let mut again = connect(&env, "mailer", "v1", true).await;
+    match again.message().await.unwrap() {
+        Some(Out::Waiting(w)) => assert_eq!(w.serving, "v2"),
+        other => panic!("expected Waiting, got {other:?}"),
+    }
+    again.quiet(200).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_deployment_with_unknown_history_or_a_failing_read_model_does_not_take_over() {
+    let metrics = free_addr();
+    let env = start_custom("deployments-failed", |config, _| {
+        config.metrics_listen = Some(metrics.clone());
+        config.deployment_switch_lag = 0;
+    })
+    .await;
+    let mut m1 = membership("shop", &["orders.Order"], &["carts"], &[]);
+    m1.deployment = "v1".into();
+    apply(&env.addr, m1.clone()).await.unwrap();
+    start_worker(env.addr.clone(), worker("v1", 2).0).await;
+    let mut carts1 = listen(&env, "carts", "v1", false).await;
+    run(&env, "a1", "PlaceOrder", "a").await;
+    run(&env, "a2", "AddItem", "a").await;
+    carts1.through(2).await;
+
+    // v2 reads ItemAdded only up to schema 1: caught up, it still may not take over.
+    start_worker(env.addr.clone(), worker("v2", 1).0).await;
+    let mut carts2 = listen(&env, "carts", "v2", false).await;
+    carts2.through(2).await;
+    let mut m2 = m1.clone();
+    m2.deployment = "v2".into();
+    let refused = apply(&env.addr, m2.clone()).await.unwrap_err();
+    let why = refused.message();
+    assert!(why.starts_with("not_caught_up: deployment v2"), "{why}");
+    assert!(
+        why.contains("unknown_history: the history holds orders.ItemAdded at schema 2, and deployment v2's workers read it only up to schema 1"),
+        "{why}"
+    );
+    let ready = get(&metrics, "/ready?deployment=v2").await;
+    assert!(
+        ready.starts_with("HTTP/1.1 503") && ready.contains("unknown_history"),
+        "{ready}"
+    );
+    let written = events(&run(&env, "a3", "AddItem", "a").await);
+    assert_eq!(written[0].deployment, "v1", "v1 serves on");
+
+    // v3's read model fails at the first event: its connection ends three times there.
+    start_worker(env.addr.clone(), worker("v3", 2).0).await;
+    for _ in 0..3 {
+        let mut carts3 = listen(&env, "carts", "v3", false).await;
+        assert_eq!(carts3.start, 0);
+        carts3.next().await;
+        drop(carts3);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut m3 = m1.clone();
+    m3.deployment = "v3".into();
+    let mut carts3 = listen(&env, "carts", "v3", false).await;
+    let refused = apply(&env.addr, m3.clone()).await.unwrap_err();
+    assert!(
+        refused.message().contains(
+            "carts@v3 fails at the event after position 0 (orders.OrderPlaced at schema 1): its connection ended 3 times there"
+        ),
+        "{}",
+        refused.message()
+    );
+    // Once it gets past the event (it is fixed, say), it catches up and takes over.
+    carts3.through(3).await;
+    apply_eventually(&env, &m3).await;
+    let written = events(&run(&env, "a4", "AddItem", "a").await);
+    assert_eq!(written[0].deployment, "v3");
     drop((carts1, carts2));
 }
 

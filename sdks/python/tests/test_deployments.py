@@ -118,7 +118,9 @@ class Deployments(unittest.TestCase):
         self.assertEqual((handled1, handled2), ([], ["A"]))
 
         time.sleep(0.002)  # the rollback's membership is issued later
-        k1.apply(workers=[cart1])
+        # By force: v1 never served and does not read the history's schema 2, so it would not
+        # take over by itself (unknown_history in its warm-up).
+        k1.apply(workers=[cart1], switch="now")
         again = k1.submit("shop", "cart", "A", "AddItem", {"sku": "apple"}, wait="committed")
         self.assertFalse(again.committed)
         self.assertEqual(again.code, "unknown_history")

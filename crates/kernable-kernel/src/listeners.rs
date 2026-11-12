@@ -34,7 +34,12 @@
 //! count (readiness, settling, the order of delivery), check requests and answer queries first;
 //! the others keep catching up, for a rollback. Within a deployment the order of delivery holds
 //! among its own listeners, whether it serves or not. A reactor keeps one registration across
-//! deployments: a new deployment goes on after the old one's position.
+//! deployments: a new deployment goes on after the old one's position. A reactor acts outward
+//! (mails, payments, calls), so only the serving deployment's reactors receive events: one of
+//! another deployment waits (`Waiting.serving`) until its deployment takes the service over,
+//! and a reactor whose deployment stops serving is ended and waits in turn. A reactor name the
+//! serving deployment never had starts at the switch. So a deployment warming up beside the
+//! serving one builds its read models from the whole history and sends nothing.
 //!
 //! A listener may give up on an event and park it (`Ack.parked`): it moves on, and the kernel
 //! keeps the event's position with the reason until an operator delivers it again or dismisses
@@ -105,6 +110,9 @@ struct Entry {
     skipped: u64,
     /// Of those, how many per qualified type and schema (`shop.ItemAdded@3`).
     skipped_types: std::collections::BTreeMap<String, u64>,
+    /// Where its connections ended with delivered events not acknowledged, and how often in a
+    /// row at that position: a handler that fails on the next event (a failing projection).
+    stall: Option<(u64, u32)>,
 }
 
 /// One connection of a listener.
@@ -219,6 +227,21 @@ pub(crate) struct Registry {
     turn: AtomicU64,
     /// Wakes order gates and settling submits when a position or the set of listeners changes.
     pub(crate) progress: Notify,
+    /// Reactors waiting for their deployment to serve: (name, deployment) -> connections.
+    waiting: Mutex<HashMap<(String, String), usize>>,
+}
+
+/// How often in a row a listener's connections may end at the same position with events
+/// outstanding before a deployment's warm-up names it failing.
+pub(crate) const FAILING_AFTER: u32 = 3;
+
+/// A read model or middleware of a deployment whose handler keeps failing at one event
+/// ([`Registry::failing`]).
+pub(crate) struct Failing {
+    pub(crate) registration: String,
+    /// What it acknowledged: the event after it fails.
+    pub(crate) position: u64,
+    pub(crate) times: u32,
 }
 
 impl Registry {
@@ -240,6 +263,7 @@ impl Registry {
                     retrying: Vec::new(),
                     skipped: 0,
                     skipped_types: Default::default(),
+                    stall: None,
                 };
                 (entry.record.name.clone(), entry)
             })
@@ -249,11 +273,36 @@ impl Registry {
             calls: Mutex::default(),
             turn: AtomicU64::new(0),
             progress: Notify::new(),
+            waiting: Mutex::default(),
         }
     }
 
     fn entries(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn waiting(&self) -> MutexGuard<'_, HashMap<(String, String), usize>> {
+        self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The read models and middlewares of `deployment` whose connections ended at the same
+    /// position [`FAILING_AFTER`] times or more in a row, events outstanding.
+    pub(crate) fn failing(&self, deployment: &str) -> Vec<Failing> {
+        let mut all: Vec<Failing> = self
+            .entries()
+            .values()
+            .filter(|e| e.versioned && e.deployment == deployment)
+            .filter_map(|e| {
+                let (position, times) = e.stall?;
+                (times >= FAILING_AFTER && e.record.position <= position).then(|| Failing {
+                    registration: e.record.name.clone(),
+                    position,
+                    times,
+                })
+            })
+            .collect();
+        all.sort_by(|a, b| a.registration.cmp(&b.registration));
+        all
     }
 
     /// The highest position a listener of `order` and `deployment` may receive: the lowest
@@ -321,7 +370,18 @@ impl Registry {
                         .get(&crate::deployments::key(n, deployment))
                         .filter(|e| of_service(e));
                     let shared = entries.get(n).filter(|e| of_service(e) && !e.versioned);
-                    (n.clone(), own.or(shared).map(warming))
+                    // A reactor of the deployment that waits to serve: it starts at the switch.
+                    let waits = || {
+                        self.waiting()
+                            .contains_key(&(n.clone(), deployment.to_owned()))
+                            .then(|| Warming {
+                                registration: n.clone(),
+                                versioned: false,
+                                position: 0,
+                                connected: false,
+                            })
+                    };
+                    (n.clone(), own.or(shared).map(warming).or_else(waits))
                 })
                 .collect(),
             None => entries
@@ -676,14 +736,29 @@ impl Registry {
                 e.record.position = position;
                 e.dirty = true;
             }
+            if e.stall.is_some_and(|(at, _)| position > at) {
+                e.stall = None;
+            }
         }
         self.progress.notify_waiters();
     }
 
-    fn disconnect(&self, conn: &Conn) {
+    /// Marks the connection gone; `sent` is how far events went out on it.
+    fn disconnect(&self, conn: &Conn, sent: u64) {
         let (name, instance) = conn;
         let mut entries = self.entries();
         if let Some(e) = entries.get_mut(name) {
+            if let Some(i) = e.instances.get(instance)
+                && sent > i.position
+            {
+                // It went away with events outstanding: in a row at the same position, a
+                // handler fails there.
+                let at = i.position;
+                e.stall = Some(match e.stall {
+                    Some((p, times)) if p == at => (p, times.saturating_add(1)),
+                    _ => (at, 1),
+                });
+            }
             e.instances.remove(instance);
             // Retries belong to the instance that got them; a listener that parks has one.
             e.retrying.clear();
@@ -1008,15 +1083,47 @@ async fn send(out: &Outbox, msg: Out) -> Result<(), Status> {
         .map_err(|_| Status::cancelled("listener disconnected"))
 }
 
-/// Marks the listener's instance disconnected when its stream ends, however it ends.
-struct DisconnectOnDrop(Arc<Kernel>, Conn);
+/// Marks the listener's instance disconnected when its stream ends, however it ends; with how
+/// far events went out on it.
+struct DisconnectOnDrop(Arc<Kernel>, Conn, Arc<AtomicU64>);
 
 impl Drop for DisconnectOnDrop {
     fn drop(&mut self) {
         tracing::info!(listener = %self.1.0, instance = %self.1.1, "listener disconnected");
-        self.0.listeners.disconnect(&self.1);
+        self.0
+            .listeners
+            .disconnect(&self.1, self.2.load(Ordering::SeqCst));
         self.0.listeners.progress.notify_waiters();
     }
+}
+
+/// Counts a reactor as waiting for its deployment to serve while it does.
+struct WaitsToServe<'a>(&'a Registry, (String, String));
+
+impl<'a> WaitsToServe<'a> {
+    fn new(registry: &'a Registry, name: &str, deployment: &str) -> Self {
+        let key = (name.to_owned(), deployment.to_owned());
+        *registry.waiting().entry(key.clone()).or_default() += 1;
+        WaitsToServe(registry, key)
+    }
+}
+
+impl Drop for WaitsToServe<'_> {
+    fn drop(&mut self) {
+        let mut waiting = self.0.waiting();
+        if let Some(n) = waiting.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                waiting.remove(&self.1);
+            }
+        }
+    }
+}
+
+/// Whether a listener is a reactor of a deployment: one registration for all deployments,
+/// acting only for the one that serves its service.
+fn reactor_of_deployment(hello: &Hello, versioned: bool) -> bool {
+    !versioned && !hello.live && !hello.deployment.is_empty()
 }
 
 pub(crate) async fn run(
@@ -1141,7 +1248,10 @@ pub(crate) async fn run(
     let conn: Conn = (key.clone(), hello.instance.clone());
     // A listener without instances is a single group of one.
     let single = hello.single || hello.instance.is_empty();
+    let reactor = reactor_of_deployment(&hello, versioned);
     let mut waiting = false;
+    // While a reactor waits for its deployment to serve: counted for the warm-up.
+    let mut waits_to_serve: Option<WaitsToServe> = None;
     let (start, head) = loop {
         let progressed = kernel.listeners.progress.notified();
         let head = kernel.store.head_position().map_err(internal)?;
@@ -1154,7 +1264,21 @@ pub(crate) async fn run(
                 && entries
                     .values()
                     .any(|e| !e.live && e.base() == hello.name.as_str());
+            // A reactor acts only for the deployment that serves its service.
+            if reactor && !kernel.memberships.serves(&hello.service, &hello.deployment) {
+                break 'decide Err((String::new(), kernel.memberships.serving(&hello.service)));
+            }
             if let Some(e) = previous.filter(|e| e.connected()) {
+                if reactor
+                    && e.deployment != hello.deployment
+                    && !kernel.memberships.serves(&hello.service, &e.deployment)
+                {
+                    // Its deployment's reactor is being ended: take over once it has left.
+                    break 'decide Err((
+                        e.instances.keys().next().cloned().unwrap_or_default(),
+                        String::new(),
+                    ));
+                }
                 if hello.instance.is_empty() || e.instances.contains_key("") {
                     return Err(Status::already_exists("listener is already connected"));
                 }
@@ -1173,7 +1297,10 @@ pub(crate) async fn run(
                 }
                 if single {
                     // Another instance is active: wait for it to leave, then take over.
-                    break 'decide Err(e.instances.keys().next().cloned().unwrap_or_default());
+                    break 'decide Err((
+                        e.instances.keys().next().cloned().unwrap_or_default(),
+                        String::new(),
+                    ));
                 }
             }
             if hello.live && previous.is_some_and(|e| !e.live) {
@@ -1229,6 +1356,12 @@ pub(crate) async fn run(
                 }
                 (false, Some(from)) if !waiting => from,
                 (false, None) if elsewhere => 0,
+                // A reactor name new to the serving deployment starts where its deployment took
+                // over: it never acts on what happened while another deployment served.
+                (false, None) if waits_to_serve.is_some() && previous.is_none() => kernel
+                    .memberships
+                    .switched_at(&hello.service)
+                    .map_or(head, |p| p.min(head)),
                 (false, _) => previous.map_or(head, |e| e.record.position),
             };
             // Instances of one listener normally run the same code; during a rolling deploy they
@@ -1282,9 +1415,9 @@ pub(crate) async fn run(
                 .counts_listener(&hello.service, &hello.name);
             let current =
                 !versioned || kernel.memberships.serves(&hello.service, &hello.deployment);
-            let (mut instances, skipped, skipped_types) = entries
+            let (mut instances, skipped, skipped_types, stall) = entries
                 .remove(&key)
-                .map(|e| (e.instances, e.skipped, e.skipped_types))
+                .map(|e| (e.instances, e.skipped, e.skipped_types, e.stall))
                 .unwrap_or_default();
             instances.insert(hello.instance.clone(), instance);
             entries.insert(
@@ -1302,18 +1435,42 @@ pub(crate) async fn run(
                     current,
                     skipped,
                     skipped_types,
+                    stall,
                 },
             );
             Ok(position)
         };
         match step {
             Ok(position) => break (position, head),
-            Err(active) => {
-                if !waiting {
-                    waiting = true;
-                    tracing::info!(listener = %key, instance = %hello.instance, %active, "listener instance waits");
-                    send(out, Out::Waiting(Waiting { active })).await?;
+            Err((active, serving)) if !serving.is_empty() => {
+                if waits_to_serve.is_none() {
+                    tracing::info!(listener = %key, instance = %hello.instance, deployment = %hello.deployment, %serving, "reactor waits for its deployment to serve");
+                    waits_to_serve = Some(WaitsToServe::new(
+                        &kernel.listeners,
+                        &hello.name,
+                        &hello.deployment,
+                    ));
+                    send(out, Out::Waiting(Waiting { active, serving })).await?;
                 }
+                tokio::select! {
+                    _ = progressed => {}
+                    _ = out.closed() => return Ok(()),
+                }
+            }
+            Err((active, _)) => {
+                // A reactor that was told it waits for its deployment is not told again.
+                if !waiting && waits_to_serve.is_none() {
+                    tracing::info!(listener = %key, instance = %hello.instance, %active, "listener instance waits");
+                    send(
+                        out,
+                        Out::Waiting(Waiting {
+                            active,
+                            serving: String::new(),
+                        }),
+                    )
+                    .await?;
+                }
+                waiting = true;
                 tokio::select! {
                     _ = progressed => {}
                     _ = out.closed() => return Ok(()),
@@ -1321,7 +1478,9 @@ pub(crate) async fn run(
             }
         }
     };
-    let _disconnect = DisconnectOnDrop(Arc::clone(&kernel), conn.clone());
+    drop(waits_to_serve);
+    let sent = Arc::new(AtomicU64::new(start));
+    let _disconnect = DisconnectOnDrop(Arc::clone(&kernel), conn.clone(), Arc::clone(&sent));
     tracing::info!(listener = %key, instance = %hello.instance, deployment = %hello.deployment, order = hello.order, after = start, "listener connected");
     kernel.listeners.progress.notify_waiters();
     send(
@@ -1333,14 +1492,17 @@ pub(crate) async fn run(
     )
     .await?;
 
-    let sent = Arc::new(AtomicU64::new(start));
     // A listener of every type gets what the key's grant allows now, also after it changed.
     let filter = Arc::new(Mutex::new(types));
     let deliver = tokio::spawn(deliver(
         Arc::clone(&kernel),
         conn.clone(),
         hello.key_id.clone(),
-        (hello.order, hello.deployment.clone()),
+        (
+            hello.order,
+            hello.deployment.clone(),
+            reactor.then(|| hello.service.clone()),
+        ),
         Arc::clone(&filter),
         Arc::clone(&sent),
         out.clone(),
@@ -1351,6 +1513,8 @@ pub(crate) async fn run(
     loop {
         let message = tokio::select! {
             message = next(inbound) => message?,
+            // The response ended (a reactor whose deployment stopped serving): so does this.
+            _ = out.closed() => return Ok(()),
             Ok(()) = changes.changed() => {
                 // Permissions changed: end the stream if the key may no longer do what it
                 // registered for.
@@ -1413,7 +1577,7 @@ async fn deliver(
     kernel: Arc<Kernel>,
     conn: Conn,
     key_id: String,
-    (order, deployment): (i32, String),
+    (order, deployment, reactor_of): (i32, String, Option<String>),
     filter: Arc<Mutex<Option<Vec<String>>>>,
     sent: Arc<AtomicU64>,
     out: Outbox,
@@ -1422,6 +1586,19 @@ async fn deliver(
     loop {
         let progressed = kernel.listeners.progress.notified();
         let appended = kernel.appended.notified();
+        // A reactor whose deployment no longer serves its service stops here; it waits when it
+        // connects again, and the serving deployment's reactor of the name takes over.
+        if let Some(service) = &reactor_of
+            && !kernel.memberships.serves(service, &deployment)
+        {
+            tracing::info!(listener = %name, %deployment, %service, "reactor ended: its deployment no longer serves");
+            let _ = out
+                .send(Err(Status::unavailable(format!(
+                    "deployment {deployment} no longer serves {service}: its reactors stop, the serving deployment's act"
+                ))))
+                .await;
+            return;
+        }
         let after = sent.load(Ordering::SeqCst);
         let types = filter
             .lock()
@@ -1755,10 +1932,53 @@ mod tests {
     }
 
     #[test]
+    fn a_read_model_whose_connections_keep_ending_at_one_event_is_failing() {
+        let record = ListenerRecord {
+            name: "carts@v2".into(),
+            position: 4,
+            ..Default::default()
+        };
+        let r = Registry::load(vec![record], &Memberships::load(Vec::new()));
+        let carts = ("carts@v2".to_owned(), String::new());
+        let connect = || {
+            let (tx, _rx) = mpsc::channel(4);
+            r.entries().get_mut("carts@v2").unwrap().instances.insert(
+                String::new(),
+                Instance {
+                    position: 4,
+                    query_types: Vec::new(),
+                    out: tx,
+                    caught_up_at: 0,
+                    since: 1,
+                },
+            );
+        };
+        // Gone with nothing outstanding (a restart between batches): not counted.
+        connect();
+        r.disconnect(&carts, 4);
+        assert!(r.failing("v2").is_empty());
+        for times in 1..=FAILING_AFTER {
+            connect();
+            r.disconnect(&carts, 9);
+            assert_eq!(r.failing("v2").len(), usize::from(times == FAILING_AFTER));
+        }
+        let f = &r.failing("v2")[0];
+        assert_eq!(
+            (f.registration.as_str(), f.position, f.times),
+            ("carts@v2", 4, 3)
+        );
+        assert!(r.failing("v1").is_empty(), "another deployment's");
+        // Past the event, it is no longer failing.
+        connect();
+        r.ack(&carts, 5);
+        assert!(r.failing("v2").is_empty());
+    }
+
+    #[test]
     fn a_dead_or_rebuilding_instance_holds_nothing_back() {
         let (r, _rx) = group(&[("node-a", 10, 10), ("node-b", 0, 10)]);
         assert!(r.behind(&[]).is_empty(), "node-a caught up");
-        r.disconnect(&conn("node-a"));
+        r.disconnect(&conn("node-a"), 0);
         assert_eq!(r.behind(&[]), ["reports"], "node-b is still rebuilding");
         assert!(
             r.settled(10, None),
@@ -1788,7 +2008,7 @@ mod tests {
         }
         assert_eq!(seen.len(), 2, "both share queries they can answer");
         assert!(r.dispatch("shop.GetReport", &query(11), None).is_none());
-        r.disconnect(&conn("node-a"));
+        r.disconnect(&conn("node-a"), 0);
         assert!(r.caught_up("shop.GetReport", &query(4), None));
         assert!(!r.caught_up("shop.GetReport", &query(8), None));
     }
@@ -1812,7 +2032,7 @@ mod tests {
         let _a = r.dispatch("shop.GetReport", &query(0), None).unwrap();
         let _b = r.dispatch("shop.GetReport", &query(0), None).unwrap();
         assert_eq!(r.calls().len(), 2);
-        r.disconnect(&conn("node-a"));
+        r.disconnect(&conn("node-a"), 0);
         let calls = r.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls.values().next().unwrap().0, conn("node-b"));

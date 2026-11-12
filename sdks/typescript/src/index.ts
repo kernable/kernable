@@ -3198,8 +3198,15 @@ export class ListenerHandle {
       this.logConnected();
       this.markReady();
     } else if (m.waiting) {
-      // Another instance runs the group: this one is ready to take over.
-      this.log.print("info", this.what, `waiting: instance ${m.waiting.active} is active`);
+      // Another instance runs the group, or (a reactor) another deployment serves: this one is
+      // ready to take over.
+      this.log.print(
+        "info",
+        this.what,
+        m.waiting.serving
+          ? `waiting: deployment ${m.waiting.serving} serves; this reactor acts once its own deployment does`
+          : `waiting: instance ${m.waiting.active} is active`,
+      );
       this.markReady();
     } else if (m.batch) {
       // A kernel that goes back (a bug, or not the kernel) must not make a store apply events

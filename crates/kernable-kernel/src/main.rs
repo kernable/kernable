@@ -318,23 +318,26 @@ Previews and checks:
                                           --files-from copies the files of that data store too.
                                           Then checks the copy like verify.
   kernable replay --from <store>|<export file>|<addr> [--key <key>] --since <position>|<time> --to <addr> --deployment <d> [--limit <n>] [--max-differences <n>|<n>%] [--json]
-                                          The check before switching: sends the commands the
-                                          source stored after the point, oldest first, each as
-                                          received at its original time, to the kernel at --to, a
-                                          masked copy of that point started with --replay on where
-                                          the deployment's workers run, and compares each outcome
-                                          with the original: event types, schemas, numbers and
-                                          payload fields, or the rejection code. The source is a
-                                          store on this machine (also while its kernel runs), an
-                                          export file, or a running kernel (an <addr> with --key,
-                                          granted export). --since is the copy's position (its
-                                          mark) or a UTC time. Not sent, but listed: scheduled
-                                          commands and process steps, commands with vault values
-                                          (the copy has none), and later commands of their
+                                          A developer tool for a copy of your own, never
+                                          production: the commands run their handlers, so code that
+                                          sends mails, payments or webhooks does so again. Sends
+                                          the commands the source stored after the point, oldest
+                                          first, each as received at its original time, to the
+                                          kernel at --to, a masked copy of that point started with
+                                          --replay on where the deployment's workers run, and
+                                          compares each outcome with the original: event types,
+                                          schemas, numbers and payload fields, or the rejection
+                                          code. The source is a store on this machine (also while
+                                          its kernel runs), an export file, or a running kernel (an
+                                          <addr> with --key, granted export). --since is the copy's
+                                          position (its mark) or a UTC time. Not sent, but listed:
+                                          scheduled commands and process steps, commands with vault
+                                          values (the copy has none), and later commands of their
                                           aggregates. The report names fields and codes, never
                                           values. Exit 3 if more commands differ than
-                                          --max-differences (default 0), 1 if the check could not
-                                          run.
+                                          --max-differences (default 0), 1 if the replay could not
+                                          run. The check before a switch is not this: it uses the
+                                          events only (the deployment's warm-up).
 
 Run a node:
   kernable node <project.toml>            Runs one node of a project: the kernel and, with a
@@ -1897,7 +1900,7 @@ fn masked_done(
     Ok(())
 }
 
-/// `kernable replay …`: the check before switching (`replay_check.rs`).
+/// `kernable replay …`: commands replayed on a developer's own masked copy (`replay_check.rs`).
 async fn replay(flags: &[&str]) -> Result<ExitCode> {
     use kernable_kernel::replay_check::{self, Options, Since, Threshold};
     let (mut from, mut key, mut since, mut to, mut deployment) = (None, None, None, None, None);

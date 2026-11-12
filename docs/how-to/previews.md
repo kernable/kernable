@@ -113,6 +113,6 @@ A copy streams: it reads the source in batches (up to 512 records or 1 MiB each)
 
 Throw a preview away by stopping its kernel and deleting its stores, its vault and its vault key. Nothing in production refers to it.
 
-## Check a deployment on a copy
+## Replay commands on a copy of your own
 
-A masked copy also serves a check before switching: a kernel on it started with `--replay on` runs production's recent commands on the new deployment, and `kernable replay` reports what it would write differently. See [Check a deployment before switching](./deployments#check-a-deployment-before-switching).
+A developer can also replay commands on a masked copy of their own: a kernel on it started with `--replay on` runs the commands on a new deployment, and `kernable replay` reports what it would write differently. The commands run their handlers, so code that calls out does: never on production. See [Replay commands on your own copy](./deployments#replay-commands-on-your-own-copy-a-developer-tool).

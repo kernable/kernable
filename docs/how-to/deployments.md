@@ -17,7 +17,7 @@ With a name set, the process tells the kernel which code it runs whenever it con
 - **Every event records the deployment that wrote it** (`Event.deployment`, part of the event's hash). `kernable deployments <store>` lists each deployment with its first and last event.
 - **Snapshots are kept per deployment.** A worker only gets snapshots its own deployment made, so an older version never reads a newer state format.
 - **Read models and middlewares are kept per deployment.** The read model `carts` of deployment `v2` is registered as `carts@v2`, beside `carts@v1`, with its own position: it builds from the first event while `v1`'s keeps serving. Both stay registered, so a switch back finds `v1`'s read model where it stopped, and it catches up on what happened since.
-- **Reactors are not.** A reactor (a listener that answers no queries and checks nothing) keeps one registration across deployments, so the new deployment goes on after the old one's position and no email is sent twice. Run one deployment's reactors at a time.
+- **Reactors are not.** A reactor (a listener that answers no queries and checks nothing) keeps one registration across deployments, so the new deployment goes on after the old one's position and no email is sent twice. And **only the serving deployment's reactors receive events**: a reactor of another deployment connects and waits (its log says `waiting: deployment v1 serves`) until its deployment takes the service over; at that moment the old deployment's reactor of the name is ended (it waits in turn when it reconnects) and the new one goes on after its position. A reactor name the old deployment never had starts at the switch: it never acts on what happened while another deployment served. A read model that answers no query is one registration for all deployments too, and behaves like a reactor; give it a query to have it built per deployment.
 
 ## Which deployment serves
 
@@ -33,12 +33,21 @@ A service's [membership](./deploy#a-new-version-of-a-service) names the deployme
 A new deployment does not take over the moment its processes start: its read models first rebuild from the events beside the serving deployment's, while the serving one goes on. The kernel switches a service to another deployment only once that deployment has **caught up**:
 
 - for every aggregate the membership lists, a worker of the deployment is connected;
-- every read model and middleware it lists is registered for the deployment (`carts@2026-11-11.2`) and within `--deployment-switch-lag` events (default 100) of the newest one. A reactor keeps one registration across deployments and needs no warm-up.
+- every read model and middleware it lists is registered for the deployment (`carts@2026-11-11.2`) and within `--deployment-switch-lag` events (default 100) of the newest one. A reactor keeps one registration across deployments and needs no warm-up; one that waits for the deployment to serve counts as ready.
+
+A deployment that never served does not take over at all, however long it waits, while
+
+- **a read model or middleware of it fails**: its connections ended three times in a row at the same event with events outstanding (its handler throws there, the SDK reconnects and gets the event again), or
+- **the history holds events its workers do not know**: an event type at a schema above the one its workers declare. Every command on such an aggregate would be refused with [`unknown_history`](#the-unknown-history-refusal), so the deployment stays beside the serving one instead.
+
+These checks use the events only: the warm-up builds the new deployment's read models from the whole history, on the real store, and no command runs. A forced switch (`--force`, switch `now`) skips them, like the wait.
 
 Until then, a membership that would switch is refused with `FAILED_PRECONDITION` `not_caught_up`, naming what it waits for:
 
 ```
 not_caught_up: deployment 2026-11-11.2 has not caught up: carts@2026-11-11.2 at 1200 of 2215; it takes shop over once it has (apply again), or force the switch
+not_caught_up: deployment 2026-11-12.1 has not caught up: carts@2026-11-12.1 fails at the event after position 1840 (shop.ItemAdded at schema 2): its connection ended 3 times there; …
+not_caught_up: deployment 2026-11-12.1 has not caught up: unknown_history: the history holds shop.ItemAdded at schema 2, and deployment 2026-11-12.1's workers read it only up to schema 1; …
 ```
 
 A deployment that wrote events before (it served, and an operator goes back to it) takes over at once: its read models are kept where they stopped and catch up the gap in moments. One whose read models were [dropped](#clean-up-old-deployments) warms up like a new one. Going back is always an operator's decision: an app never switches back by itself ([below](#who-switches)).
@@ -73,6 +82,19 @@ Without `--wait` a refusal fails at once (exit code 3, so a script can tell it f
 - The same on the kernel's local socket (`--admin-socket`; `kernable node` makes `admin.sock` in the project directory): `curl --unix-socket admin.sock http://localhost/ready?deployment=2026-11-11.2`, and `/api/deployments/warm-up?deployment=…`. A tool on the machine reaches it through the file system, so it need not enter the network namespace the kernel runs in (the node's pod); the socket is the kernel's user's only (mode 0600), and root's.
 
 Before the switch, nothing of the new deployment counts: its read models hold nobody back and settling submits do not wait for them. After it, the old deployment's processes idle; stop them when you no longer want to go back quickly.
+
+### Nothing acts outward before the switch
+
+While a deployment warms up beside the serving one, the kernel keeps everything of it that could act on the outside world from acting:
+
+| Part | Before its switch | From the switch on |
+|---|---|---|
+| Workers (commands, also scheduled ones and process steps) | connected and idle: the serving deployment's workers run every command | run the commands |
+| Reactors | wait, receive no event | receive events after the old deployment's position (a new name: from the switch) |
+| Business processes | not registered: an app registers its processes once its deployment serves | registered; cases and timers run in the kernel and send their commands to the serving workers |
+| Read models | build from the whole history, answer queries of their own deployment | serve |
+
+What the kernel cannot hold back is your own code that runs outside its handlers: what a process does when it starts, an HTTP endpoint of the new deployment called on an address of its own, a read model handler that calls out (keep read models free of side effects: they run again on every rebuild).
 
 ## Before you roll back: what the newer deployment left behind
 
@@ -203,17 +225,20 @@ The deployment commands print JSON with `--json`, for a platform or a script. Fi
 {
   "deployment": "2026-11-11.2", "head": 2215, "maxLag": 100, "servedBefore": false,
   "caughtUp": false, "waitingFor": "deployment 2026-11-11.2 has not caught up: carts@2026-11-11.2 at 1990 of 2215",
+  "failed": [],
   "listeners": [ { "name": "carts", "registration": "carts@2026-11-11.2", "position": 1990,
                    "behind": 225, "connected": true, "caughtUp": false } ],
   "workers": [ { "aggregate": "shop.Cart", "connected": true } ]
 }
 ```
 
-`waitingFor` is `null` once caught up; a listener not registered yet has `registration` `null` and only `name` and `caughtUp`. `GET /ready?deployment=<d>` answers 200 `caught up` or 503 with the `waitingFor` text.
+`waitingFor` is `null` once caught up. `failed` lists why a deployment that never served may not take over whatever the wait (a failing read model, `unknown_history`), each a line also in `waitingFor`; empty for one that served before. A listener not registered yet has `registration` `null` and only `name` and `caughtUp`. `GET /ready?deployment=<d>` answers 200 `caught up` or 503 with the `waitingFor` text.
 
-## Check a deployment before switching
+## Replay commands on your own copy (a developer tool)
 
-Before a new deployment serves, you can see what it would have done with the commands production really received: `kernable replay` sends production's recent commands, in their original order, to a kernel on a **masked copy** ([Previews and copies](./previews)) where the new deployment's workers run, and compares each outcome with the one production stored. It reports which commands write other events (types, schemas, numbers, payload fields), which ones are rejected now or with another code, and which event types or schemas the new code writes that the store never held. Nothing in production changes, and the copy holds no personal data.
+> **`kernable replay` runs commands, and so your code.** A command handler that sends a mail, charges a card or calls a webhook does so again for every command replayed. Use it on a copy of your own, on your machine, with outbound connections pointed at test accounts; never against production, and not as a gate before a switch. The check before a switch uses the events only ([warm-up](#a-new-deployment-warms-up-then-takes-over)).
+
+To see what a new version of your code would have done with commands a store holds, `kernable replay` sends them, in their original order, to a kernel on a **masked copy** ([Previews and copies](./previews)) where the new deployment's workers run, and compares each outcome with the one stored. It reports which commands write other events (types, schemas, numbers, payload fields), which ones are rejected now or with another code, and which event types or schemas the new code writes that the store never held. The store it reads from is not changed, and the copy holds no personal data.
 
 ### 1. A masked copy from before the commands
 
@@ -244,7 +269,7 @@ Such a kernel starts only on a masked copy, and only does what the check needs:
 - it refuses every other submit (`FAILED_PRECONDITION`, `replay_only`), so the new deployment's reactors and processes send nothing;
 - it **fires no scheduled command and no process step**.
 
-Start the new deployment's processes against it, with their deployment name (`KERNABLE_DEPLOYMENT=2026-11-12.1`) and outbound connections pointed at test accounts, as for a preview. The workers matter, and the middlewares if its memberships list any (a submit waits for them); read models may run, reactors get nothing to do. The copy's memberships name the deployment that served production, so switch to the new one at once:
+Start the new deployment's processes against it, with their deployment name (`KERNABLE_DEPLOYMENT=2026-11-12.1`) and outbound connections pointed at test accounts: the replayed commands run their handlers. The workers matter, and the middlewares if its memberships list any (a submit waits for them); read models may run, reactors get nothing to do. The copy's memberships name the deployment that served production, so switch to the new one at once:
 
 ```sh
 kernable apply unix:check/k.sock keys/deploy.key shop.json --deployment 2026-11-12.1 --force
@@ -277,7 +302,7 @@ skipped:
 FAILED: 4 differences, more than --max-differences 0
 ```
 
-`--json` prints the same for a tool. The exit code gates the switch: **0** when at most `--max-differences` commands differ (default 0; a number, or a percent of the commands replayed such as `1%`), **3** when more do, **1** when the check could not run (the kernel at `--to` does not run a check, stays unavailable, or its events come from another deployment than `--deployment`). Then throw the copy away: stop its kernel and delete its stores and its vault key.
+`--json` prints the same for a tool. The exit code: **0** when at most `--max-differences` commands differ (default 0; a number, or a percent of the commands replayed such as `1%`), **3** when more do, **1** when the check could not run (the kernel at `--to` does not run a check, stays unavailable, or its events come from another deployment than `--deployment`). Then throw the copy away: stop its kernel and delete its stores and its vault key.
 
 ### What it compares
 

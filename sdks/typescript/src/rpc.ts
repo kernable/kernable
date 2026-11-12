@@ -239,7 +239,7 @@ export interface ListenerDelivery {
   challenge?: { nonce: Buffer } | null;
   ready?: { after_position: number; head_position: number } | null;
   /** Instead of `ready`, while another instance of a single group is active. */
-  waiting?: { active: string } | null;
+  waiting?: { active: string; serving?: string } | null;
   batch?: { events: WireEvent[]; up_to: number; vault: WireVaultValue[]; retries?: WireEvent[] } | null;
   query?: { call_id: string; query: WireQueryRequest } | null;
   check?: {

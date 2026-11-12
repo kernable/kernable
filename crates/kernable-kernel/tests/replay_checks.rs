@@ -1,7 +1,7 @@
-//! The check before switching: `kernable replay` sends a source's commands after a masked
-//! copy's position to a kernel on that copy (`--replay on`) where a new deployment's workers run,
-//! and reports which outcomes differ: payload fields, new event types, new rejections. Equal code
-//! writes equal events, as each command runs at its original time and with its own ID.
+//! Commands replayed on a developer's own masked copy: `kernable replay` sends a source's commands
+//! after a masked copy's position to a kernel on that copy (`--replay on`) where a new deployment's
+//! workers run, and reports which outcomes differ: payload fields, new event types, new rejections.
+//! Equal code writes equal events, as each command runs at its original time and with its own ID.
 
 mod common;
 

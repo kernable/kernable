@@ -38,6 +38,8 @@ struct Instance {
     since: i64,
     /// Its code version (`Register.deployment`).
     deployment: String,
+    /// The event schemas it declared: what its code reads, per qualified type.
+    schemas: Vec<(String, u32)>,
 }
 
 #[derive(Default)]
@@ -191,6 +193,11 @@ impl Registry {
                     .collect(),
                 since: now,
                 deployment: reg.deployment.clone(),
+                schemas: reg
+                    .event_schemas
+                    .iter()
+                    .map(|s| (s.event_type.clone(), s.schema))
+                    .collect(),
             },
         );
         let types = reg
@@ -253,6 +260,24 @@ impl Registry {
         self.instances()
             .values()
             .any(|i| i.deployment == deployment && i.aggregates.iter().any(|a| a == aggregate_type))
+    }
+
+    /// The event schemas the connected workers of `deployment` declared: per qualified type the
+    /// lowest any of them reads.
+    pub(crate) fn schemas_of(&self, deployment: &str) -> std::collections::BTreeMap<String, u32> {
+        let mut all = std::collections::BTreeMap::new();
+        for i in self
+            .instances()
+            .values()
+            .filter(|i| i.deployment == deployment)
+        {
+            for (t, schema) in &i.schemas {
+                all.entry(t.clone())
+                    .and_modify(|s: &mut u32| *s = (*s).min(*schema))
+                    .or_insert(*schema);
+            }
+        }
+        all
     }
 
     /// The aggregates the connected workers of `deployment` run, sorted.

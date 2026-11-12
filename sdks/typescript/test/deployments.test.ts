@@ -93,8 +93,9 @@ test("a rollback to an older deployment: its worker runs again, history it canno
     assert.deepEqual([a.events[0].schema, a.events[0].deployment], [2, "v2"]);
     assert.equal(v2Commands, 1, "the membership's deployment runs the commands");
 
-    // Roll back: a later membership names v1.
-    await v1.apply({ workers: [cartV1] });
+    // Roll back by force: a later membership names v1. v1 never served and does not read the
+    // history's schema 2, so it would not take over by itself (unknown_history in its warm-up).
+    await v1.apply({ workers: [cartV1], switch: "now" });
     const refused = await add("A", 1);
     assert.equal(refused.committed ? "committed" : refused.code, "unknown_history");
     const b = await add("B", 3);

@@ -477,6 +477,10 @@ pub(crate) struct WarmUp {
     pub(crate) listeners: Vec<(String, Option<crate::listeners::Warming>)>,
     /// Per qualified aggregate type: whether a worker of the deployment is connected.
     pub(crate) workers: Vec<(String, bool)>,
+    /// Why it may not take over whatever the wait (only for a deployment that never served):
+    /// a read model or middleware failing at one event, events in the history its workers do
+    /// not know (their commands would be `unknown_history`). Never values.
+    pub(crate) failed: Vec<String>,
 }
 
 impl WarmUp {
@@ -488,7 +492,7 @@ impl WarmUp {
     /// with is registered and within `lag` of the head (or it served before), every worker is
     /// connected, and something of it is.
     pub(crate) fn why_not(&self) -> Option<String> {
-        let mut waiting = Vec::new();
+        let mut waiting = self.failed.clone();
         for (name, w) in &self.listeners {
             match w {
                 None => waiting.push(format!("{name} has not connected")),
@@ -550,6 +554,7 @@ impl WarmUp {
             "servedBefore": self.served_before,
             "caughtUp": why.is_none(),
             "waitingFor": why,
+            "failed": self.failed,
             "listeners": listeners,
             "workers": workers,
         })
@@ -596,6 +601,12 @@ pub(crate) fn warm_up(
                 .collect(),
         ),
     };
+    let failed = if served_before {
+        // A rollback: the since-report says what the newer deployment left behind.
+        Vec::new()
+    } else {
+        failed(kernel, deployment)?
+    };
     Ok(WarmUp {
         deployment: deployment.to_owned(),
         head: kernel.durable.load(std::sync::atomic::Ordering::SeqCst),
@@ -603,7 +614,44 @@ pub(crate) fn warm_up(
         served_before,
         listeners,
         workers,
+        failed,
     })
+}
+
+/// Why `deployment`, which never served, may not take over whatever the wait: its read models
+/// or middlewares that keep failing at one event, and event schemas in the history above what
+/// its workers read (every command on such an aggregate would be `unknown_history`). Types,
+/// schemas and positions only, never values.
+fn failed(kernel: &crate::Kernel, deployment: &str) -> kernable_store::Result<Vec<String>> {
+    let mut why = Vec::new();
+    for f in kernel.listeners.failing(deployment) {
+        let at = kernel
+            .store
+            .read_all(f.position, 1)?
+            .into_iter()
+            .next()
+            .map(|e| {
+                format!(
+                    " ({} at schema {})",
+                    config::qualified(&e.domain, &e.event_type),
+                    e.schema
+                )
+            })
+            .unwrap_or_default();
+        why.push(format!(
+            "{} fails at the event after position {}{at}: its connection ended {} times there",
+            f.registration, f.position, f.times
+        ));
+    }
+    let stored = kernel.schemas().clone();
+    for (event_type, known) in kernel.workers.schemas_of(deployment) {
+        if let Some(&schema) = stored.get(&event_type).filter(|&&s| s > known) {
+            why.push(format!(
+                "{UNKNOWN_HISTORY}: the history holds {event_type} at schema {schema}, and deployment {deployment}'s workers read it only up to schema {known}"
+            ));
+        }
+    }
+    Ok(why)
 }
 
 /// Drops what the kernel keeps for `deployment` apart from the log: its read models' and

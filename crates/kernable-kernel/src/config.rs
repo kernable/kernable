@@ -207,7 +207,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--replay",
         "KERNABLE_REPLAY",
         "off",
-        "`on`: the kernel runs a check before switching on a masked copy ([Check a deployment before switching](../how-to/deployments#check-a-deployment-before-switching)): it takes only the commands `kernable replay` sends, each run as if received at its original time, and fires no scheduled command and no process step. Refused on a store that is not a masked copy. `off`: a kernel as usual.",
+        "`on`: a kernel on a masked copy that replays commands for a developer ([Replay commands on your own copy](../how-to/deployments#replay-commands-on-your-own-copy-a-developer-tool)): it takes only the commands `kernable replay` sends, each run as if received at its original time, and fires no scheduled command and no process step. The replayed commands run their handlers, so code that calls out does; a developer's own copy only, never production. Refused on a store that is not a masked copy. `off`: a kernel as usual.",
     ),
     (
         "--query-timeout-ms",
@@ -363,7 +363,8 @@ pub struct Config {
     /// `--deployment-switch-lag`: events a deployment's read models may be behind when a
     /// membership switches to it.
     pub deployment_switch_lag: u64,
-    /// `--replay on`: a check before switching on a masked copy (`kernable replay`).
+    /// `--replay on`: a kernel on a masked copy that replays commands for a developer
+    /// (`kernable replay`).
     pub replay: bool,
     pub query_timeout_ms: u64,
     pub middleware_timeout_ms: u64,
