@@ -490,6 +490,15 @@ Scripting:
                                           values.
 
 kernable Cloud:
+  kernable init [<dir>] [--force] [--offline]
+                                          Writes what kernable Cloud builds and runs the app in
+                                          <dir> (default .) from: a Containerfile for what it finds
+                                          (Node, Python, Rust, Go, a frontend, static files) on
+                                          official images pinned by digest, kernable.toml (whether
+                                          it uses the kernel, its processes with their commands and
+                                          ports, static files in the image) and .kernableignore.
+                                          Keeps files that exist unless --force; --offline pins
+                                          nothing.
   kernable cloud login | logout | whoami | teams | members | tokens | projects
                                           Signs in to a kernable Cloud installation by device
                                           code and manages its teams, members, CI tokens and
@@ -731,6 +740,35 @@ async fn main() -> ExitCode {
                 vault_refs: Vec::new(),
             };
             submit(addr, key, cmd).await
+        }
+        ["init", rest @ ..] => {
+            let force = rest.contains(&"--force");
+            let offline = rest.contains(&"--offline");
+            let dirs: Vec<&&str> = rest.iter().filter(|a| !a.starts_with("--")).collect();
+            if rest
+                .iter()
+                .any(|a| a.starts_with("--") && !["--force", "--offline"].contains(a))
+                || dirs.len() > 1
+            {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+            let dir = dirs.first().map_or(".", |d| **d).to_owned();
+            // It may ask the registry for digests: off the async workers.
+            match tokio::task::spawn_blocking(move || {
+                kernable_kernel::init::run(Path::new(&dir), force, offline)
+            })
+            .await
+            {
+                Ok(Ok(lines)) => {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                    Ok(true)
+                }
+                Ok(Err(e)) => Err(e.into()),
+                Err(e) => Err(e.to_string().into()),
+            }
         }
         ["cloud", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|a| (*a).to_owned()).collect();

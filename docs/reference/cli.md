@@ -473,6 +473,14 @@ Signs a command with a new ID and submits it, waiting until it has settled; the 
 
 ## kernable Cloud
 
+### `kernable init`
+
+```text
+kernable init [<dir>] [--force] [--offline]
+```
+
+Writes what kernable Cloud builds and runs the app in `<dir>` (default .) from: a Containerfile for what it finds (Node, Python, Rust, Go, a frontend, static files) on official images pinned by digest, kernable.toml (whether it uses the kernel, its processes with their commands and ports, static files in the image) and .kernableignore. Keeps files that exist unless `--force`; `--offline` pins nothing.
+
 ### `kernable cloud login | logout | whoami | teams | members | tokens | projects`
 
 ```text
