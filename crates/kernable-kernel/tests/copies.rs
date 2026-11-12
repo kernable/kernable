@@ -379,15 +379,37 @@ async fn a_masked_copy_of_a_store_reads_personal_values_as_null_and_writes_its_o
     let mut sync = config.clone();
     sync.replication.sync = true;
     assert!(refused(sync).contains("without --replication sync"));
-    let mut production_key = config.clone();
-    production_key.vault = Some(VaultConfig {
+    // Snapshots of its own here (the preview's are held by the preview kernel): the vault is
+    // what is refused. Production's vault, while production runs: its own lock refuses it.
+    let mut production_vault = config.clone();
+    production_vault.snapshots = format!("sqlite:{}", p.dir.join("checked-snapshots.db").display());
+    production_vault.vault = Some(VaultConfig {
         store: format!("sqlite:{}", env.dir.join("vault.db").display()),
+        key: env.dir.join("vault.key"),
+    });
+    let e = refused(production_vault.clone());
+    assert!(e.contains("in use by another process"), "{e}");
+    // A copy of production's vault with production's key: refused by the mark.
+    let copied = p.dir.join("production-vault.db");
+    std::fs::copy(env.dir.join("vault.db"), &copied).unwrap();
+    let mut production_key = production_vault;
+    production_key.vault = Some(VaultConfig {
+        store: format!("sqlite:{}", copied.display()),
         key: env.dir.join("vault.key"),
     });
     let e = refused(production_key);
     assert!(e.contains("only with the vault key its copy made"), "{e}");
+    // Production's snapshots, while production runs: their own lock refuses them.
+    let mut live_snapshots = config.clone();
+    live_snapshots.snapshots = env.snapshots.clone();
+    let e = refused(live_snapshots);
+    assert!(e.contains("in use by another process"), "{e}");
+    // A copy of production's snapshots file: from before the copy, refused by the mark.
+    let (_, live) = kernable_store::backend(&env.snapshots);
+    let copied = p.dir.join("production-snapshots.db");
+    std::fs::copy(live, &copied).unwrap();
     let mut old_snapshots = config.clone();
-    old_snapshots.snapshots = env.snapshots.clone();
+    old_snapshots.snapshots = format!("sqlite:{}", copied.display());
     let e = refused(old_snapshots);
     assert!(e.contains("snapshots from before the copy"), "{e}");
 }

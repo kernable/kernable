@@ -374,11 +374,12 @@ impl Kernel {
         };
         let workers = workers::Registry::load(store.workers()?);
         let schemas = store.event_schemas()?.into_iter().collect();
+        // A masked copy (a preview) runs alone, with its own vault and snapshots: a setting
+        // it refuses is named before any other file is opened.
+        let copy = copy::check_config(&config, store.as_ref())?;
         // The snapshots and the vault have locks of their own: a second kernel with another
         // event store but these files is refused before it touches them.
         let snapshots = kernable_store::snapshots::open_locked(&config.snapshots)?;
-        // A masked copy (a preview) runs alone, with its own vault and snapshots.
-        let copy = copy::check_config(&config, store.as_ref())?;
         if let Some(mark) = &copy {
             copy::check_snapshots(mark, snapshots.as_ref())?;
         }
