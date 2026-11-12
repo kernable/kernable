@@ -38,9 +38,11 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           Tokens for CI (KERNABLE_CLOUD_TOKEN), never an owner's;
                                           shown once
   kernable cloud projects [--team <team>] [create <name> [--plan <plan>] | show <name>
-                       | usage <name> [--month <yyyy-mm>] | stop <name> | start <name>]
+                       | usage <name> [--month <yyyy-mm>] | stop <name> | start <name>
+                       | domain add <name> <host> | domain remove <name> <host>]
                                           A new project is placed at once, past the checks before
-                                          a team's first project
+                                          a team's first project. A host name of your own: set the
+                                          TXT record `domain add` names, then run it again
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
 const DEFAULT_API: &str = "https://api.kernable.com";
@@ -866,6 +868,27 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
             s.show(&v, |v| {
                 println!("{}", serde_json::to_string_pretty(v).unwrap_or_default())
             });
+        }
+        ["domain", "add", name, host] => {
+            // While the record is missing the API says which to set (409), as the error.
+            let v = s.call(
+                "POST",
+                &format!("/v1/teams/{t}/projects/{name}/domains"),
+                Some(json!({ "host": host })),
+            )?;
+            s.show(&v, |_| {
+                println!(
+                    "{name}: {host} is checked and the project's (its routes come with a deploy)"
+                )
+            });
+        }
+        ["domain", "remove", name, host] => {
+            let v = s.call(
+                "DELETE",
+                &format!("/v1/teams/{t}/projects/{name}/domains/{host}"),
+                None,
+            )?;
+            s.show(&v, |_| println!("{name}: {host} taken away"));
         }
         [verb @ ("stop" | "start"), name] => {
             let v = s.call(
