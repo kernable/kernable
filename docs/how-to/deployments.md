@@ -70,6 +70,7 @@ Without `--wait` a refusal fails at once (exit code 3, so a script can tell it f
 - `GET /ready?deployment=2026-11-11.2` on the metrics address (`--metrics-listen`): 200 once every read model and middleware registered for the deployment is within the lag (or it served before) and some of its processes are connected, else 503 naming what it waits for.
 - `GET /api/deployments/warm-up?deployment=2026-11-11.2` in the kernel UI: per read model its registration, position, how far behind the newest event, whether it is connected and caught up; the aggregates the deployment's workers run.
 - `GET /ready` keeps answering for the deployment that serves.
+- The same on the kernel's local socket (`--admin-socket`; `kernable node` makes `admin.sock` in the project directory): `curl --unix-socket admin.sock http://localhost/ready?deployment=2026-11-11.2`, and `/api/deployments/warm-up?deployment=…`. A tool on the machine reaches it through the file system, so it need not enter the network namespace the kernel runs in (the node's pod); the socket is the kernel's user's only (mode 0600), and root's.
 
 Before the switch, nothing of the new deployment counts: its read models hold nobody back and settling submits do not wait for them. After it, the old deployment's processes idle; stop them when you no longer want to go back quickly.
 
@@ -133,13 +134,82 @@ A deployment that wrote wrong events, or sent something it should not have, is f
 
 ## Clean up old deployments
 
-A deployment's read model registrations (with their positions) and snapshots stay until you drop them, so a rollback can always find them. Drop one that you will not go back to, with the kernel stopped:
+A deployment's read model registrations (with their positions) and snapshots stay until you drop them, so a rollback can always find them. Drop one that you will not go back to, while the kernel runs, through its local socket:
 
 ```sh
-kernable deployments drop kernable.db 2026-11-01.1
+kernable deployments drop --socket admin.sock 2026-11-01.1 --force
 ```
 
-or let the kernel drop deployments that no membership names, with none of their read models connected for a number of days: `--deployment-retention-days 30`. Either logs what it dropped; the events stay. A dropped deployment that comes back starts afresh: its read models rebuild, and for the unknown-history refusal it counts from its first event, as before.
+or with the kernel stopped, from the store:
+
+```sh
+kernable deployments drop kernable.db 2026-11-01.1 --force
+```
+
+The drop is refused (exit code 3; codes in [Errors](../reference/errors#refusals-of-a-deployment-drop)):
+
+- **`serving`**: a service's membership names the deployment. Switch first.
+- **`running`**: on a running kernel, a worker or read model of the deployment is connected. Its read models' state is in use, as during a grace period in which the old deployment keeps running beside the new one: stop its processes first.
+- **`served_before`**, unless `--force`: the deployment wrote events, so a rollback may need its read models. The kernel cannot know how long you mean to keep it (a grace period is yours, not the kernel's), so you say so with `--force`. A deployment that never wrote an event, a preview's or one that never took over, drops without it.
+
+Or let the kernel drop deployments that no membership names, with none of their read models connected for a number of days: `--deployment-retention-days 30`. Each logs what it dropped; the events stay. A dropped deployment that comes back starts afresh: its read models rebuild, and for the unknown-history refusal it counts from its first event, as before.
+
+## Output for tools
+
+The deployment commands print JSON with `--json`, for a platform or a script. Fields are camelCase; positions are numbers, times milliseconds since the epoch (UTC). New fields may be added; none is renamed or removed while the protocol stays 1.
+
+`kernable deployments <store> --json`:
+
+```json
+{
+  "deployments": [
+    { "deployment": "2026-11-11.1", "events": 1840, "firstPosition": 1, "lastPosition": 1840,
+      "lastAt": 1762851200000, "listeners": ["carts@2026-11-11.1"] }
+  ],
+  "services": [ { "service": "shop", "deployment": "2026-11-11.2" } ]
+}
+```
+
+`deployments` lists every deployment that wrote events or has read models registered (`listeners`: their registrations, `name@deployment`); one without events has `events` 0. `services`: the deployment each service's membership names (`""`: every deployment serves).
+
+`kernable deployments since <store> <position> --json` (and `GET /api/deployments/since`):
+
+```json
+{
+  "from": 1840, "fromTime": 1762851200000, "head": 2215, "deployment": "2026-11-11.2",
+  "types": [
+    { "type": "shop.CartShared", "schema": 1, "deployment": "2026-11-11.2", "events": 4,
+      "aggregates": 4, "firstPosition": 1901, "lastAt": 1762860000000,
+      "newType": true, "newSchema": false }
+  ],
+  "scheduled": [
+    { "commandId": "7d1c…", "tenant": "t1", "type": "shop.RemindCustomer",
+      "aggregate": "shop.cart/c-17", "receivedAt": 1762855000000, "deliverAt": 1762876800000 }
+  ],
+  "timers": [],
+  "cases": [ { "process": "shop.fulfilment", "case": "o-88#1", "tenant": "t1",
+               "lastEvent": "StepReached", "lastAt": 1762859000000 } ],
+  "processVersions": [ { "process": "shop.fulfilment", "version": 4, "recordedAt": 1762852000000 } ]
+}
+```
+
+`deployment` is `null` without `--version`; `timers` has the fields of `scheduled`.
+
+`kernable deployments drop … --json`: `{"deployment": "2026-11-01.1", "readModels": ["carts@2026-11-01.1"], "snapshots": 12, "forced": true}`; refused, `{"error": "served_before", "message": "…"}` (exit code 3).
+
+`GET /api/deployments/warm-up?deployment=<d>` (UI and local socket):
+
+```json
+{
+  "deployment": "2026-11-11.2", "head": 2215, "maxLag": 100, "servedBefore": false,
+  "caughtUp": false, "waitingFor": "deployment 2026-11-11.2 has not caught up: carts@2026-11-11.2 at 1990 of 2215",
+  "listeners": [ { "name": "carts", "registration": "carts@2026-11-11.2", "position": 1990,
+                   "behind": 225, "connected": true, "caughtUp": false } ],
+  "workers": [ { "aggregate": "shop.Cart", "connected": true } ]
+}
+```
+
+`waitingFor` is `null` once caught up; a listener not registered yet has `registration` `null` and only `name` and `caughtUp`. `GET /ready?deployment=<d>` answers 200 `caught up` or 503 with the `waitingFor` text.
 
 ## Check a deployment before switching
 

@@ -573,3 +573,246 @@ async fn invalid_deployments_are_refused() {
     let refused = apply(&env.addr, m).await.unwrap_err();
     assert_eq!(refused.code(), tonic::Code::InvalidArgument);
 }
+
+/// One request to the kernel's local socket: the whole response.
+async fn local(socket: &std::path::Path, method: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut conn = tokio::net::UnixStream::connect(socket).await.unwrap();
+    conn.write_all(format!("{method} {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    conn.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+/// `kernable <args>`: the exit code and what it printed.
+async fn cli(args: &[&str]) -> (i32, String) {
+    let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    tokio::task::spawn_blocking(move || {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_kernable"))
+            .args(&args)
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_local_socket_serves_readiness_and_drops_an_old_deployment_while_the_kernel_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = start_custom("deployments-socket", |config, dir| {
+        config.admin_socket = Some(dir.join("ops/admin.sock").display().to_string());
+        config.deployment_switch_lag = 0;
+    })
+    .await;
+    let socket = env.dir.join("ops/admin.sock");
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&socket), 0o600, "the kernel's user only");
+    assert_eq!(mode(&env.dir.join("ops")), 0o700);
+    let socket_arg = socket.display().to_string();
+
+    let mut m1 = membership("shop", &["orders.Order"], &["carts"], &[]);
+    m1.deployment = "v1".into();
+    apply(&env.addr, m1.clone()).await.unwrap();
+    let worker1 = start_worker(env.addr.clone(), worker("v1", 1).0).await;
+    let mut carts1 = listen(&env, "carts", "v1", false).await;
+    run(&env, "a1", "PlaceOrder", "a").await;
+    carts1.through(1).await;
+
+    // v2 warms up beside v1; the socket says how far it is, as the metrics address does.
+    let worker2 = start_worker(env.addr.clone(), worker("v2", 1).0).await;
+    let mut carts2 = listen(&env, "carts", "v2", false).await;
+    let ready = local(&socket, "GET", "/ready?deployment=v2").await;
+    assert!(ready.starts_with("HTTP/1.1 503"), "{ready}");
+    assert!(ready.contains("carts@v2 at 0 of 1"), "{ready}");
+    carts2.through(1).await;
+    let ready = local(&socket, "GET", "/ready?deployment=v2").await;
+    assert!(ready.starts_with("HTTP/1.1 200"), "{ready}");
+    let warm = local(&socket, "GET", "/api/deployments/warm-up?deployment=v2").await;
+    assert!(warm.contains("\"caughtUp\":true"), "{warm}");
+    assert!(
+        local(&socket, "GET", "/health")
+            .await
+            .starts_with("HTTP/1.1 200")
+    );
+    let mut m2 = m1.clone();
+    m2.deployment = "v2".into();
+    apply_eventually(&env, &m2).await;
+    let listed = local(&socket, "GET", "/api/deployments").await;
+    assert!(listed.contains("\"deployment\":\"v2\""), "{listed}");
+
+    // Never the serving one, never one still running.
+    let refused = local(
+        &socket,
+        "POST",
+        "/api/deployments/drop?deployment=v2&force=true",
+    )
+    .await;
+    assert!(refused.starts_with("HTTP/1.1 409"), "{refused}");
+    assert!(refused.contains("\"error\":\"serving\""), "{refused}");
+    let refused = local(
+        &socket,
+        "POST",
+        "/api/deployments/drop?deployment=v1&force=true",
+    )
+    .await;
+    assert!(refused.contains("\"error\":\"running\""), "{refused}");
+    assert!(
+        refused.contains("workers of orders.Order are connected"),
+        "{refused}"
+    );
+    worker1.abort();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let refused = local(
+        &socket,
+        "POST",
+        "/api/deployments/drop?deployment=v1&force=true",
+    )
+    .await;
+    assert!(refused.contains("\"error\":\"running\""), "{refused}");
+    assert!(refused.contains("listener carts@v1"), "{refused}");
+    drop(carts1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Stopped, but it served: only forced, as the kernel cannot know an operator's grace.
+    let (code, printed) = cli(&["deployments", "drop", "--socket", &socket_arg, "v1"]).await;
+    assert_eq!(code, 3, "{printed}");
+    assert!(printed.contains("served_before"), "{printed}");
+    let (code, printed) = cli(&[
+        "deployments",
+        "drop",
+        "--socket",
+        &socket_arg,
+        "v1",
+        "--force",
+        "--json",
+    ])
+    .await;
+    assert_eq!(code, 0, "{printed}");
+    let dropped: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(dropped["deployment"], "v1");
+    assert_eq!(dropped["readModels"], serde_json::json!(["carts@v1"]));
+    assert_eq!(dropped["forced"], true);
+    assert!(dropped["snapshots"].is_u64());
+    let names: Vec<String> = store(&env)
+        .listeners()
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect();
+    assert!(!names.contains(&"carts@v1".to_owned()), "{names:?}");
+    // The events stay; v2 serves on.
+    assert_eq!(
+        events(&run(&env, "a2", "AddItem", "a").await)[0].deployment,
+        "v2"
+    );
+    carts2.through(2).await;
+
+    // The list as JSON, while the kernel runs.
+    let (code, printed) = cli(&["deployments", &env.store, "--json"]).await;
+    assert_eq!(code, 0, "{printed}");
+    let list: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    let names: Vec<&str> = list["deployments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["deployment"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["v1", "v2"]);
+    assert_eq!(list["services"][0]["deployment"], "v2");
+
+    // Only these, and the drop only by POST.
+    let wrong = local(&socket, "GET", "/api/deployments/drop?deployment=v1").await;
+    assert!(wrong.starts_with("HTTP/1.1 405"), "{wrong}");
+    let wrong = local(&socket, "GET", "/api/events").await;
+    assert!(wrong.starts_with("HTTP/1.1 404"), "{wrong}");
+    let wrong = local(&socket, "POST", "/api/deployments/drop?deployment=a@b").await;
+    assert!(wrong.starts_with("HTTP/1.1 400"), "{wrong}");
+    drop((worker2, carts2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_kernel_s_deployments_are_dropped_with_the_same_refusals() {
+    let dir = Dir::new("deployments-drop-stopped");
+    let url = store_url(&dir.0);
+    {
+        let store = kernable_store::open(&url).unwrap();
+        // v0 served once, v1 serves now, pr-1 never wrote anything.
+        for (i, deployment) in ["v0", "v1"].iter().enumerate() {
+            let cmd = command(&format!("c{i}"), "PlaceOrder", &format!("o{i}"));
+            store.enqueue(&cmd, 1_000).unwrap();
+            let event = kernable_core::proto::NewEvent {
+                event_type: "OrderPlaced".into(),
+                schema: 1,
+                deployment: (*deployment).into(),
+                ..Default::default()
+            };
+            store
+                .commit(
+                    &cmd.command_id,
+                    0,
+                    &[event],
+                    &Default::default(),
+                    None,
+                    1_000,
+                )
+                .unwrap();
+        }
+        let mut m = membership("shop", &["orders.Order"], &[], &[]);
+        m.deployment = "v1".into();
+        store
+            .save_membership(&kernable_core::proto::MembershipRecord {
+                membership: Some(m),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let snapshots = format!("sqlite:{}", dir.0.join("snapshots.db").display());
+    let drop = |deployment: &str, force: bool| {
+        let mut args = vec![
+            "deployments".to_owned(),
+            "drop".into(),
+            url.clone(),
+            deployment.into(),
+            "--snapshots".into(),
+            snapshots.clone(),
+        ];
+        if force {
+            args.push("--force".into());
+        }
+        async move {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            cli(&args).await
+        }
+    };
+    let (code, printed) = drop("v1", true).await;
+    assert_eq!(code, 3, "{printed}");
+    assert!(
+        printed.contains("serving: deployment v1 serves shop"),
+        "{printed}"
+    );
+    let (code, printed) = drop("v0", false).await;
+    assert_eq!(code, 3, "{printed}");
+    assert!(printed.contains("served_before"), "{printed}");
+    let (code, printed) = drop("v0", true).await;
+    assert_eq!(code, 0, "{printed}");
+    let (code, printed) = drop("pr-1", false).await;
+    assert_eq!(code, 0, "a deployment that never wrote an event: {printed}");
+    assert!(printed.contains("dropped deployment pr-1"), "{printed}");
+}

@@ -76,13 +76,24 @@ pub fn new_vault(store: &str, path: &str) -> Result<Vault, BoxError> {
     Ok(vault)
 }
 
-/// Marks `store` as a masked copy of `source` whose own vault is `vault`.
-pub fn mark(store: &dyn Store, vault: &Vault, source: &str) -> Result<CopyRecord, BoxError> {
+/// Marks `store` as a masked copy of `source` whose own vault is `vault`, checked with the
+/// source's kernel keys `kernel_keys` (key IDs), which the mark carries: a kernel on the copy
+/// signs with its own key, and `kernable verify` of the copy accepts the source's beside it.
+pub fn mark(
+    store: &dyn Store,
+    vault: &Vault,
+    source: &str,
+    kernel_keys: &[String],
+) -> Result<CopyRecord, BoxError> {
+    let mut source_kernel_keys = kernel_keys.to_vec();
+    source_kernel_keys.sort();
+    source_kernel_keys.dedup();
     let mark = CopyRecord {
         copied_at: now_ms(),
         position: store.head_position()?,
         source: source.to_owned(),
         vault_key: vault.key_id().to_owned(),
+        source_kernel_keys,
     };
     store.mark_copy(&mark)?;
     store.sync()?;
@@ -167,6 +178,24 @@ pub fn check_snapshots(mark: &CopyRecord, snapshots: &dyn SnapshotStore) -> Resu
         .into());
     }
     Ok(())
+}
+
+/// The kernel keys to check a store with: `given`, and, for a masked copy, the source's
+/// kernel keys its mark carries (whose checkpoints and revocations came along), so the copy's
+/// own kernel key and production's both verify. Also which keys the mark added.
+pub fn verifying_keys(mark: Option<&CopyRecord>, given: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut keys = given.to_vec();
+    let mut added = Vec::new();
+    for k in mark
+        .map(|m| m.source_kernel_keys.as_slice())
+        .unwrap_or_default()
+    {
+        if !keys.contains(k) {
+            keys.push(k.clone());
+            added.push(k.clone());
+        }
+    }
+    (keys, added)
 }
 
 /// A copy's mark for people: where it came from, when, up to which event.

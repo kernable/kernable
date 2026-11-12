@@ -17,6 +17,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
+mod admin;
 pub mod backup;
 mod cache;
 pub mod config;
@@ -1630,7 +1631,15 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         () = timers::run(&kernel), if !kernel.config().replay => unreachable!(),
         () = process_engine::run(&kernel), if !kernel.config().replay => unreachable!(),
         result = serve_metrics(&kernel) => result,
+        result = serve_admin(&kernel) => result,
         result = serve_ui(&kernel) => result,
+    }
+}
+
+async fn serve_admin(kernel: &Arc<Kernel>) -> Result<(), BoxError> {
+    match &kernel.config().admin_socket {
+        Some(path) => admin::serve(Arc::clone(kernel), path).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1812,6 +1821,72 @@ fn retire(kernel: &Kernel, deployment: &str) {
         });
     let names: Vec<&str> = removed.iter().map(|r| r.name.as_str()).collect();
     tracing::warn!(%deployment, read_models = ?names, snapshots, "dropped a deployment's read models and snapshots after --deployment-retention-days; its events stay");
+}
+
+impl Kernel {
+    /// Drops what the kernel keeps for `deployment` apart from the log, while it runs: its read
+    /// models' and middlewares' registrations (with their positions) and its snapshots. Refused
+    /// as [`deployments::may_drop`] says: never the serving deployment nor one with a process
+    /// connected, one that served before only with `force`. Logged; the events stay. Returns
+    /// what went, as [`deployments::dropped_json`].
+    pub fn drop_deployment(
+        &self,
+        deployment: &str,
+        force: bool,
+    ) -> Result<serde_json::Value, deployments::Refusal> {
+        let refused = |code, message: String| deployments::Refusal { code, message };
+        if deployment.is_empty() || !config::valid_name(deployment) {
+            return Err(refused(
+                "invalid",
+                "a deployment has 1 to 128 letters, digits, `-`, `_` and `.`".into(),
+            ));
+        }
+        if self.fenced() || sealed(self) {
+            return Err(refused(
+                "unavailable",
+                "the kernel is handing over or fenced: try again".into(),
+            ));
+        }
+        let services: Vec<String> = self
+            .memberships
+            .deployments()
+            .into_iter()
+            .filter(|(_, d)| d == deployment)
+            .map(|(service, _)| service)
+            .collect();
+        let workers = self.workers.aggregates_of(deployment);
+        let running = (!workers.is_empty())
+            .then(|| format!("workers of {} are connected", workers.join(", ")));
+        let served_before = self
+            .written
+            .served(self.store.as_ref(), deployment)
+            .map_err(|e| refused("failed", e.to_string()))?;
+        deployments::may_drop(
+            deployment,
+            &services,
+            running.as_deref(),
+            served_before,
+            force,
+        )?;
+        // Refuses, changing nothing, while one of its read models is connected.
+        let removed = self
+            .listeners
+            .drop_deployment(deployment)
+            .map_err(|why| refused("running", why))?;
+        if let Err(e) = self.store.save_listeners(&removed) {
+            tracing::error!(error = %e, %deployment, "dropping the deployment's read models failed");
+            return Err(refused("failed", e.to_string()));
+        }
+        let snapshots = self
+            .snapshots
+            .drop_deployment(deployment)
+            .map_err(|e| refused("failed", e.to_string()))?;
+        let names: Vec<String> = removed.into_iter().map(|r| r.name).collect();
+        tracing::warn!(%deployment, read_models = ?names, snapshots, forced = force, "dropped a deployment's read models and snapshots by hand; its events stay");
+        Ok(deployments::dropped_json(
+            deployment, &names, snapshots, force,
+        ))
+    }
 }
 
 /// Measures the stores every 10 s, and warns once they pass 80 % of `--max-store-bytes`.

@@ -180,10 +180,25 @@ Deploy and inspect:
                                           asked for, and the message (for a handler error only the
                                           error's type; the listener's log has the rest).
   kernable schemas <store>                Lists the highest stored schema version per event type.
-  kernable deployments <store>            Lists the deployments (code versions) that wrote events
+  kernable deployments <store> [--json]   Lists the deployments (code versions) that wrote events
                                           or registered read models: first and last position and
                                           how many events each wrote, its read models; then the
-                                          deployment each service's membership names.
+                                          deployment each service's membership names. --json:
+                                          {deployments: [{deployment, events, firstPosition,
+                                          lastPosition, lastAt, listeners}], services: [{service,
+                                          deployment}]}.
+  kernable deployments drop --socket <path> <deployment> [--force] [--json]
+                                          Forgets a deployment's read model and middleware
+                                          registrations (with their positions) and its snapshots
+                                          while the kernel runs, through its local socket
+                                          (--admin-socket); its events stay, the kernel logs it.
+                                          Refused (exit code 3) for the deployment a membership
+                                          names (serving) and for one with a worker or read model
+                                          connected (running); one that wrote events (it served,
+                                          a rollback may need it, and the kernel does not know an
+                                          operator's grace period) only with --force
+                                          (served_before). --json: {deployment, readModels,
+                                          snapshots, forced}, or {error, message} when refused.
   kernable deployments since <store> <position>|--at <time> [--version <v>] [--json]
                                           What was written after <position> (or since the UTC
                                           <time>), to check before a rollback: per event type,
@@ -194,6 +209,7 @@ Deploy and inspect:
                                           process timers stored since and still due, running
                                           process cases that moved, and process versions
                                           registered. --version: only that deployment's events.
+                                          --json: the schema in the deployments how-to.
   kernable processes list <store>         Lists the registered business processes: name, newest
                                           version, state (active or removed), as whom it acts
                                           (ProcessService.Act; else process:<name>), and when and
@@ -438,11 +454,14 @@ Maintenance, with the kernel stopped:
                                           count. If a listener connects again under that name, it
                                           starts at the newest event. Exit 1 if there is no such
                                           listener.
-  kernable deployments drop <store> <deployment> [--snapshots <url>]
+  kernable deployments drop <store> <deployment> [--snapshots <url>] [--force] [--json]
                                           Forgets a deployment's read model and middleware
                                           registrations (with their positions) and its snapshots
                                           (default store: next to <store>); its events stay. A read
                                           model of it that connects again rebuilds from the start.
+                                          Refused as with --socket: never the serving deployment,
+                                          one that served before only with --force. While the
+                                          kernel runs, use --socket.
   kernable workers remove <store> <domain.Aggregate>
                                           Unregisters an aggregate type: its commands are refused
                                           (NOT_FOUND) unless a membership lists it. Exit 1 if there
@@ -609,11 +628,16 @@ async fn main() -> ExitCode {
         }
         ["listeners", store] => listeners(store),
         ["schemas", store] => schemas(store),
-        ["deployments", store] if !store.starts_with("--") => deployments_list(store),
         ["deployments", "since", store, rest @ ..] => deployments_since(store, rest),
-        ["deployments", "drop", store, deployment] => deployments_drop(store, deployment, None),
-        ["deployments", "drop", store, deployment, "--snapshots", url] => {
-            deployments_drop(store, deployment, Some(url))
+        ["deployments", "drop", rest @ ..] => {
+            return deployments_drop(rest).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            });
+        }
+        ["deployments", store] if !store.starts_with("--") => deployments_list(store, false),
+        ["deployments", store, "--json"] if !store.starts_with("--") => {
+            deployments_list(store, true)
         }
         ["listeners", "remove", store, name] => remove_listener(store, name),
         ["listeners", "parked", store] => parked(store),
@@ -1811,7 +1835,13 @@ fn restore_masked(
         "backup {from}, generation {}, record {}",
         restored.generation, restored.record
     );
-    masked_done(stores.store.as_ref(), &vault, &source, flags)?;
+    masked_done(
+        stores.store.as_ref(),
+        &vault,
+        &source,
+        flags,
+        &restored.kernel_keys,
+    )?;
     let report = stores.store.verify(&restored.kernel_keys)?;
     Ok(report_verify(&report))
 }
@@ -1851,8 +1881,9 @@ fn masked_done(
     vault: &kernable_store::vault::Vault,
     source: &str,
     flags: &StoreFlags,
+    kernel_keys: &[String],
 ) -> Result<()> {
-    let mark = kernable_kernel::copy::mark(store, vault, source).map_err(boxed)?;
+    let mark = kernable_kernel::copy::mark(store, vault, source, kernel_keys).map_err(boxed)?;
     let (vault_store, vault_key) = flags.vault.clone().unwrap_or_default();
     println!(
         "masked copy of {}: no vault value of the source, so its personal values read as null. \
@@ -2088,8 +2119,14 @@ fn copy_store(from: &str, flags: &[&str]) -> Result<ExitCode> {
         "copied {} records and {} files from {from}",
         end.records, end.files
     );
-    masked_done(store.as_ref(), &vault, &format!("store {from}"), &flags)?;
     let key_ids = kernel_keys_of(&flags, &end.kernel_keys, "the source")?;
+    masked_done(
+        store.as_ref(),
+        &vault,
+        &format!("store {from}"),
+        &flags,
+        &key_ids,
+    )?;
     let report = store.verify(&key_ids)?;
     Ok(report_verify(&report))
 }
@@ -2570,10 +2607,19 @@ fn verify(store: &str, keys: &[&str]) -> Result<ExitCode> {
         .map(|k| Ok(signing::key_id(&signing::read_verifying_key(k)?)))
         .collect::<Result<Vec<_>>>()?;
     let store = kernable_store::open_read_only(store)?;
-    if let Some(mark) = store.copy_mark()? {
+    let mark = store.copy_mark()?;
+    if let Some(mark) = &mark {
         println!(
             "a masked copy (a preview) of {}",
-            kernable_kernel::copy::describe(&mark)
+            kernable_kernel::copy::describe(mark)
+        );
+    }
+    let (key_ids, added) = kernable_kernel::copy::verifying_keys(mark.as_ref(), &key_ids);
+    if !added.is_empty() {
+        println!(
+            "with the source's kernel keys the copy's mark names: {}; compare them with the \
+             source's kernel .pub files",
+            added.join(", ")
         );
     }
     let report = store.verify(&key_ids)?;
@@ -2832,7 +2878,22 @@ fn import(file: &str, flags: &[&str]) -> Result<ExitCode> {
                 },
                 end.vault_values
             );
-            masked_done(store.as_ref(), vault, &format!("export {file}"), &flags)?;
+            // The keys the copy is checked with, which its mark carries; said below.
+            let keys = match flags.kernel_pubs.is_empty() {
+                true => end.kernel_keys.clone(),
+                false => flags
+                    .kernel_pubs
+                    .iter()
+                    .map(|k| key_id_of("--kernel-pub", k))
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            masked_done(
+                store.as_ref(),
+                vault,
+                &format!("export {file}"),
+                &flags,
+                &keys,
+            )?;
         }
         None => println!(
             "imported {} records, {} vault values and {} files",
@@ -3406,9 +3467,13 @@ fn schemas(store: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn deployments_list(store: &str) -> Result<bool> {
+fn deployments_list(store: &str, json: bool) -> Result<bool> {
     let store = kernable_store::open_read_only(store)?;
     let list = kernable_kernel::deployments::list(store.as_ref())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(true);
+    }
     let empty = Vec::new();
     for d in list["deployments"].as_array().unwrap_or(&empty) {
         println!(
@@ -3532,26 +3597,138 @@ fn deployments_since(store_url: &str, args: &[&str]) -> Result<bool> {
     Ok(true)
 }
 
-fn deployments_drop(store_url: &str, deployment: &str, snapshots: Option<&str>) -> Result<bool> {
-    if !config::valid_name(deployment) {
-        return Err("a deployment has 1 to 128 letters, digits, `-`, `_` and `.`".into());
-    }
-    let store = kernable_store::open(store_url)?;
-    let snapshots_url =
-        snapshots.map_or_else(|| config::snapshots_next_to(store_url), str::to_owned);
-    let snapshots = kernable_store::snapshots::open(&snapshots_url)?;
-    let (listeners, dropped) =
-        kernable_kernel::deployments::drop(store.as_ref(), snapshots.as_ref(), deployment)?;
-    println!(
-        "dropped deployment {deployment}: {} read model registrations{}, {dropped} snapshots",
-        listeners.len(),
-        if listeners.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", listeners.join(", "))
+/// `kernable deployments drop`: with the kernel stopped (`<store> <deployment>`), or while it
+/// runs through its local socket (`--socket <path> <deployment>`). Exit 0 dropped, 3 refused
+/// (`serving`, `running`, `served_before`), 1 on other errors.
+fn deployments_drop(args: &[&str]) -> Result<ExitCode> {
+    let (mut force, mut json, mut socket, mut snapshots) = (false, false, None, None);
+    let mut positional = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--force" => force = true,
+            "--json" => json = true,
+            "--socket" => socket = Some(*it.next().ok_or("--socket needs a path")?),
+            "--snapshots" => snapshots = Some(*it.next().ok_or("--snapshots needs a store")?),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}").into()),
+            value => positional.push(value),
         }
-    );
-    Ok(true)
+    }
+    let refused = |code: &str, message: &str| {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "error": code, "message": message })
+            );
+        } else {
+            eprintln!("refused: {code}: {message}");
+        }
+        ExitCode::from(3)
+    };
+    let (dropped, deployment) = match (socket, positional.as_slice()) {
+        (Some(socket), [deployment]) => {
+            if snapshots.is_some() {
+                return Err(
+                    "--snapshots is for a stopped kernel; the running one knows its own".into(),
+                );
+            }
+            let target = format!(
+                "/api/deployments/drop?deployment={deployment}{}",
+                if force { "&force=true" } else { "" }
+            );
+            let (status, body) = local_request(socket, "POST", &target)?;
+            let answer: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|_| format!("{socket}: {}", String::from_utf8_lossy(&body).trim()))?;
+            match status {
+                200 => (answer, *deployment),
+                409 => {
+                    return Ok(refused(
+                        answer["error"].as_str().unwrap_or_default(),
+                        answer["message"].as_str().unwrap_or_default(),
+                    ));
+                }
+                _ => {
+                    return Err(answer["message"]
+                        .as_str()
+                        .unwrap_or("the kernel refused the drop")
+                        .into());
+                }
+            }
+        }
+        (None, [store_url, deployment]) => {
+            if !config::valid_name(deployment) {
+                return Err("a deployment has 1 to 128 letters, digits, `-`, `_` and `.`".into());
+            }
+            let store = kernable_store::open(store_url)?;
+            let (services, served_before) =
+                kernable_kernel::deployments::drop_state(store.as_ref(), deployment)?;
+            if let Err(r) = kernable_kernel::deployments::may_drop(
+                deployment,
+                &services,
+                None,
+                served_before,
+                force,
+            ) {
+                return Ok(refused(r.code, &r.message));
+            }
+            let snapshots_url =
+                snapshots.map_or_else(|| config::snapshots_next_to(store_url), str::to_owned);
+            let snapshots = kernable_store::snapshots::open(&snapshots_url)?;
+            let (listeners, dropped) =
+                kernable_kernel::deployments::drop(store.as_ref(), snapshots.as_ref(), deployment)?;
+            (
+                kernable_kernel::deployments::dropped_json(deployment, &listeners, dropped, force),
+                *deployment,
+            )
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&dropped)?);
+    } else {
+        let names: Vec<&str> = dropped["readModels"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|n| n.as_str()).collect())
+            .unwrap_or_default();
+        println!(
+            "dropped deployment {deployment}: {} read model registrations{}, {} snapshots",
+            names.len(),
+            if names.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", names.join(", "))
+            },
+            dropped["snapshots"]
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One HTTP request to a kernel's local socket (`--admin-socket`): the status and the body.
+fn local_request(socket: &str, method: &str, target: &str) -> Result<(u16, Vec<u8>)> {
+    use std::io::Read;
+    let mut conn = std::os::unix::net::UnixStream::connect(socket)
+        .map_err(|e| format!("{socket}: {e} (is the kernel running with --admin-socket?)"))?;
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
+    write!(
+        conn,
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = Vec::new();
+    conn.read_to_end(&mut response)?;
+    let end = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| format!("{socket}: not an HTTP answer"))?;
+    let status = String::from_utf8_lossy(&response[..end])
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("{socket}: not an HTTP answer"))?;
+    Ok((status, response[end + 4..].to_vec()))
 }
 
 fn remove_listener(store: &str, name: &str) -> Result<bool> {

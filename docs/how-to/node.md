@@ -46,6 +46,8 @@ project = "shop"                           # names the containers (default the f
 metrics-listen = "127.0.0.1:7240"          # optional: GET /metrics
 cpus = "4"                                 # optional (Linux): the whole instance, as memory = "8g"
 network = "host"                           # optional (Linux): see Network; default own
+admin-socket = "admin.sock"                # optional: the kernel's local socket, this by default
+require-digest = true                      # optional: run images by digest only; see Images
 
 [[service]]                                # one per service, as many as you need
 name = "worker"
@@ -58,6 +60,10 @@ cpus = "1.5"                               # optional, as memory = "512m"
 stop-seconds = 10                          # optional
 writable = true                            # optional: see Hardening
 expose = 3000                              # optional (Linux): see Network
+
+[[service]]                                # an image built elsewhere, run as it is
+name = "web"
+image = "registry.example.com/shop/web@sha256:4f1c…"   # instead of build
 
 [[secret]]                                 # one per secret
 name = "stripe"
@@ -75,6 +81,12 @@ Run it under your service manager (systemd, launchd) so the node itself starts w
 ## Your services
 
 Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. The node builds one image at a time, and stops a build that takes over 20 minutes; a build that fails or is stopped is tried again after a pause, and a service that already runs keeps its image meanwhile. It finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's socket (on Linux, see [Network](#network)) or its `listen`, and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
+
+### Images
+
+Instead of `build`, a service may name an `image` to run as it is: `<repository>@sha256:<digest>`, or a tag (`registry.example.com/shop/web:2026-11-12`). Nothing is built, also not on SIGHUP; Podman pulls the image on the first start unless the node's user holds it already (one loaded with `podman load`, say). A change of `image` restarts the service on the new one. `file` goes with `build` only.
+
+A digest names exactly one image, a tag whatever it points at today. With `require-digest = true` in `[node]`, the node runs images by digest only: a service with a tag, a service with `build`, and a `[kernel] image` with a tag are refused (the default base image is pinned by digest), at start with exit code 2 and later with the error logged, the children running on as they are.
 
 Install Podman on the machine first (rootless is fine). Services run on Linux; on a Mac, Podman's containers live in a virtual machine and do not share its network.
 
@@ -133,6 +145,16 @@ With `metrics-listen`, `GET /metrics` answers in Prometheus' text format, a line
 | `kernable_node_container_memory_bytes{child}` | gauge | memory of the child's container now |
 
 The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](./monitor)). The address is read when the node starts; a change applies after a restart of the node.
+
+## The kernel's local socket
+
+The node starts the kernel with `--admin-socket admin.sock` in the project directory (`[node] admin-socket` names another place in it; `[kernel] flags` takes no `admin-socket`). It serves `GET /metrics`, `/health`, `/ready` and `/ready?deployment=<d>`, the [deployments](./deployments)' warm-up, list and since-report, and `POST /api/deployments/drop` (`kernable deployments drop --socket`), with no login, like a loopback metrics address, but only to the kernel's own user (mode 0600) and root. A tool on the machine reaches it through the file system, without entering the pod's network:
+
+```sh
+curl --unix-socket /srv/shop/admin.sock 'http://localhost/ready?deployment=2026-11-12.1'
+```
+
+Your services do not see it: their containers get `run/` (the kernel's gRPC socket), not the project directory, so the node refuses an `admin-socket` in `run/`.
 
 ## Two machines
 

@@ -366,6 +366,7 @@ fn a_copy_mark_is_kept_and_carried_by_an_image(store: &dyn Store) {
         position: 1,
         source: format!("store {n}"),
         vault_key: "k".into(),
+        source_kernel_keys: vec![format!("{n:064}")],
     };
     store.mark_copy(&mark(1)).unwrap();
     store.mark_copy(&mark(2)).unwrap();

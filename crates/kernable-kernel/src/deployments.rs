@@ -18,8 +18,10 @@
 //!   what the newer deployment left behind (`kernable deployments since`, `GET /api/deployments/
 //!   since` of the UI).
 //! - [`drop`] forgets a deployment's read model registrations and snapshots: by hand
-//!   (`kernable deployments drop`) or after `--deployment-retention-days` without a connection.
-//!   Never silently: both log what they dropped. The events stay.
+//!   (`kernable deployments drop`, with the kernel stopped or through its local socket while it
+//!   runs) or after `--deployment-retention-days` without a connection. Never the serving
+//!   deployment nor one still running, and one that served before only when forced
+//!   ([`may_drop`]). Never silently: each logs what it dropped. The events stay.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -144,6 +146,20 @@ impl Written {
                 w.types.insert(qualified);
             }
         }
+    }
+
+    /// Whether `deployment` wrote events: it served.
+    pub(crate) fn served(
+        &self,
+        store: &dyn Store,
+        deployment: &str,
+    ) -> kernable_store::Result<bool> {
+        Ok(self
+            .of(store, deployment)?
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first
+            .is_some())
     }
 
     /// Forgets what it read: after a rewind or an import changed the log under it.
@@ -617,6 +633,94 @@ pub fn drop(
     Ok((names, dropped))
 }
 
+/// Why a deployment may not be dropped: the code (`serving`, `running`, `served_before`) and a
+/// message for people.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+/// Whether `deployment` may be dropped. Never the deployment a service's membership names
+/// (`serving`: `services` are the services it serves), never one with a process connected
+/// (`running`: `running` names it; its read models' state is in use, and an operator's grace
+/// period keeps the old deployment's processes running), and one that served before (it wrote
+/// events: a rollback could need it, or it may still be in an operator's grace period, which the
+/// kernel does not know) only with `force`.
+pub fn may_drop(
+    deployment: &str,
+    services: &[String],
+    running: Option<&str>,
+    served_before: bool,
+    force: bool,
+) -> Result<(), Refusal> {
+    if !services.is_empty() {
+        return Err(Refusal {
+            code: "serving",
+            message: format!(
+                "deployment {deployment} serves {}: switch to another deployment first",
+                services.join(", ")
+            ),
+        });
+    }
+    if let Some(what) = running {
+        return Err(Refusal {
+            code: "running",
+            message: format!(
+                "deployment {deployment} still runs ({what}): stop its processes first"
+            ),
+        });
+    }
+    if served_before && !force {
+        return Err(Refusal {
+            code: "served_before",
+            message: format!(
+                "deployment {deployment} served before: a rollback would need its read models, and \
+                 the kernel cannot tell whether it is still within a grace period; --force drops it"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The services whose membership names `deployment` in `store`, and whether it wrote events:
+/// what [`may_drop`] needs, for a store whose kernel is stopped.
+pub fn drop_state(
+    store: &dyn Store,
+    deployment: &str,
+) -> kernable_store::Result<(Vec<String>, bool)> {
+    let services = store
+        .memberships()?
+        .into_iter()
+        .filter_map(|m| m.membership)
+        .filter(|m| m.deployment == deployment)
+        .map(|m| m.service)
+        .collect();
+    let served_before = store.deployment_written(deployment)?.0.is_some();
+    Ok((services, served_before))
+}
+
+/// What a drop reports, by `kernable deployments drop --json` and the kernel's local socket.
+pub fn dropped_json(
+    deployment: &str,
+    read_models: &[String],
+    snapshots: usize,
+    forced: bool,
+) -> Value {
+    json!({
+        "deployment": deployment,
+        "readModels": read_models,
+        "snapshots": snapshots,
+        "forced": forced,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use kernable_core::proto::{Command, NewEvent};
@@ -793,6 +897,24 @@ mod tests {
         assert_eq!(position_at(store.as_ref(), 1_002).unwrap(), 2);
         assert_eq!(position_at(store.as_ref(), 0).unwrap(), 0);
         assert_eq!(position_at(store.as_ref(), 9_999).unwrap(), 6);
+    }
+
+    #[test]
+    fn the_serving_and_a_running_deployment_are_never_dropped_one_that_served_only_by_force() {
+        let shop = ["shop".to_owned()];
+        let refused = |r: Result<(), Refusal>| r.unwrap_err().code;
+        assert_eq!(refused(may_drop("v1", &shop, None, true, true)), "serving");
+        let worker = Some("a worker of orders.Order is connected");
+        assert_eq!(refused(may_drop("v1", &[], worker, false, true)), "running");
+        assert_eq!(
+            refused(may_drop("v1", &[], None, true, false)),
+            "served_before"
+        );
+        assert!(may_drop("v1", &[], None, true, true).is_ok());
+        assert!(may_drop("pr-1", &[], None, false, false).is_ok());
+        let store = store_with(&[("a", "Opened", 1, "v1")]);
+        assert_eq!(drop_state(store.as_ref(), "v1").unwrap(), (vec![], true));
+        assert_eq!(drop_state(store.as_ref(), "v2").unwrap(), (vec![], false));
     }
 
     #[test]

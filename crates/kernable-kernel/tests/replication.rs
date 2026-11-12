@@ -60,6 +60,7 @@ fn config(dir: &Path, name: &str, kernel_seed: u8) -> Config {
         cache: "memory:".into(),
         vault: None,
         metrics_listen: None,
+        admin_socket: None,
         ui_listen: None,
         durability: kernable_kernel::config::Durability::Normal,
         limits: Default::default(),

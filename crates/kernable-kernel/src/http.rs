@@ -16,9 +16,9 @@ use tokio::{
 use crate::{BoxError, Kernel};
 
 /// Connections served at once; one beyond is closed.
-const CONNECTIONS: usize = 32;
+pub(crate) const CONNECTIONS: usize = 32;
 /// How long a connection may take to send its request.
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most a request's line and headers may take; a `GET` has no body.
 const REQUEST_BYTES: usize = 8192;
 
@@ -171,7 +171,9 @@ where
 
 /// Reads a request up to the end of its headers (the empty line), or until the connection
 /// ends; `None` if it is longer than [`REQUEST_BYTES`].
-async fn read_head(conn: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
+pub(crate) async fn read_head(
+    conn: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> std::io::Result<Option<Vec<u8>>> {
     let mut request = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
     loop {

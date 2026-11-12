@@ -393,6 +393,76 @@ async fn a_masked_copy_of_a_store_reads_personal_values_as_null_and_writes_its_o
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_preview_kernel_signs_with_its_own_key_and_the_copy_verifies_with_both() {
+    let env = source("copy-keys").await;
+    let copy = Copy::new(&env.dir, "preview");
+    // Without --kernel-pub: the copy takes the kernel keys the source names.
+    let mut args = vec!["copy".to_owned(), env.store.clone(), "--mask-vault".into()];
+    args.extend(copy.flags().into_iter().take(8));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, printed) = run(&env.dir, &args).await;
+    assert_eq!(code, 0, "{printed}");
+    let production = id(&key(3));
+    let mark = kernable_store::open_read_only(&copy.store)
+        .unwrap()
+        .copy_mark()
+        .unwrap()
+        .unwrap();
+    assert_eq!(mark.source_kernel_keys, std::slice::from_ref(&production));
+
+    // The preview's kernel has a kernel key of its own, new: it starts on production's
+    // checkpoints and signs its own.
+    let (store, vault) = (copy.store.clone(), copy.vault());
+    let p = start_custom("copy-keys-preview", move |c, dir| {
+        std::fs::write(dir.join("preview-kernel.key"), hex(key(9).as_bytes())).unwrap();
+        c.kernel_key = dir.join("preview-kernel.key");
+        c.store = store;
+        c.vault = Some(vault);
+    })
+    .await;
+    start_worker(p.addr.clone(), customer_worker(None, Behavior::Honest)).await;
+    let add = order("p1", "AddItem", "o1", "{}");
+    assert_eq!(
+        committed_versions(&submit(&p.addr, add).await.unwrap()),
+        [2]
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await; // a checkpoint of its own
+    let preview = id(&key(9));
+    let store = kernable_store::open_read_only(&copy.store).unwrap();
+    assert!(
+        !store
+            .verify(std::slice::from_ref(&production))
+            .unwrap()
+            .is_ok(),
+        "the preview's own checkpoints are not production's"
+    );
+    assert!(
+        !store
+            .verify(std::slice::from_ref(&preview))
+            .unwrap()
+            .is_ok()
+    );
+    let both = [production.clone(), preview.clone()];
+    let report = store.verify(&both).unwrap();
+    assert!(report.is_ok(), "{:?}", report.problems);
+    drop(store);
+
+    // `kernable verify` with the preview's key alone: the mark adds production's.
+    std::fs::write(env.dir.join("preview.pub"), &preview).unwrap();
+    let (code, printed) = run(&env.dir, &["verify", &copy.store, "preview.pub"]).await;
+    assert_eq!(code, 0, "{printed}");
+    assert!(
+        printed.contains(&format!(
+            "with the source's kernel keys the copy's mark names: {production}"
+        )),
+        "{printed}"
+    );
+    // The source itself: the mark is the copy's, never a way into production's checks.
+    let (code, printed) = run(&env.dir, &["verify", &env.store, "preview.pub"]).await;
+    assert_eq!(code, 1, "{printed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_masked_copy_from_an_export_stays_a_copy() {
     let env = source("copy-import").await;
     let source_flags = [

@@ -45,6 +45,11 @@
 //! stop-seconds = 10                          # optional
 //! ```
 //!
+//! A service may name an `image` instead of `build` (`<repository>@sha256:<digest>`, or a tag
+//! unless `[node] require-digest = true`): it runs as it is, nothing is built. The kernel gets
+//! `--admin-socket` (`[node] admin-socket`, `admin.sock` in the project directory by default),
+//! which the services' containers do not see.
+//!
 //! The node builds each service's image at start, when the service changes and on SIGHUP (a
 //! service whose image changed restarts), then runs it with `podman run --rm` in the
 //! foreground, a child like the kernel: started after the kernel, stopped before it. It runs
@@ -123,8 +128,23 @@ pub enum Image {
         context: PathBuf,
         file: Option<String>,
     },
-    /// The kernel's and the backup follower's: a base image, the kernable binary mounted in.
+    /// An image run as it is, by reference, which Podman pulls unless it holds it: the kernel's
+    /// and the backup follower's base image (the kernable binary mounted in), or a service's
+    /// `image`.
     Base(String),
+}
+
+/// Whether `image` names its manifest digest: `<repository>@sha256:<64 hex digits>`.
+pub fn pinned(image: &str) -> bool {
+    image
+        .rsplit_once("@sha256:")
+        .is_some_and(|(repository, digest)| {
+            !repository.is_empty()
+                && digest.len() == 64
+                && digest
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        })
 }
 
 /// The pod all of an instance's containers join (Linux): one network, one total limit.
@@ -155,6 +175,9 @@ pub enum Network {
 const SOCKETS: &str = "run";
 const SOCKET: &str = "kernel.sock";
 const SOCKETS_INSIDE: &str = "/run/kernable/kernel";
+/// The kernel's local socket (`--admin-socket`) in the project directory, unless `[node]
+/// admin-socket` names another place.
+const ADMIN_SOCKET: &str = "admin.sock";
 
 /// The kernel's and the backup follower's base image, unless `[kernel] image` names another
 /// (one with your KMS's client for `--key-command`, say). Its C library is newer than any
@@ -212,6 +235,12 @@ struct NodeSection {
     memory: Option<String>,
     /// `own` (the default) or `host`.
     network: Option<String>,
+    /// The kernel's local socket (`--admin-socket`), relative to the project directory;
+    /// `admin.sock` by default.
+    admin_socket: Option<PathBuf>,
+    /// Every image the node runs (a service's `image`, `[kernel] image`) must name its digest.
+    #[serde(default)]
+    require_digest: bool,
 }
 
 /// What a `project.toml` asks the node for.
@@ -234,8 +263,11 @@ pub struct Plan {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct ServiceSection {
     name: String,
-    build: PathBuf,
+    /// A directory the node builds the image from; or `image`.
+    build: Option<PathBuf>,
     file: Option<String>,
+    /// An image to run as it is, by reference (`<repository>@sha256:<digest>`): nothing is built.
+    image: Option<String>,
     #[serde(default)]
     command: Vec<String>,
     key: Option<PathBuf>,
@@ -407,6 +439,12 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         .as_ref()
         .map_or_else(|| this.to_owned(), |b| dir.join(b));
     let image = k.image.clone().unwrap_or_else(|| BASE_IMAGE.to_owned());
+    if node.require_digest && !pinned(&image) {
+        return Err(format!(
+            "[kernel] image {image}: [node] require-digest asks for <repository>@sha256:<digest>"
+        )
+        .into());
+    }
     let stop = Duration::from_secs(k.stop_seconds.unwrap_or(30));
     // The kernel or the backup follower: in a container of the pod, or a plain process.
     let kernable = |child: &str,
@@ -492,6 +530,11 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         if flag == "listen" {
             listen.clone_from(&value);
         }
+        if flag == "admin-socket" {
+            return Err(
+                "[kernel] flags: admin-socket comes from [node] admin-socket; drop it".into(),
+            );
+        }
         if flag == "dev" {
             if value == "true" {
                 args.push("--dev".into());
@@ -505,6 +548,23 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         listen = format!("unix:{}", sockets.join(SOCKET).display());
         args.extend(["--listen".into(), listen.clone()]);
     }
+    // The kernel's local socket for the operator's tools: in the project directory, which the
+    // kernel's container sees and the services' do not.
+    let admin = dir.join(
+        node.admin_socket
+            .as_deref()
+            .unwrap_or(Path::new(ADMIN_SOCKET)),
+    );
+    inside("[node] admin-socket", &admin.display().to_string())?;
+    if let Some(sockets) = sockets.as_ref().filter(|s| admin.starts_with(s)) {
+        return Err(format!(
+            "[node] admin-socket {}: not in {}, which the services see",
+            admin.display(),
+            sockets.display()
+        )
+        .into());
+    }
+    args.extend(["--admin-socket".into(), admin.display().to_string()]);
     // The other kernel of a pair, for the backup follower and the services: they turn to
     // whichever is the primary.
     let mut peer = None;
@@ -674,6 +734,51 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
                 std::net::SocketAddr::from(([127, 0, 0, 1], port))
             ));
         }
+        let image = match (svc.build, svc.image) {
+            (Some(build), None) => {
+                if node.require_digest {
+                    return Err(format!(
+                        "[[service]] {}: [node] require-digest runs images by digest only; \
+                         name one with image = \"<repository>@sha256:<digest>\" instead of build",
+                        svc.name
+                    )
+                    .into());
+                }
+                Image::Build {
+                    context: dir.join(build),
+                    file: svc.file,
+                }
+            }
+            (None, Some(image)) => {
+                if svc.file.is_some() {
+                    return Err(format!(
+                        "[[service]] {}: file goes with build, not image",
+                        svc.name
+                    )
+                    .into());
+                }
+                if image.is_empty() || image.starts_with('-') || image.contains(char::is_whitespace)
+                {
+                    return Err(format!("[[service]] {}: image {image:?}", svc.name).into());
+                }
+                if node.require_digest && !pinned(&image) {
+                    return Err(format!(
+                        "[[service]] {}: image {image}: [node] require-digest asks for \
+                         <repository>@sha256:<digest>",
+                        svc.name
+                    )
+                    .into());
+                }
+                Image::Base(image)
+            }
+            _ => {
+                return Err(format!(
+                    "[[service]] {}: give either build (a directory) or image (a reference)",
+                    svc.name
+                )
+                .into());
+            }
+        };
         let container = format!("kernable-{name}-{}", svc.name);
         let mut args = vec![
             "run".to_owned(),
@@ -745,10 +850,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             stop: Duration::from_secs(svc.stop_seconds.unwrap_or(30)),
             container: Some(Container {
                 name: container,
-                image: Image::Build {
-                    context: dir.join(&svc.build),
-                    file: svc.file,
-                },
+                image,
                 command: svc.command,
             }),
             secrets: svc.secrets,
@@ -2080,6 +2182,8 @@ segment-seconds = 2
                 "root.pub",
                 "--store",
                 "sqlite:kernable.db",
+                "--admin-socket",
+                "/srv/shop/admin.sock",
                 "--backup",
                 "on"
             ]
@@ -2151,7 +2255,29 @@ segment-seconds = 2
         );
         let alone = specs("[kernel]\n", dir, this).unwrap();
         assert_eq!(alone.len(), 1);
-        assert_eq!(alone[0].args, ["start"]);
+        assert_eq!(
+            alone[0].args,
+            ["start", "--admin-socket", "/srv/shop/admin.sock"]
+        );
+        let flagged = specs(
+            "[kernel]\nflags = { admin-socket = \"a.sock\" }\n",
+            dir,
+            this,
+        );
+        let flagged = flagged.unwrap_err().to_string();
+        assert!(
+            flagged.contains("comes from [node] admin-socket"),
+            "{flagged}"
+        );
+        let moved = specs(
+            "[kernel]\n[node]\nadmin-socket = \"ops/k.sock\"\n",
+            dir,
+            this,
+        );
+        assert_eq!(
+            moved.unwrap()[0].args,
+            ["start", "--admin-socket", "/srv/shop/ops/k.sock"]
+        );
     }
 
     #[test]
@@ -2315,7 +2441,8 @@ build = "."
         let specs = specs_of(text).unwrap();
         assert_eq!(
             specs[0].args.join(" "),
-            "start --listen 10.0.0.1:7233 --root root.pub --witness 10.0.0.9:7300 \
+            "start --listen 10.0.0.1:7233 --root root.pub --admin-socket /srv/shop/admin.sock \
+             --witness 10.0.0.9:7300 \
              --node-key node-a.key --advertise 10.0.0.1:7233 --primary-kernel-key kernel-a.pub \
              --primary-kernel-key kernel-b.pub --witness-generation witness.generation --backup on"
         );
@@ -2559,6 +2686,83 @@ build = "."
         // Without containers there is nothing to limit the kernel with.
         let error = plan_on(text, dir, this, false).unwrap_err().to_string();
         assert!(error.contains("need Linux"), "{error}");
+    }
+
+    #[test]
+    fn a_service_may_run_an_image_by_digest_and_the_node_may_require_digests() {
+        let digest = "a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2";
+        let text = format!(
+            r#"
+[kernel]
+[node]
+project = "shop"
+
+[[service]]
+name = "web"
+image = "localhost/kernable-deploy@sha256:{digest}"
+command = ["node", "server.js"]
+"#
+        );
+        let (dir, this) = (Path::new("/srv/shop"), Path::new("/bin/kernable"));
+        let plan = plan_on(&text, dir, this, true).unwrap();
+        let web = &plan.children[1];
+        let c = web.container.as_ref().unwrap();
+        let reference = format!("localhost/kernable-deploy@sha256:{digest}");
+        assert_eq!(c.image, Image::Base(reference.clone()));
+        assert!(!built(web), "nothing to build, also not on SIGHUP");
+        assert_eq!(Running::new(web.clone()).image, Some(reference));
+        // Both, or neither, is a mistake; a Containerfile goes with build only.
+        let both = text.replace("[[service]]\n", "[[service]]\nbuild = \".\"\n");
+        let error = plan_on(&both, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("either build"), "{error}");
+        let file = text.replace("[[service]]\n", "[[service]]\nfile = \"Containerfile\"\n");
+        let error = plan_on(&file, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("file goes with build"), "{error}");
+
+        // A tag is run as it is, unless the node requires digests.
+        let tagged = text.replace(&format!("@sha256:{digest}"), ":v2");
+        assert!(plan_on(&tagged, dir, this, true).is_ok());
+        let strict = |t: &str| t.replace("[node]\n", "[node]\nrequire-digest = true\n");
+        let error = plan_on(&strict(&tagged), dir, this, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("require-digest"), "{error}");
+        let short = text.replace(digest, &digest[..63]);
+        assert!(plan_on(&strict(&short), dir, this, true).is_err());
+        let built_one =
+            "[kernel]\n[node]\nrequire-digest = true\n[[service]]\nname = \"w\"\nbuild = \".\"\n";
+        let error = plan_on(built_one, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("by digest only"), "{error}");
+        // The kernel's base image as well: the default one is pinned.
+        assert!(plan_on(&strict(&text), dir, this, true).is_ok());
+        let kernel = strict(&text).replace("[kernel]\n", "[kernel]\nimage = \"debian:13\"\n");
+        let error = plan_on(&kernel, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("[kernel] image debian:13"), "{error}");
+        assert!(pinned(BASE_IMAGE));
+        assert!(!pinned(&format!("@sha256:{digest}")));
+    }
+
+    #[test]
+    fn the_kernel_s_local_socket_lies_where_the_services_do_not_see_it() {
+        let text = "[kernel]\n[node]\nproject = \"shop\"\n";
+        let (dir, this) = (Path::new("/srv/shop"), Path::new("/bin/kernable"));
+        let plan = plan_on(text, dir, this, true).unwrap();
+        let kernel = plan.children[0]
+            .container
+            .as_ref()
+            .unwrap()
+            .command
+            .join(" ");
+        assert!(
+            kernel.contains("--admin-socket /srv/shop/admin.sock"),
+            "{kernel}"
+        );
+        let shared = text.replace("[node]\n", "[node]\nadmin-socket = \"run/admin.sock\"\n");
+        let error = plan_on(&shared, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("which the services see"), "{error}");
+        let outside = text.replace("[node]\n", "[node]\nadmin-socket = \"/tmp/k.sock\"\n");
+        let error = plan_on(&outside, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("only directory"), "{error}");
     }
 
     #[test]

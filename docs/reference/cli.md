@@ -168,10 +168,18 @@ Lists the highest stored schema version per event type.
 ### `kernable deployments`
 
 ```text
-kernable deployments <store>
+kernable deployments <store> [--json]
 ```
 
-Lists the deployments (code versions) that wrote events or registered read models: first and last position and how many events each wrote, its read models; then the deployment each service's membership names.
+Lists the deployments (code versions) that wrote events or registered read models: first and last position and how many events each wrote, its read models; then the deployment each service's membership names. `--json`: {deployments: [{deployment, events, firstPosition, lastPosition, lastAt, listeners}], services: [{service, deployment}]}.
+
+### `kernable deployments drop`
+
+```text
+kernable deployments drop --socket <path> <deployment> [--force] [--json]
+```
+
+Forgets a deployment's read model and middleware registrations (with their positions) and its snapshots while the kernel runs, through its local socket (`--admin-socket`); its events stay, the kernel logs it. Refused (exit code 3) for the deployment a membership names (serving) and for one with a worker or read model connected (running); one that wrote events (it served, a rollback may need it, and the kernel does not know an operator's grace period) only with `--force` (`served_before`). `--json`: {deployment, readModels, snapshots, forced}, or {error, message} when refused.
 
 ### `kernable deployments since`
 
@@ -179,7 +187,7 @@ Lists the deployments (code versions) that wrote events or registered read model
 kernable deployments since <store> <position>|--at <time> [--version <v>] [--json]
 ```
 
-What was written after `<position>` (or since the UTC `<time>`), to check before a rollback: per event type, schema and deployment the events and aggregates, marked NEW TYPE or NEW SCHEMA where no earlier event had them (an older deployment refuses commands on those aggregates: `unknown_history`); then scheduled commands and process timers stored since and still due, running process cases that moved, and process versions registered. `--version`: only that deployment's events.
+What was written after `<position>` (or since the UTC `<time>`), to check before a rollback: per event type, schema and deployment the events and aggregates, marked NEW TYPE or NEW SCHEMA where no earlier event had them (an older deployment refuses commands on those aggregates: `unknown_history`); then scheduled commands and process timers stored since and still due, running process cases that moved, and process versions registered. `--version`: only that deployment's events. `--json`: the schema in the deployments how-to.
 
 ### `kernable processes list`
 
@@ -416,10 +424,10 @@ Removes a listener and its middleware, so they no longer count. If a listener co
 ### `kernable deployments drop`
 
 ```text
-kernable deployments drop <store> <deployment> [--snapshots <url>]
+kernable deployments drop <store> <deployment> [--snapshots <url>] [--force] [--json]
 ```
 
-Forgets a deployment's read model and middleware registrations (with their positions) and its snapshots (default store: next to `<store>`); its events stay. A read model of it that connects again rebuilds from the start.
+Forgets a deployment's read model and middleware registrations (with their positions) and its snapshots (default store: next to `<store>`); its events stay. A read model of it that connects again rebuilds from the start. Refused as with `--socket`: never the serving deployment, one that served before only with `--force`. While the kernel runs, use `--socket`.
 
 ### `kernable workers remove`
 

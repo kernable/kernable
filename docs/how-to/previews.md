@@ -15,7 +15,7 @@ For a full copy that keeps the personal data, to move a kernel, use [export and 
 
 The log only ever refers to vault values by salted hashes ([Signatures](../reference/signing)), so without the source's vault nothing in the copy leads back to a value. The copy is consistent at one position: the moment it was read (`kernable copy`, an export), or the record a restore reaches.
 
-The copy's store is **marked** as a masked copy, with where it came from, when, up to which event, and its own vault key's ID. `kernable verify` says so, and so does the kernel UI.
+The copy's store is **marked** as a masked copy, with where it came from, when, up to which event, its own vault key's ID and the source's kernel keys it was checked with. `kernable verify` says so, and so does the kernel UI.
 
 ## Make one
 
@@ -70,7 +70,8 @@ Start a kernel on the copy with the copy's vault key, a **new snapshot store**, 
 ```sh
 kernable start --root root.pub --store sqlite:preview/kernable.db \
   --vault-store sqlite:preview/vault.db --vault-key preview/vault.key \
-  --snapshots sqlite:preview/snapshots.db --data-store file:preview/data
+  --snapshots sqlite:preview/snapshots.db --data-store file:preview/data \
+  --kernel-key preview/kernel.key
 ```
 
 The kernel finds the mark and runs the store as a masked copy (it logs `running a masked copy`):
@@ -78,6 +79,7 @@ The kernel finds the mark and runs the store as a masked copy (it logs `running 
 - **Personal values of the source read as `null`**, in workers' histories, for read models with `vault_read`, everywhere, exactly as after an erasure. Unique keys built from personal data are free, as after an erasure. Write handlers and read models that cope with an erased value (`Personal<string>` in TypeScript), and they cope with a copy too.
 - **New personal values work end to end.** Commands and events of the preview keep their vault values in the copy's vault, under its key: sign-ups, emails, erasures of the preview's own test people.
 - **Read models rebuild** from the copy's events. Run the preview's processes with a [deployment name](./deployments) of its own and new read model stores; a read model that kept its store from production would hold production's personal data.
+- **Its own kernel key.** Start the preview's kernel with a new kernel key (`kernable keys new kernel` in the preview's directory), never production's. Production's checkpoints came along, signed by production's kernel key; the preview's kernel goes on from them and signs its own with its key. The copy's mark names the kernel keys it was checked with (production's, by key ID, which is the public key), so `kernable verify preview/kernable.db preview/kernel.pub` checks both: the preview's checkpoints with the key you give, production's with the keys the mark names, and says which those are. Compare them with production's `kernel.pub`; to check against production's file itself, give both. The mark is not signed: it tells which keys to check with, it does not vouch for them.
 - **Reactors go on after production's position**: the registrations came along, so a reactor does not act again on what production handled. Point the preview's outbound connections (mail, payments, webhooks) at test accounts.
 
 ## What it refuses

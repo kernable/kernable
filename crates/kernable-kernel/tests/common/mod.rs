@@ -181,6 +181,7 @@ pub async fn start_wrapped(
         cache: "memory:".into(),
         vault: None,
         metrics_listen: None,
+        admin_socket: None,
         ui_listen: None,
         // The logic under test does not depend on it; Full is covered on its own.
         durability: kernable_kernel::config::Durability::Normal,

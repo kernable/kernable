@@ -75,3 +75,15 @@ Handlers choose their own codes: `Rejected(message, code)` in TypeScript and Pyt
 | `DEADLINE_EXCEEDED` | A submit did not complete within `--submit-timeout-ms`: the command is stored and still runs. A query was not answered within `--query-timeout-ms`, or no read model caught up to its `min_position`. A middleware did not answer within `--middleware-timeout-ms`. A worker or listener stream did not complete its handshake within `--handshake-timeout-ms`. In the SDKs also: no connection to the kernel, or no answer, within the request's timeout (60 s by default; `timeoutMs`, `timeout_s`, `Options::timeout`). | Resubmit the command with the same command ID to get its result. Retry a query; look for slow or stuck listeners ([Monitor kernable](../how-to/monitor)). |
 | `INTERNAL` | The kernel's store failed, or a read model or middleware sent the wrong kind of reply. | Check the kernel log. |
 | `NotSettled` (SDK) | Not a status: the command was committed, but not every listener that counts processed its events within `--settle-timeout-ms`. The outcome is attached. | Treat the command as done; read models show it a little later. |
+
+## Refusals of a deployment drop
+
+`kernable deployments drop` (and `POST /api/deployments/drop` on the kernel's [local socket](./configuration)) refuses with exit code 3 (HTTP 409) and one of these codes, printed as `refused: <code>: <message>` or, with `--json`, as `{"error": "<code>", "message": "…"}`:
+
+| Code | When | What to do |
+|---|---|---|
+| `serving` | A service's membership names the deployment. | Switch the service to another deployment first. |
+| `running` | A worker or a read model of the deployment is connected (on a running kernel only): its state is in use, as during an operator's grace period. | Stop its processes, then drop it. |
+| `served_before` | The deployment wrote events, so a rollback may need its read models; the kernel does not know an operator's grace period. | Drop it with `--force` once you will not go back to it. |
+
+Through the socket, also `invalid` (HTTP 400: not a deployment name), `unavailable` (HTTP 503: the kernel is handing its role over or fenced; try again) and `failed` (HTTP 500: the store failed; see the kernel log); the CLI exits 1 on those.

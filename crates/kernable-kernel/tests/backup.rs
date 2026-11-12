@@ -934,7 +934,7 @@ async fn a_masked_copy_restores_from_a_backup_through_a_signer() {
         path.join("vault.key").to_str().unwrap(),
     )
     .unwrap();
-    copy::mark(masked.store.as_ref(), &vault, "backup").unwrap();
+    copy::mark(masked.store.as_ref(), &vault, "backup", &[id(&key(3))]).unwrap();
     assert!(vault.overview(0).unwrap().personal == 0);
     let store = format!("sqlite:{}", path.join("k.db").display());
     drop((masked, vault));

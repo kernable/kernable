@@ -84,6 +84,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "A TCP `host:port` for plain HTTP with no login: Prometheus metrics at `GET /metrics`, `GET /health` and `GET /ready`. Bind it to a private address. Off when empty. If the address cannot be bound, the kernel stops.",
     ),
     (
+        "--admin-socket",
+        "KERNABLE_ADMIN_SOCKET",
+        "",
+        "A Unix socket for the operator's tools on this machine (mode 0600: the kernel's user, and root): `GET /metrics`, `/health`, `/ready` and `/ready?deployment=<d>` as on `--metrics-listen`, the UI's `GET /api/deployments`, `/api/deployments/warm-up` and `/api/deployments/since`, and `POST /api/deployments/drop?deployment=<d>[&force=true]` (`kernable deployments drop --socket`). Reached through the file system, so a tool need not enter the network namespace the kernel runs in. A stale socket at the path is replaced, a missing directory made (0700). Off when empty; `kernable node` sets it to `admin.sock` in the project directory. A standby serves it once it takes over. If it cannot be bound, the kernel stops.",
+    ),
+    (
         "--ui-listen",
         "KERNABLE_UI_LISTEN",
         "",
@@ -372,6 +378,8 @@ pub struct Config {
     pub cache: String,
     pub vault: Option<VaultConfig>,
     pub metrics_listen: Option<String>,
+    /// `--admin-socket`: the local socket's path.
+    pub admin_socket: Option<String>,
     pub ui_listen: Option<String>,
     /// `--durability` of the event store.
     pub durability: Durability,
@@ -675,6 +683,7 @@ impl Config {
                 key: key.into(),
             }),
             metrics_listen: get("--metrics-listen"),
+            admin_socket: get("--admin-socket"),
             ui_listen: get("--ui-listen"),
             durability: match get("--durability").expect("has a default").as_str() {
                 "full" => Durability::Full,

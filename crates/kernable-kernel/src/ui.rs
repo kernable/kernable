@@ -314,6 +314,7 @@ fn system(kernel: &Kernel) -> Value {
             "source": m.source,
             "copiedAt": m.copied_at,
             "position": m.position,
+            "sourceKernelKeys": m.source_kernel_keys,
         })),
         "limits": {
             "refused": kernel.metrics.refused(),

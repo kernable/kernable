@@ -41,6 +41,10 @@ message CopyRecord {
   uint64 position = 2;  // the last event of the source in the copy
   string source = 3;    // where it was copied from, for people
   string vault_key = 4; // the key ID of the copy's own, new vault key
+  // The kernel keys (key IDs, the public keys in hex) that signed the source's checkpoints and
+  // revocations, as the copy checked them: `kernable verify` of the copy accepts them beside the
+  // keys it is given, as the copy's own kernel signs with a key of its own.
+  repeated string source_kernel_keys = 5;
 }
 
 // How far the process engine has handled the log (design/processes.md, "The engine"): after a
