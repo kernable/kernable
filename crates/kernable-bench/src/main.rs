@@ -749,7 +749,6 @@ async fn submit(channel: Channel, cmd: Command, wait: Wait) -> Result<Outcome, t
         protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
         wait: wait.into(),
-        received_at: 0,
     };
     let result = CommandServiceClient::new(channel)
         .submit(granted(request))

@@ -309,7 +309,7 @@ Export and import:
                                           The store is marked as a copy: a kernel runs it only
                                           alone, with that vault key.
 
-Previews and checks:
+Previews:
   kernable copy <source store> --mask-vault --vault-key <new file> [--files-from <d>] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
                                           Makes a masked copy (a preview) of a store on this
                                           machine, read in one consistent view, also while its
@@ -317,27 +317,6 @@ Previews and checks:
                                           export file and without the source's vault or its key.
                                           --files-from copies the files of that data store too.
                                           Then checks the copy like verify.
-  kernable replay --from <store>|<export file>|<addr> [--key <key>] --since <position>|<time> --to <addr> --deployment <d> [--limit <n>] [--max-differences <n>|<n>%] [--json]
-                                          A developer tool for a copy of your own, never
-                                          production: the commands run their handlers, so code that
-                                          sends mails, payments or webhooks does so again. Sends
-                                          the commands the source stored after the point, oldest
-                                          first, each as received at its original time, to the
-                                          kernel at --to, a masked copy of that point started with
-                                          --replay on where the deployment's workers run, and
-                                          compares each outcome with the original: event types,
-                                          schemas, numbers and payload fields, or the rejection
-                                          code. The source is a store on this machine (also while
-                                          its kernel runs), an export file, or a running kernel (an
-                                          <addr> with --key, granted export). --since is the copy's
-                                          position (its mark) or a UTC time. Not sent, but listed:
-                                          scheduled commands and process steps, commands with vault
-                                          values (the copy has none), and later commands of their
-                                          aggregates. The report names fields and codes, never
-                                          values. Exit 3 if more commands differ than
-                                          --max-differences (default 0), 1 if the replay could not
-                                          run. The check before a switch is not this: it uses the
-                                          events only (the deployment's warm-up).
 
 Run a node:
   kernable node <project.toml>            Runs one node of a project: the kernel and, with a
@@ -602,12 +581,6 @@ async fn main() -> ExitCode {
         ["export", file, flags @ ..] if !file.starts_with("--") => export_stopped(file, flags),
         ["import", file, flags @ ..] if !file.starts_with("--") => {
             return import(file, flags).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            });
-        }
-        ["replay", flags @ ..] => {
-            return replay(flags).await.unwrap_or_else(|e| {
                 eprintln!("error: {e}");
                 ExitCode::FAILURE
             });
@@ -1898,161 +1871,6 @@ fn masked_done(
         flags.store,
     );
     Ok(())
-}
-
-/// `kernable replay …`: commands replayed on a developer's own masked copy (`replay_check.rs`).
-async fn replay(flags: &[&str]) -> Result<ExitCode> {
-    use kernable_kernel::replay_check::{self, Options, Since, Threshold};
-    let (mut from, mut key, mut since, mut to, mut deployment) = (None, None, None, None, None);
-    let (mut limit, mut threshold, mut json) = (None, Threshold::Count(0), false);
-    let mut it = flags.iter();
-    while let Some(flag) = it.next() {
-        if *flag == "--json" {
-            json = true;
-            continue;
-        }
-        let value = *it.next().ok_or_else(|| format!("{flag} needs a value"))?;
-        match *flag {
-            "--from" => from = Some(value),
-            "--key" => key = Some(value),
-            "--to" => to = Some(value),
-            "--deployment" => deployment = Some(value),
-            "--since" => {
-                since = Some(match (value.parse(), config::utc_ms(value)) {
-                    (Ok(position), _) => Since::Position(position),
-                    (_, Some(ms)) => Since::Time(ms),
-                    _ => {
-                        return Err(format!(
-                            "--since {value}: neither a position nor a UTC time like 2026-11-04T13:40:00Z"
-                        )
-                        .into());
-                    }
-                })
-            }
-            "--limit" => {
-                limit = Some(
-                    value
-                        .parse()
-                        .map_err(|_| format!("--limit {value}: not a number"))?,
-                )
-            }
-            "--max-differences" => {
-                threshold = Threshold::parse(value).ok_or_else(|| {
-                    format!("--max-differences {value}: a number or a percent like 5%")
-                })?
-            }
-            other => return Err(format!("kernable replay: unknown flag {other}").into()),
-        }
-    }
-    let from = from.ok_or("give the source: --from <store>|<export file>|<addr> --key <key>")?;
-    let since = since.ok_or("give the point the copy was made at: --since <position>|<time>")?;
-    let to = to.ok_or("give the kernel of the check: --to <addr>")?;
-    let deployment = deployment.ok_or("give the deployment to check: --deployment <d>")?;
-    // An export (of a file or of a running kernel) is read into a store of its own in a
-    // temporary directory, removed when the check ends.
-    let mut scratch = None;
-    let source = match key {
-        Some(key) => {
-            let (store, dir) = scratch_store()?;
-            scratch = Some(dir);
-            source_of_kernel(store.as_ref(), from, key).await?;
-            store
-        }
-        None if export_file(from) => {
-            let (store, dir) = scratch_store()?;
-            scratch = Some(dir);
-            export::read(Path::new(from), &mut |batch| {
-                let records: Vec<_> = batch.records.into_iter().filter_map(|l| l.record).collect();
-                store.apply_image(&records).map_err(BoxError::from)
-            })
-            .map_err(boxed)?;
-            store
-        }
-        None => kernable_store::open_read_only(from)?,
-    };
-    let options = Options {
-        source: from.to_owned(),
-        target: to.to_owned(),
-        since,
-        limit,
-        deployment: deployment.to_owned(),
-        max_differences: threshold,
-    };
-    let report = replay_check::run(source.as_ref(), connect(to).await?, &options)
-        .await
-        .map_err(boxed)?;
-    match json {
-        true => println!("{}", serde_json::to_string_pretty(&report)?),
-        false => print!("{}", replay_check::text(&report)),
-    }
-    drop(scratch);
-    Ok(match report["passed"] == true {
-        true => ExitCode::SUCCESS,
-        false => ExitCode::from(3),
-    })
-}
-
-/// A directory that is removed when dropped.
-struct Scratch(std::path::PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A new, empty SQLite store in a new temporary directory only its owner reads.
-fn scratch_store() -> Result<(Box<dyn kernable_store::Store>, Scratch)> {
-    use std::os::unix::fs::DirBuilderExt;
-    let dir = std::env::temp_dir().join(format!("kernable-replay-{}", random_id()));
-    fs::DirBuilder::new().mode(0o700).create(&dir)?;
-    let dir = Scratch(dir);
-    let url = format!("sqlite:{}", dir.0.join("source.db").display());
-    let store = kernable_store::open_with(&url, kernable_store::Durability::Normal)?;
-    Ok((store, dir))
-}
-
-/// Whether `path` is an export file (it starts with the export's magic).
-fn export_file(path: &str) -> bool {
-    use std::io::Read;
-    let mut magic = [0; 8];
-    fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
-        .is_ok_and(|()| magic == *export::MAGIC)
-}
-
-/// A running kernel's records, through its export, into `store`; its vault values are left out
-/// (the check sends no command that carries any).
-async fn source_of_kernel(
-    store: &dyn kernable_store::Store,
-    addr: &str,
-    key_path: &str,
-) -> Result<()> {
-    let key = signing::read_signing_key(key_path)?;
-    let issued_at = now_ms();
-    let mut request = tonic::Request::new(ExportRequest {
-        issued_at,
-        sig: Some(signing::sign(&key, &signing::export_message(issued_at))),
-        protocol: kernable_core::PROTOCOL,
-    });
-    with_key_grant(&mut request, key_path)?;
-    let mut stream = ExportServiceClient::new(connect(addr).await?)
-        .max_decoding_message_size(MAX_MESSAGE_BYTES)
-        .max_encoding_message_size(MAX_MESSAGE_BYTES)
-        .export(request)
-        .await?
-        .into_inner();
-    while let Some(frame) = stream.message().await? {
-        match frame.frame {
-            Some(kernable_core::proto::export_frame::Frame::Batch(batch)) => {
-                let records: Vec<_> = batch.records.into_iter().filter_map(|l| l.record).collect();
-                store.apply_image(&records)?;
-            }
-            Some(kernable_core::proto::export_frame::Frame::End(_)) => return Ok(()),
-            _ => {}
-        }
-    }
-    Err("the kernel ended the export early".into())
 }
 
 /// `kernable copy <source store> --mask-vault [flags]`: a masked copy of a store on this

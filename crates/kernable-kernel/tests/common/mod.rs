@@ -191,7 +191,6 @@ pub async fn start_wrapped(
         partition: None,
         deployment_retention_days: Default::default(),
         deployment_switch_lag: 100,
-        replay: false,
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();
@@ -345,14 +344,6 @@ pub type IndexWriter = std::sync::Arc<
         + Sync,
 >;
 
-/// A worker's decision in place of [`order`]: from the command, the time the kernel received
-/// it (`Execute.received_at`) and the aggregate's history.
-pub type Decide = std::sync::Arc<
-    dyn Fn(&Command, i64, &[kernable_core::proto::Event]) -> Result<Vec<NewEvent>, Rejected>
-        + Send
-        + Sync,
->;
-
 pub struct TestWorker {
     /// Key ID the worker registers with.
     pub claimed: SigningKey,
@@ -390,8 +381,6 @@ pub struct TestWorker {
     pub max_concurrency: u32,
     /// Its code version (`Register.deployment`).
     pub deployment: String,
-    /// Decides instead of [`order`].
-    pub decide: Option<Decide>,
 }
 
 /// The aggregates some workers are executing: one lease per aggregate at a time (O7).
@@ -424,7 +413,6 @@ impl TestWorker {
             index: None,
             max_concurrency: 4,
             deployment: String::new(),
-            decide: None,
         }
     }
 
@@ -583,10 +571,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                         requirement: Some(Default::default()),
                         ..r
                     }),
-                    _ => match &w.decide {
-                        Some(decide) => decide(&cmd, x.received_at, &x.history),
-                        None => order(exists, &cmd),
-                    },
+                    _ => order(exists, &cmd),
                 };
                 match outcome {
                     Ok(mut events) => {
@@ -891,7 +876,6 @@ async fn submit_as(
         protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
         wait: wait.into(),
-        received_at: 0,
     };
     let request = match signer {
         Some(key) => with_grant(request, &key),

@@ -91,7 +91,6 @@ fn call() -> impl Strategy<Value = Call> {
                     wait,
                     protocol,
                     listener,
-                    received_at: 0,
                 })
             }
         ),
