@@ -47,6 +47,7 @@ const SIDEBAR = [
       { text: "Data over time", link: "/concepts/data" },
       { text: "Failures and recovery", link: "/concepts/failures" },
       { text: "Compared with other systems", link: "/concepts/comparison" },
+      { text: "What's open, what's kernable Cloud", link: "/concepts/open-and-cloud" },
     ],
   },
   {
