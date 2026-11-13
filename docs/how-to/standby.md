@@ -16,6 +16,8 @@ A standby is the failover partner; it serves nothing. To spread queries over mor
 
 The primary sends the standby every record of its store, in order and chained by a hash, with the vault values and files they refer to. The standby checks every record before it writes it, and acknowledges what is on its disk. With `--replication sync` the primary waits for that acknowledgement before it tells anyone of a write. Design: `design/replication.md`.
 
+Beside the records, and outside their chain, it also sends the aggregate snapshots it stores and the values set or deleted in its cache. Nothing waits for them: a standby that lags misses the oldest, and each one is only a cache. The standby keeps a snapshot once it holds the event the snapshot was taken at (the same version and hash), and drops one that waited across an erasure in its tenant. So a standby that takes over starts warm: commands find their snapshots, and the cache holds what the primary had.
+
 The standby serves no requests: every call gets `UNAVAILABLE` with `not_primary`, and its `/ready` answers 503. The SDKs retry `UNAVAILABLE` by themselves.
 
 ## A pair with a witness

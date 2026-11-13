@@ -80,7 +80,7 @@ let cached = kernable.cache().get("shop", "quote/c-1").await?; // Option<Vec<u8>
 ```
 :::
 
-Without a TTL (`0`, `None`), a value lives until it is deleted or the kernel restarts. A restart always empties the cache: keep in it only what you can compute again. Every process connected to the kernel sees the same values.
+Without a TTL (`0`, `None`), a value lives until it is deleted or the kernel restarts. A restart always empties the cache: keep in it only what you can compute again. A [standby](./standby) that takes over keeps what its primary had set, as far as it got it. Every process connected to the kernel sees the same values.
 
 ## Personal data in files
 

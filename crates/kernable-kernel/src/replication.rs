@@ -802,6 +802,16 @@ pub(crate) async fn switch_over(kernel: &Kernel, who: &str) -> Result<Switchover
 
 type Outbox = mpsc::Sender<Result<FollowResponse, Status>>;
 
+/// How many snapshots and cache values a standby may lag behind before it misses the oldest.
+pub(crate) const WARM_QUEUE: usize = 4096;
+
+/// What goes to a standby besides the records, best-effort ([`crate::Kernel::warm`]).
+#[derive(Clone)]
+pub(crate) enum Warm {
+    Snapshot(kernable_core::proto::SnapshotRecord),
+    Value(kernable_core::proto::CacheValue),
+}
+
 async fn next(
     inbound: &mut Streaming<FollowRequest>,
 ) -> Result<Option<follow_request::Msg>, Status> {
@@ -1008,7 +1018,26 @@ async fn run(
     let mut told_in_sync = false;
     let mut told_take_over = false;
     let mut told_generation = 0;
+    // A standby (or a live move's target) gets the snapshots and cache values too.
+    let mut warm = (primary.is_some() && !reader && !backup).then(|| kernel.warm.subscribe());
+    let mut warmed: Vec<Warm> = Vec::new();
     loop {
+        // Before any newer records: a snapshot taken before an erasure reaches the standby
+        // before the erasure does, which then removes it there as here.
+        if let Some(rx) = warm.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(w) => warmed.push(w),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                        tracing::debug!(missed = n, "the standby missed snapshots or cache values");
+                    }
+                    Err(_) => break,
+                }
+            }
+            for batch in warm_batches(std::mem::take(&mut warmed)) {
+                send(out, follow_response::Msg::Caches(batch)).await?;
+            }
+        }
         if let Some(p) = &primary {
             // A pair: the standby learns the newest witness generation, and again when it rises.
             if let Some(newest) = p.generations.get().and_then(|g| g.newest())
@@ -1168,8 +1197,47 @@ async fn run(
                 }
             }
             _ = tick.tick() => {}
+            w = async {
+                match warm.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match w {
+                Ok(w) => warmed.push(w),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!(missed = n, "the standby missed snapshots or cache values");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => warm = None,
+            },
         }
     }
+}
+
+/// `items` in messages of at most about a MiB each.
+fn warm_batches(items: Vec<Warm>) -> Vec<kernable_core::proto::CacheBatch> {
+    const MAX: usize = 1 << 20;
+    let mut out = Vec::new();
+    let mut batch = kernable_core::proto::CacheBatch::default();
+    let mut bytes = 0;
+    for item in items {
+        let size = match &item {
+            Warm::Snapshot(s) => s.snapshot.as_ref().map_or(0, |s| s.state.len()) + 256,
+            Warm::Value(v) => v.value.len() + v.key.len() + 64,
+        };
+        if bytes + size > MAX && bytes > 0 {
+            out.push(std::mem::take(&mut batch));
+            bytes = 0;
+        }
+        bytes += size;
+        match item {
+            Warm::Snapshot(s) => batch.snapshots.push(s),
+            Warm::Value(v) => batch.values.push(v),
+        }
+    }
+    if bytes > 0 {
+        out.push(batch);
+    }
+    out
 }
 
 /// Resolves when the primary wrote records for its standby, or for a reader when events were

@@ -11,8 +11,9 @@ use std::{path::Path, sync::Arc, time::Duration};
 use common::*;
 use kernable_core::{
     proto::{
-        Command, CommandResult, DataRequest, Event, PromoteRequest, PromoteResult,
-        command_result::Outcome, data_service_client::DataServiceClient,
+        CacheRequest, Command, CommandResult, DataRequest, Event, PromoteRequest, PromoteResult,
+        cache_service_client::CacheServiceClient, command_result::Outcome,
+        data_service_client::DataServiceClient,
         replication_service_client::ReplicationServiceClient,
     },
     signing, transport,
@@ -256,6 +257,112 @@ async fn a_standby_holds_every_write_a_client_was_told_and_takes_over() {
     assert_eq!(old.events[..], now.events[..old.events.len()]);
     assert!(now.check().is_empty(), "{:?}", now.check());
     assert!(new.readiness().is_ok());
+}
+
+/// A cache request of key 9, signed, on `shop` in tenant `t`.
+fn cache(op: &str, name: &str, value: &[u8]) -> CacheRequest {
+    let mut r = CacheRequest {
+        tenant_id: "t".into(),
+        domain: "shop".into(),
+        key: name.into(),
+        value: value.to_vec(),
+        ttl_ms: 0,
+        issued_at: now_ms(),
+        client_sig: None,
+        protocol: kernable_core::PROTOCOL,
+        context: None,
+    };
+    r.client_sig = Some(signing::sign(&key(9), &signing::cache_message(op, &r)));
+    r
+}
+
+/// The version of the snapshot of order `o1` the kernel of `config` keeps, if any.
+fn snapshot_of_o1(config: &Config) -> Option<u64> {
+    let stream = kernable_store::StreamId {
+        tenant_id: "t1".into(),
+        domain: "orders".into(),
+        aggregate_type: "Order".into(),
+        aggregate_id: "o1".into(),
+    };
+    let snapshots = kernable_store::snapshots::open(&config.snapshots).ok()?;
+    snapshots
+        .get(&stream, "")
+        .ok()??
+        .snapshot
+        .map(|s| s.version)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_standby_takes_over_with_the_primarys_snapshots_and_cache() {
+    let dir = Dir::new("repl-warm");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary = open(&primary_config).await;
+    let standby_config = standby_config(&dir.0, &primary_config);
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
+    for seed in [1, 2, 4, 5, 6] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    primary
+        .grant(grant(&key(9), &[("cache", &["shop.*"])]))
+        .unwrap();
+    start_worker(
+        primary_config.listen.clone(),
+        TestWorker {
+            behavior: Behavior::Snapshots,
+            ..TestWorker::honest()
+        },
+    )
+    .await;
+    for i in 0..4 {
+        let kind = if i == 0 { "PlaceOrder" } else { "AddItem" };
+        let cmd = signed(command(&format!("c{i}"), kind, "o1"), &key(1));
+        committed_versions(&submit(&primary_config.listen, cmd).await.unwrap());
+    }
+    let mut cache_client =
+        CacheServiceClient::new(transport::connect(&primary_config.listen).await.unwrap());
+    cache_client
+        .set_cache(cache("set", "quote", b"42"))
+        .await
+        .unwrap();
+    cache_client
+        .set_cache(cache("set", "draft", b"x"))
+        .await
+        .unwrap();
+    cache_client
+        .delete_cache(cache("delete", "draft", b""))
+        .await
+        .unwrap();
+
+    // The primary's snapshot reaches the standby once it holds its event.
+    assert_eq!(snapshot_of_o1(&primary_config), Some(4));
+    until("the standby keeps o1's snapshot", || {
+        snapshot_of_o1(&standby_config) == Some(4)
+    })
+    .await;
+
+    // Promoted, the new primary starts warm: the snapshot and the cache values are there.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    promote(&standby_config.listen).await.unwrap();
+    following.await.unwrap().unwrap();
+    let _new = open(&standby_config).await;
+    assert_eq!(snapshot_of_o1(&standby_config), Some(4));
+    let mut cache_client =
+        CacheServiceClient::new(transport::connect(&standby_config.listen).await.unwrap());
+    let quote = cache_client
+        .get_cache(cache("get", "quote", b""))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(quote.found, "the cache value set on the primary");
+    assert_eq!(quote.value, b"42");
+    let draft = cache_client
+        .get_cache(cache("get", "draft", b""))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!draft.found, "deleted on the primary, gone here too");
 }
 
 #[tokio::test(flavor = "multi_thread")]

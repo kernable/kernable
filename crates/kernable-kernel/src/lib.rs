@@ -73,9 +73,9 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Accepted, CacheRequest, CacheResult, Challenge, Command, CommandResult, Committed,
-        DataEntry, DataList, DataRequest, DataResult, Event, Execute, ExecuteMore, Grant,
-        KernelMessage, ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent,
+        Accepted, CacheRequest, CacheResult, CacheValue, Challenge, Command, CommandResult,
+        Committed, DataEntry, DataList, DataRequest, DataResult, Event, Execute, ExecuteMore,
+        Grant, KernelMessage, ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent,
         PushGrantRequest, PushGrantResponse, QueryRequest, QueryResult, Register, Registered,
         Rejected, RetryRequest, RetryResult, RevocationRecord, RevokeRequest, RevokeResponse,
         Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait,
@@ -300,6 +300,9 @@ pub struct Kernel {
     data: Box<dyn DataStore>,
     /// Values of the cache service.
     cache: cache::Cache,
+    /// Snapshots stored and cache values set or deleted, for a standby (best-effort: a
+    /// standby that lags behind [`replication::WARM_QUEUE`] items misses the oldest).
+    pub(crate) warm: tokio::sync::broadcast::Sender<replication::Warm>,
     /// Set on shutdown: new submits and queries are refused while running ones finish.
     draining: AtomicBool,
     /// A switchover is under way: new requests are refused, as while draining.
@@ -419,7 +422,7 @@ impl Kernel {
         }
         let index = index::Index::default();
         let data = kernable_store::data::open(&config.data)?;
-        let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
+        let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes, &config.store)?;
         let durable = AtomicU64::new(store.head_position()?);
         // A standby, a backup follower and readers continue the record log
         // (design/replication.md); without any it is not kept. A reader's own is its writer's.
@@ -509,6 +512,7 @@ impl Kernel {
             vault,
             data,
             cache,
+            warm: tokio::sync::broadcast::channel(replication::WARM_QUEUE).0,
             draining: Default::default(),
             switching: Default::default(),
             fence_sealed: Default::default(),
@@ -2638,10 +2642,21 @@ impl CacheService for Api {
             )));
         }
         let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
+        let warm = (self.0.warm.receiver_count() > 0).then(|| CacheValue {
+            tenant_id: r.tenant_id.clone(),
+            domain: r.domain.clone(),
+            key: r.key.clone(),
+            value: r.value.clone(),
+            ttl_ms: r.ttl_ms,
+            deleted: false,
+        });
         let kept = self
             .0
             .cache
             .set((r.tenant_id, r.domain, r.key), r.value, r.ttl_ms);
+        if kept && let Some(v) = warm {
+            let _ = self.0.warm.send(replication::Warm::Value(v));
+        }
         if !kept {
             self.0.metrics.limited("cache_bytes");
             return Err(Status::resource_exhausted(
@@ -2673,6 +2688,15 @@ impl CacheService for Api {
     ) -> Result<Response<CacheResult>, Status> {
         let (r, _slot) = self.cache_request(request, "delete").await?;
         let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
+        if self.0.warm.receiver_count() > 0 {
+            let _ = self.0.warm.send(replication::Warm::Value(CacheValue {
+                tenant_id: r.tenant_id.clone(),
+                domain: r.domain.clone(),
+                key: r.key.clone(),
+                deleted: true,
+                ..Default::default()
+            }));
+        }
         let found = self.0.cache.delete((r.tenant_id, r.domain, r.key));
         claim.done();
         Ok(Response::new(CacheResult {
@@ -3908,7 +3932,12 @@ impl Session {
                         };
                         // A snapshot is only a cache: losing one costs time, not data.
                         match kernel.snapshots.save(&record) {
-                            Ok(()) => crash::point("snapshot.stored"),
+                            Ok(()) => {
+                                crash::point("snapshot.stored");
+                                if kernel.warm.receiver_count() > 0 {
+                                    let _ = kernel.warm.send(replication::Warm::Snapshot(record));
+                                }
+                            }
                             Err(e) => tracing::warn!(error = %e, "saving snapshot failed"),
                         }
                     }

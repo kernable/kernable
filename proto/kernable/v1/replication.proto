@@ -100,7 +100,29 @@ message FollowResponse {
     // A pair's primary: the newest witness generation it has seen, sent once the stream
     // follows and again whenever it rises. The standby ignores witnesses older than it.
     WitnessGeneration generation = 8;
+    // To a standby only (not a reader or a backup follower): snapshots the primary stored and
+    // cache values it set or deleted, so a standby that takes over starts warm. Best-effort and
+    // outside the record chain: nothing waits for it, and what a lagging standby misses is gone.
+    CacheBatch caches = 9;
   }
+}
+
+// What the primary's caches got meanwhile: its aggregate snapshots and its cache service's
+// values. The standby keeps a snapshot only once it holds the event it was taken at (the same
+// version and hash) and no erasure of its tenant came in between.
+message CacheBatch {
+  repeated SnapshotRecord snapshots = 1;
+  repeated CacheValue values = 2;
+}
+
+// A cache service value set (with what is left of its time to live, 0: none) or deleted.
+message CacheValue {
+  string tenant_id = 1;
+  string domain = 2;
+  string key = 3;
+  bytes value = 4;
+  uint64 ttl_ms = 5;
+  bool deleted = 6;
 }
 
 // Without a witness: the standby has caught up, and the primary tells nothing from now on that

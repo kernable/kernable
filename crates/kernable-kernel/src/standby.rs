@@ -24,9 +24,10 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode, FollowRequest,
-        FollowResponse, Grant, ImageBatch, ImageEnd, Leaving, PromoteRequest, PromoteResult,
-        RecordBatch, RecordPoint, StoredKey, TookOver, WitnessOp, follow_request, follow_response,
+        CacheBatch, ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode,
+        FollowRequest, FollowResponse, Grant, ImageBatch, ImageEnd, Leaving, PromoteRequest,
+        PromoteResult, RecordBatch, RecordPoint, SnapshotRecord, StoredKey, TookOver, WitnessOp,
+        follow_request, follow_response,
         log_record::Record,
         replication_service_client::ReplicationServiceClient,
         replication_service_server::{ReplicationService, ReplicationServiceServer},
@@ -139,6 +140,122 @@ struct Standby {
     reader: bool,
     /// The address it follows now; a reader turns to the next of its addresses when one fails.
     current: Mutex<String>,
+    /// Snapshots from the primary that wait for their event, and erasures seen per tenant.
+    warm: Mutex<Warmed>,
+}
+
+/// Snapshots the primary sent before the standby held their event, each with how many erasures
+/// of its tenant the standby had applied then; and that count per tenant.
+#[derive(Default)]
+struct Warmed {
+    waiting: Vec<(SnapshotRecord, u64)>,
+    erasures: HashMap<String, u64>,
+}
+
+/// The tenants whose events in `batch` erase someone.
+fn erased_tenants(batch: &RecordBatch) -> Vec<String> {
+    let mut tenants: Vec<String> = batch
+        .records
+        .iter()
+        .filter_map(|r| r.record.as_ref().and_then(|l| l.record.as_ref()))
+        .filter_map(|r| match r {
+            Record::Committed(c) => Some(c),
+            _ => None,
+        })
+        .flat_map(|c| c.events.iter().filter_map(|l| l.event.as_ref()))
+        .filter(|e| !e.erases.is_empty())
+        .map(|e| e.tenant_id.clone())
+        .collect();
+    tenants.sort();
+    tenants.dedup();
+    tenants
+}
+
+/// At most this many snapshots wait for their event; older ones go.
+const WAITING: usize = 1024;
+
+/// Whether `stores` hold the event `record` was taken at: the same version and hash. `None`
+/// while the standby does not have it yet.
+fn holds_its_event(stores: &Stores, record: &SnapshotRecord) -> Result<Option<bool>, BoxError> {
+    let Some(snapshot) = &record.snapshot else {
+        return Ok(Some(false));
+    };
+    let events = stores.store.read_stream_after(
+        &record.tenant_id,
+        &record.domain,
+        &record.aggregate_type,
+        &record.aggregate_id,
+        snapshot.version.saturating_sub(1),
+    )?;
+    Ok(events
+        .first()
+        .map(|e| e.version == snapshot.version && e.hash == record.event_hash))
+}
+
+impl Standby {
+    /// Takes what the primary's caches got: cache values at once, snapshots once their event
+    /// is here and no erasure of their tenant came in between (best-effort: a snapshot that
+    /// cannot be kept is a cache entry rebuilt later).
+    fn warmed(&self, stores: &Stores, batch: CacheBatch) {
+        if !batch.values.is_empty() {
+            crate::cache::carried(
+                &self.config.store,
+                self.config.limits.cache_bytes,
+                |cache| {
+                    for v in &batch.values {
+                        cache.apply(v);
+                    }
+                },
+            );
+        }
+        let mut warm = self
+            .warm
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for record in batch.snapshots {
+            let erased = warm.erasures.get(&record.tenant_id).copied().unwrap_or(0);
+            warm.waiting.push((record, erased));
+        }
+        let over = warm.waiting.len().saturating_sub(WAITING);
+        warm.waiting.drain(..over);
+        Self::keep_waiting(stores, &mut warm);
+    }
+
+    /// After records were applied: erasures of their tenants counted, then what waits tried.
+    fn applied_records(&self, stores: &Stores, erased_tenants: &[String]) {
+        let mut warm = self
+            .warm
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if warm.waiting.is_empty() && erased_tenants.is_empty() {
+            return;
+        }
+        for tenant in erased_tenants {
+            *warm.erasures.entry(tenant.clone()).or_default() += 1;
+        }
+        Self::keep_waiting(stores, &mut warm);
+    }
+
+    fn keep_waiting(stores: &Stores, warm: &mut Warmed) {
+        let erasures = std::mem::take(&mut warm.erasures);
+        warm.waiting.retain(|(record, erased_then)| {
+            // An erasure of its tenant came after it: it may hold erased values.
+            if erasures.get(&record.tenant_id).copied().unwrap_or(0) != *erased_then {
+                return false;
+            }
+            match holds_its_event(stores, record) {
+                Ok(None) => true,
+                Ok(Some(true)) => {
+                    if let Err(e) = stores.snapshots.save(record) {
+                        tracing::debug!(error = %e, "keeping a snapshot from the primary failed");
+                    }
+                    false
+                }
+                Ok(Some(false)) | Err(_) => false,
+            }
+        });
+        warm.erasures = erasures;
+    }
 }
 
 impl Standby {
@@ -427,6 +544,7 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         link,
         reader,
         current: Mutex::new(first),
+        warm: Mutex::default(),
         config,
     });
     // Following, it is no primary that handed over. Its note that it is in sync stays
@@ -757,11 +875,14 @@ async fn follow_once(
                     "the primary",
                 )?;
                 standby.primary_head.store(batch.head, SeqCst);
+                let erased = erased_tenants(&batch);
                 let stores = standby.stores();
                 let keys = follow.primary_kernel_keys.clone();
+                let applied_to = Arc::clone(&stores);
                 let seq =
-                    tokio::task::spawn_blocking(move || apply(&stores, batch, &keys)).await??;
+                    tokio::task::spawn_blocking(move || apply(&applied_to, batch, &keys)).await??;
                 standby.applied.store(seq, SeqCst);
+                standby.applied_records(&stores, &erased);
                 tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
                     .await?;
                 if standby.reader && seq >= standby.primary_head.load(SeqCst) {
@@ -817,6 +938,10 @@ async fn follow_once(
             }
             // The primary's newest witness generation: older witnesses no longer count here,
             // so this standby never claims through one.
+            Some(follow_response::Msg::Caches(batch)) => {
+                let stores = standby.stores();
+                standby.warmed(&stores, batch);
+            }
             Some(follow_response::Msg::Generation(g)) => {
                 if let Some(link) = &standby.link
                     && let Err(e) = link.generations.learn(&g)
@@ -1552,6 +1677,53 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn snapshot_of(tenant: &str) -> SnapshotRecord {
+        SnapshotRecord {
+            tenant_id: tenant.into(),
+            domain: "orders".into(),
+            aggregate_type: "Order".into(),
+            aggregate_id: "o1".into(),
+            snapshot: Some(kernable_core::proto::Snapshot {
+                version: 1,
+                ..Default::default()
+            }),
+            event_hash: vec![1; 32],
+            deployment: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_waits_for_its_event_and_goes_after_an_erasure_of_its_tenant() {
+        let stores = Stores {
+            store: kernable_store::open("memory:").unwrap(),
+            vault: None,
+            data: kernable_store::data::open("memory:").unwrap(),
+            snapshots: kernable_store::snapshots::open("memory:").unwrap(),
+        };
+        let mut warm = Warmed {
+            waiting: vec![(snapshot_of("t"), 0), (snapshot_of("u"), 0)],
+            erasures: HashMap::from([("t".to_owned(), 1)]),
+        };
+        Standby::keep_waiting(&stores, &mut warm);
+        // Tenant t erased someone after its snapshot was taken: it goes, unkept.
+        // Tenant u's snapshot waits: the standby does not hold its event yet.
+        let left: Vec<&str> = warm
+            .waiting
+            .iter()
+            .map(|(r, _)| r.tenant_id.as_str())
+            .collect();
+        assert_eq!(left, ["u"]);
+        assert_eq!(warm.erasures.get("t"), Some(&1), "the count stays");
+        let stream = kernable_store::StreamId {
+            tenant_id: "t".into(),
+            domain: "orders".into(),
+            aggregate_type: "Order".into(),
+            aggregate_id: "o1".into(),
+        };
+        assert!(stores.snapshots.get(&stream, "").unwrap().is_none());
+    }
 
     #[test]
     fn an_error_is_told_with_its_causes() {
@@ -1576,7 +1748,6 @@ mod tests {
     }
     use std::path::Path;
 
-    use super::*;
 
     #[test]
     fn a_store_is_moved_aside_with_its_files() {

@@ -91,6 +91,30 @@ impl Values {
     }
 }
 
+/// The cache a standby keeps from its primary's values while it follows, taken by the kernel
+/// it becomes (the same process): a standby that takes over starts with the cache warm.
+/// By the kernel's store: the standby and the kernel it becomes have the same.
+static CARRIED: Mutex<Vec<(String, Cache)>> = Mutex::new(Vec::new());
+
+/// The cache the standby of store `owner` fills, and the kernel it becomes takes.
+pub(crate) fn carried(owner: &str, max_bytes: usize, f: impl FnOnce(&Cache)) {
+    let mut carried = CARRIED.lock().unwrap_or_else(PoisonError::into_inner);
+    let at = match carried.iter().position(|(o, _)| o == owner) {
+        Some(at) => at,
+        None => {
+            carried.push((
+                owner.to_owned(),
+                Cache {
+                    values: Mutex::default(),
+                    max_bytes,
+                },
+            ));
+            carried.len() - 1
+        }
+    };
+    f(&carried[at].1);
+}
+
 pub struct Cache {
     values: Mutex<Values>,
     /// `--max-cache-bytes`.
@@ -100,13 +124,38 @@ pub struct Cache {
 impl Cache {
     /// The cache a `--cache-store` URL names (only `memory:` so far), holding at most
     /// `max_bytes` of keys and values.
-    pub fn open(url: &str, max_bytes: usize) -> Result<Cache, String> {
+    /// `owner`, the kernel's store, finds the cache its standby filled in this process.
+    pub fn open(url: &str, max_bytes: usize, owner: &str) -> Result<Cache, String> {
+        let taken = {
+            let mut carried = CARRIED.lock().unwrap_or_else(PoisonError::into_inner);
+            carried
+                .iter()
+                .position(|(o, _)| o == owner)
+                .map(|at| carried.remove(at).1)
+        };
         match url {
-            "memory:" => Ok(Cache {
-                values: Mutex::default(),
-                max_bytes,
+            // A standby promoted in this process hands over what its primary had set.
+            "memory:" => Ok(match taken {
+                Some(mut carried) => {
+                    carried.max_bytes = max_bytes;
+                    carried
+                }
+                None => Cache {
+                    values: Mutex::default(),
+                    max_bytes,
+                },
             }),
             _ => Err(format!("cache store {url}: use memory:")),
+        }
+    }
+
+    /// Applies a value its primary set or deleted (a standby's copy, best-effort).
+    pub(crate) fn apply(&self, v: &kernable_core::proto::CacheValue) {
+        let key = (v.tenant_id.clone(), v.domain.clone(), v.key.clone());
+        if v.deleted {
+            self.delete(key);
+        } else {
+            self.set(key, v.value.clone(), v.ttl_ms);
         }
     }
 
@@ -234,7 +283,7 @@ mod tests {
     #[test]
     fn the_oldest_values_make_room() {
         // Each entry takes 2 + 1 + 4 = 7 bytes.
-        let cache = Cache::open("memory:", 21).unwrap();
+        let cache = Cache::open("memory:", 21, "test").unwrap();
         for k in ["a", "b", "c"] {
             assert!(cache.set(key(k), b"1234".to_vec(), 0));
         }
@@ -268,7 +317,7 @@ mod tests {
 
     #[test]
     fn expired_values_make_room_before_live_ones() {
-        let cache = Cache::open("memory:", 21).unwrap();
+        let cache = Cache::open("memory:", 21, "test").unwrap();
         assert!(cache.set(key("a"), b"1234".to_vec(), 1));
         assert!(cache.set(key("b"), b"1234".to_vec(), 0));
         assert!(cache.set(key("c"), b"1234".to_vec(), 3_600_000));
@@ -282,7 +331,7 @@ mod tests {
 
     #[test]
     fn counts_hits_misses_and_lists_keys_without_values() {
-        let cache = Cache::open("memory:", 1_000).unwrap();
+        let cache = Cache::open("memory:", 1_000, "test").unwrap();
         cache.set(
             ("t".into(), "shop".into(), "rate:c1".into()),
             b"7".to_vec(),
