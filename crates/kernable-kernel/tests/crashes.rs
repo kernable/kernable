@@ -42,6 +42,16 @@ fn start_kernel(dir: &Path, flags: &[String], crash_at: Option<&str>) -> Kernel 
         .args(flags)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // KERNABLE_TEST_KERNEL_LOG=<file>: every kernel's log appended there, to see what a failed
+    // run did.
+    if let Ok(path) = std::env::var("KERNABLE_TEST_KERNEL_LOG") {
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("the kernel log file");
+        process.stderr(log);
+    }
     if let Some(point) = crash_at {
         process.env("KERNABLE_CRASH_AT", point);
     }
@@ -138,10 +148,12 @@ async fn listen_once(
                 seen.delivered("audit", &b);
                 seen.acked("audit", b.up_to);
                 // It gives up on every ItemAdded: the parked set is stored with the position.
+                // Up to position 9000 only: a long kill run's listener stays below the kernel's
+                // cap of parked events (MAX_PARKED), past which it refuses the ack.
                 let parked = b
                     .events
                     .iter()
-                    .filter(|e| e.event_type == "ItemAdded")
+                    .filter(|e| e.event_type == "ItemAdded" && e.global_position <= 9_000)
                     .map(|e| Parked {
                         position: e.global_position,
                         code: "not_found".into(),
