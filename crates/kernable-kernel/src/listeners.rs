@@ -113,6 +113,9 @@ struct Entry {
     /// Where its connections ended with delivered events not acknowledged, and how often in a
     /// row at that position: a handler that fails on the next event (a failing projection).
     stall: Option<(u64, u32)>,
+    /// Its last ack was refused at [`MAX_PARKED`]: it gets no further until its parked events
+    /// are dismissed or retried. Said once in the log when it begins, listed by the role.
+    capped: bool,
 }
 
 /// One connection of a listener.
@@ -267,6 +270,7 @@ impl Registry {
                     skipped: 0,
                     skipped_types: Default::default(),
                     stall: None,
+                    capped: false,
                 };
                 (entry.record.name.clone(), entry)
             })
@@ -651,11 +655,22 @@ impl Registry {
             tracing::warn!(listener = %name, skipped = ack.skipped.len(), "listener skipped events its code does not know");
         }
         if e.record.parked.len() + added > MAX_PARKED {
+            if !e.capped {
+                e.capped = true;
+                tracing::warn!(
+                    listener = %name,
+                    parked = e.record.parked.len(),
+                    "listener stuck: its ack would pass {MAX_PARKED} parked events, so it gets \
+                     no further until they are dismissed or retried (kernable listeners parked)"
+                );
+            }
             return Err(Status::resource_exhausted(format!(
                 "listener {name} would have more than {MAX_PARKED} parked events: retry or \
                  dismiss them (`kernable listeners parked`)"
             )));
         }
+        // Accepted: under the cap again.
+        e.capped = false;
         let done: Vec<u64> = e
             .retrying
             .iter()
@@ -1097,6 +1112,18 @@ impl Registry {
         all
     }
 
+    /// The registered listeners whose last ack was refused at the cap of parked events.
+    pub(crate) fn capped(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .entries()
+            .values()
+            .filter(|e| e.capped && !e.live)
+            .map(|e| e.record.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Marks every connected listener changed, so the next flush stores it as seen now.
     pub(crate) fn seen_now(&self) {
         for e in self.entries().values_mut().filter(|e| e.connected()) {
@@ -1473,9 +1500,9 @@ pub(crate) async fn run(
                 .counts_listener(&hello.service, &hello.name);
             let current =
                 !versioned || kernel.memberships.serves(&hello.service, &hello.deployment);
-            let (mut instances, skipped, skipped_types, stall) = entries
+            let (mut instances, skipped, skipped_types, stall, capped) = entries
                 .remove(&key)
-                .map(|e| (e.instances, e.skipped, e.skipped_types, e.stall))
+                .map(|e| (e.instances, e.skipped, e.skipped_types, e.stall, e.capped))
                 .unwrap_or_default();
             instances.insert(hello.instance.clone(), instance);
             entries.insert(
@@ -1494,6 +1521,8 @@ pub(crate) async fn run(
                     skipped,
                     skipped_types,
                     stall,
+                    // Kept over its reconnects: the warning is said once, not each time.
+                    capped,
                 },
             );
             Ok(position)
@@ -1901,9 +1930,12 @@ mod tests {
         assert_eq!(refused.unwrap_err().code(), tonic::Code::ResourceExhausted);
         assert_eq!(r.position("mailer"), n, "the position stays");
         assert_eq!(stored(&r).len(), MAX_PARKED);
-        // Without parking, it moves on.
+        // It is listed as stuck at the cap, for the role and the operator.
+        assert_eq!(r.capped(), ["mailer"]);
+        // Without parking, it moves on, and is no longer listed.
         r.acked(&mailer(), &ack(n + 1, &[]), Vec::new()).unwrap();
         assert_eq!(r.position("mailer"), n + 1);
+        assert!(r.capped().is_empty());
     }
 
     #[test]

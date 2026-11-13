@@ -292,6 +292,8 @@ pub(crate) fn role(kernel: &Kernel) -> serde_json::Value {
                 "head": head,
                 "position": position,
                 "readers": readers,
+                // Listeners stuck at the cap of parked events (they get no further).
+                "parked_cap": kernel.listeners.capped(),
             })
         }
     }
