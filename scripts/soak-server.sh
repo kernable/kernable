@@ -62,10 +62,12 @@ setup)
   (cd sdks/typescript && npm install --no-audit --no-fund --silent)
   cargo build --release -p kernable-kernel -p kernable-soak
 
-  # A: a 30 GiB ext4 file system in a file, for disk-full.
+  # A: an ext4 file system in a file, for disk-full: 30 GiB, or half of what is free if less.
   mkdir -p $SOAK/a $SOAK/a/fs
   if ! mountpoint -q $SOAK/a/fs; then
-    [ -f $SOAK/a.img ] || { fallocate -l 30G $SOAK/a.img && mkfs.ext4 -q $SOAK/a.img; }
+    free_g=$(df --output=avail -BG $SOAK | tail -1 | tr -dc 0-9)
+    size_g=$(( free_g / 2 < 30 ? free_g / 2 : 30 ))
+    [ -f $SOAK/a.img ] || { fallocate -l ${size_g}G $SOAK/a.img && mkfs.ext4 -q $SOAK/a.img; }
     mount -o loop $SOAK/a.img $SOAK/a/fs
   fi
 
