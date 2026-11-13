@@ -2,6 +2,7 @@
 # The simple tier: syntax, types and in-process tests, with no kernel or worker process and no
 # real waiting. Runs in about a minute; `make check` runs everything.
 test: py
+	./scripts/check-open.sh
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace --lib
