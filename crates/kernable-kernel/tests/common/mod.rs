@@ -318,6 +318,9 @@ pub enum Behavior {
     ForgeResult,
     /// Sends a snapshot with every result.
     Snapshots,
+    /// Sends a snapshot with every result; answers a command whose payload says `"slow":true`
+    /// only after this delay.
+    SlowSnapshots(Duration),
     /// Sends a snapshot signed with a key other than its registered one.
     ForgeSnapshot,
     /// Cannot read snapshots: rejects with `snapshot_stale` when it gets one.
@@ -548,6 +551,11 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                 match w.behavior {
                     Behavior::Crash => return tonic::Status::ok("crashed"),
                     Behavior::Slow(delay) => tokio::time::sleep(delay).await,
+                    Behavior::SlowSnapshots(delay)
+                        if String::from_utf8_lossy(&cmd.payload).contains(r#""slow":true"#) =>
+                    {
+                        tokio::time::sleep(delay).await
+                    }
                     _ => {}
                 }
                 let result_key = match w.behavior {
@@ -612,9 +620,9 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                         });
                         let version = x.expected_version + events.len() as u64;
                         let snapshot_key = match w.behavior {
-                            Behavior::Snapshots | Behavior::StaleSnapshots => {
-                                Some(w.signer.clone())
-                            }
+                            Behavior::Snapshots
+                            | Behavior::StaleSnapshots
+                            | Behavior::SlowSnapshots(_) => Some(w.signer.clone()),
                             Behavior::ForgeSnapshot => Some(key(9)),
                             _ => None,
                         };

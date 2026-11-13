@@ -294,6 +294,44 @@ async fn an_erasing_event_deletes_a_subject_and_its_snapshots_everywhere() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_taken_before_an_erasure_is_not_stored_after_it() {
+    let env = start_custom("vault-erase-race", with_vault).await;
+    let eraser = grant(
+        &key(2),
+        &[("run", &["orders.*"]), ("vault_erase", &["orders.*"])],
+    );
+    env.kernel.grant(eraser).unwrap();
+    // Two instances of one worker, with snapshots: one works slowly on a command marked so,
+    // the other erases meanwhile.
+    for _ in 0..2 {
+        let mut worker = customer_worker(None);
+        worker.behavior = Behavior::SlowSnapshots(Duration::from_millis(800));
+        start_worker(env.addr.clone(), worker).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let first = order("c1", "PlaceOrder", "o1", r#"{"customer":"k-1"}"#);
+    committed_versions(&submit(&env.addr, first).await.unwrap());
+    assert!(snapshot_of(&env, "o1"), "no erasure meanwhile: stored");
+
+    // o2's worker has k-1's value while it works; k-1 is erased before it answers.
+    let addr = env.addr.clone();
+    let placing = tokio::spawn(async move {
+        let second = order("c2", "PlaceOrder", "o2", r#"{"customer":"k-1","slow":true}"#);
+        submit(&addr, second).await.unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let erase = order("c3", "AddItem", "o1", r#"{"erase":"k-1"}"#);
+    committed_versions(&submit(&env.addr, erase).await.unwrap());
+    committed_versions(&placing.await.unwrap());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !snapshot_of(&env, "o2"),
+        "its worker read k-1 before the erasure: its snapshot may hold the erased value"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn only_allowed_workers_may_erase() {
     let env = start_custom("vault-no-erase", with_vault).await;
     start_worker(env.addr.clone(), customer_worker(None)).await;

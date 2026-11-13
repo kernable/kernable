@@ -303,6 +303,11 @@ pub struct Kernel {
     /// Snapshots stored and cache values set or deleted, for a standby (best-effort: a
     /// standby that lags behind [`replication::WARM_QUEUE`] items misses the oldest).
     pub(crate) warm: tokio::sync::broadcast::Sender<replication::Warm>,
+    /// How many erasures this kernel carried out. A snapshot is stored only if none came
+    /// between its command's lease (when the worker got the values) and storing it: the worker's
+    /// state may hold the erased values. Held while an erasure removes snapshots, and while a
+    /// snapshot is stored.
+    erasures: Mutex<u64>,
     /// Set on shutdown: new submits and queries are refused while running ones finish.
     draining: AtomicBool,
     /// A switchover is under way: new requests are refused, as while draining.
@@ -513,6 +518,7 @@ impl Kernel {
             data,
             cache,
             warm: tokio::sync::broadcast::channel(replication::WARM_QUEUE).0,
+            erasures: Mutex::new(0),
             draining: Default::default(),
             switching: Default::default(),
             fence_sealed: Default::default(),
@@ -866,6 +872,9 @@ impl Kernel {
 
     /// Erases the subjects of a committed command's erasing events; see [`erase_subjects`].
     fn erase(&self, cmd: &Command, subjects: &[String], own: &StreamId) -> Vec<StreamId> {
+        // Snapshots of commands leased before it are not stored after it (see `erasures`).
+        let mut erasures = self.erasures.lock().unwrap_or_else(PoisonError::into_inner);
+        *erasures += 1;
         match &self.vault {
             Some(vault) => erase_subjects(
                 vault,
@@ -3066,6 +3075,8 @@ struct InFlight {
     command: Command,
     received_at: i64,
     leased_at: Instant,
+    /// The kernel's erasures when its history was read ([`Kernel::erasures`]).
+    erasures_at_lease: u64,
     expected_version: u64,
     /// The command was sent with a snapshot.
     with_snapshot: bool,
@@ -3489,6 +3500,12 @@ impl Session {
             aggregate_type: aggregate_type.clone(),
             aggregate_id: id.clone(),
         };
+        // Before the values are read: an erasure from now on keeps this command's snapshot out.
+        let erasures_at_lease = *self
+            .kernel
+            .erasures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let loaded = self
             .kernel
             .snapshots
@@ -3572,6 +3589,7 @@ impl Session {
                 command: command.clone(),
                 received_at,
                 leased_at: Instant::now(),
+                erasures_at_lease,
                 expected_version,
                 with_snapshot: snapshot.is_some(),
                 attempts,
@@ -3930,15 +3948,27 @@ impl Session {
                             event_hash: last.hash.clone(),
                             deployment,
                         };
-                        // A snapshot is only a cache: losing one costs time, not data.
-                        match kernel.snapshots.save(&record) {
-                            Ok(()) => {
-                                crash::point("snapshot.stored");
-                                if kernel.warm.receiver_count() > 0 {
-                                    let _ = kernel.warm.send(replication::Warm::Snapshot(record));
+                        // A snapshot is only a cache: losing one costs time, not data. Not one
+                        // whose worker read values an erasure removed since.
+                        let erasures = kernel
+                            .erasures
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        if *erasures != f.erasures_at_lease {
+                            tracing::debug!(
+                                "a snapshot not stored: an erasure came after its lease"
+                            );
+                        } else {
+                            match kernel.snapshots.save(&record) {
+                                Ok(()) => {
+                                    crash::point("snapshot.stored");
+                                    if kernel.warm.receiver_count() > 0 {
+                                        let _ =
+                                            kernel.warm.send(replication::Warm::Snapshot(record));
+                                    }
                                 }
+                                Err(e) => tracing::warn!(error = %e, "saving snapshot failed"),
                             }
-                            Err(e) => tracing::warn!(error = %e, "saving snapshot failed"),
                         }
                     }
                     kernel.queue.done(&lease_id);
