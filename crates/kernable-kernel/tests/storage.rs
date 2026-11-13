@@ -128,7 +128,8 @@ async fn submit_until_answered(addr: &str, cmd: &Command, seen: &Mutex<Observed>
     }
 }
 
-async fn run(seed: u64) {
+/// One seed's run; whether it injected a fault (one that drew none has nothing to check).
+async fn run(seed: u64) -> bool {
     let faults = Faults::new(seed, 4, 25);
     // Off while the kernel opens: a store that fails then stops it, which is right but not
     // what this test is about.
@@ -170,7 +171,10 @@ async fn run(seed: u64) {
         + faults
             .failed_after
             .load(std::sync::atomic::Ordering::SeqCst);
-    assert!(injected > 0, "seed {seed}: no fault was injected");
+    if injected == 0 {
+        eprintln!("seed {seed}: no fault was injected, nothing to check");
+        return false;
+    }
 
     // Without faults: resubmitting returns the same outcomes, which are the expected ones.
     faults.arm(false);
@@ -225,6 +229,7 @@ async fn run(seed: u64) {
     let mut violations = log.check();
     violations.extend(seen.lock().unwrap().check(&log));
     assert!(violations.is_empty(), "seed {seed}: {violations:#?}");
+    true
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -233,9 +238,16 @@ async fn storage_faults_lose_nothing_and_do_nothing_twice() {
         .ok()
         .and_then(|n| n.parse().ok())
         .unwrap_or(3u64);
+    let mut injected = 0;
     for seed in 1..=seeds {
-        run(seed).await;
+        injected += u64::from(run(seed).await);
     }
+    // A seed may draw no fault in its run (seed 246 of 600 did); nearly all must, or the
+    // faults are not reaching the store at all.
+    assert!(
+        injected * 10 >= seeds * 9,
+        "faults injected in only {injected} of {seeds} seeds"
+    );
 }
 
 /// A commit that loses a race for its aggregate runs the command again on the new state, up to
