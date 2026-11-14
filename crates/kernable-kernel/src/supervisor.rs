@@ -912,12 +912,16 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
 /// Most processes a container may have at once.
 const PIDS: u32 = 4096;
 
-/// What every container gets: no capabilities, no way to gain privileges (no
+/// What every container gets: an init that hands signals on, no capabilities, no way to gain privileges (no
 /// setuid binary works), a cap on its processes, a root filesystem it cannot change unless
 /// `writable` (Podman mounts a tmpfs on `/tmp`, `/var/tmp` and `/run` of a read-only one), and,
 /// in a pod, the node's tightened `seccomp` profile.
 fn harden(args: &mut Vec<String>, writable: bool, seccomp: Option<&Path>) {
     args.extend([
+        // A small init as the container's first process: it hands SIGTERM on and reaps. The
+        // first process itself ignores a signal it set no handler for, so a program that
+        // relies on the default action (most do) was killed only after its stop time.
+        "--init".into(),
         "--cap-drop".into(),
         "all".into(),
         "--security-opt".into(),
@@ -1467,8 +1471,9 @@ async fn stopped(
             tracing::warn!(child = %name, "did not stop in time: killed");
             let _ = child.kill().await;
             if let Some(container) = container {
+                // Killed already: nothing to wait for (rm waits 10 s by default).
                 let _ = Command::new(binary)
-                    .args(["rm", "--force", container])
+                    .args(["rm", "--force", "--time", "0", container])
                     .output()
                     .await;
             }
@@ -2391,7 +2396,7 @@ memory = "512m"
             "--env KERNABLE_INSTANCE=node-a",
             "--volume /srv/shop/keys/worker.key:/run/kernable/key:ro,Z --env KERNABLE_KEY=/run/kernable/key",
             "--volume /srv/shop/keys/worker.grant:/run/kernable/grant:ro,Z",
-            "--env SHOP_MAIL --cap-drop all --security-opt no-new-privileges --pids-limit 4096 --read-only --memory 512m",
+            "--env SHOP_MAIL --init --cap-drop all --security-opt no-new-privileges --pids-limit 4096 --read-only --memory 512m",
         ] {
             assert!(args.contains(part), "{part} missing from {args}");
         }
@@ -2427,6 +2432,7 @@ writable = true
         for spec in &plan.children {
             let args = spec.args.join(" ");
             for part in [
+                "--init",
                 "--cap-drop all",
                 "--security-opt no-new-privileges",
                 "--pids-limit 4096",
@@ -2808,7 +2814,7 @@ build = "."
                 "run --rm --replace --name kernable-shop-kernel --pod kernable-shop \
                  --volume /opt/kernable/kernable:/usr/local/bin/kernable:ro \
                  --volume /srv/shop:/srv/shop --workdir /srv/shop --security-opt label=disable \
-                 --env KERNABLE_LOG --cap-drop all --security-opt no-new-privileges \
+                 --env KERNABLE_LOG --init --cap-drop all --security-opt no-new-privileges \
                  --pids-limit 4096 --security-opt seccomp={} --read-only --cpus 2 --memory 1g",
                 seccomp.display()
             )
