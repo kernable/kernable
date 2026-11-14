@@ -496,7 +496,8 @@ kernable Cloud:
                                           (Node, Python, Rust, Go, a frontend, static files) on
                                           official images pinned by digest, kernable.toml (whether
                                           it uses the kernel, its processes with their commands and
-                                          ports, static files in the image) and .kernableignore.
+                                          ports, static files in the image, where an app without
+                                          the kernel keeps its state) and .kernableignore.
                                           Keeps files that exist unless --force; --offline pins
                                           nothing.
   kernable cloud login | logout | whoami | teams | members | tokens | projects

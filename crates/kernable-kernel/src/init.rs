@@ -8,6 +8,8 @@
 //!
 //! ```toml
 //! kernel = true                 # the app talks to a kernable kernel (false: it runs without)
+//! data = "/data"                # optional: the project's own directory on its volume, kept
+//!                               # across restarts and deploys (/data by default without kernel)
 //!
 //! [process.web]                 # one image, any number of processes, each its command
 //! command = ["npm", "start"]
@@ -40,6 +42,11 @@ pub struct App {
     pub process: BTreeMap<String, Process>,
     #[serde(default, rename = "static", skip_serializing_if = "Option::is_none")]
     pub statics: Option<Static>,
+    /// Where the processes find the project's own directory on its volume, read-write, kept
+    /// across restarts and deploys: an app without the kernel keeps its state there (`/data`
+    /// by default for one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +123,14 @@ impl App {
                 "[static] dir {:?}: an absolute path in the image",
                 s.dir
             ));
+        }
+        if let Some(d) = &self.data
+            && (!d.starts_with('/')
+                || d == "/"
+                || d.contains([':', ',', '\n'])
+                || d.split('/').any(|p| p == ".."))
+        {
+            return Err(format!("data {d:?}: an absolute path in the container"));
         }
         Ok(())
     }
@@ -238,6 +253,7 @@ pub fn files(kind: &Kind, kernel: bool, from: &dyn Fn(&str) -> String) -> (Strin
         kernel,
         process,
         statics,
+        data: None,
     };
     match kind {
         Kind::Node => (
@@ -539,6 +555,10 @@ mod tests {
             let app: App = toml::from_str(text).map_err(|e| e.to_string())?;
             app.check().map(|()| app)
         };
+        let web = "[process.web]\ncommand = [\"x\"]\n";
+        assert!(read(&format!("kernel = false\ndata = \"/var/lib/app\"\n{web}")).is_ok());
+        assert!(read(&format!("data = \"data\"\n{web}")).is_err());
+        assert!(read(&format!("data = \"/a/../b\"\n{web}")).is_err());
         assert!(
             read("kernel = true\n")
                 .unwrap_err()
