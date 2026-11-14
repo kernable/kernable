@@ -646,7 +646,19 @@ _CHANNEL_OPTIONS = [("grpc.max_send_message_length", _MAX_MESSAGE),
                     ("grpc.max_receive_message_length", _MAX_MESSAGE),
                     ("grpc.keepalive_time_ms", 30_000),
                     ("grpc.keepalive_timeout_ms", 10_000),
+                    # grpcio times a keepalive ping out by this, not by the keepalive timeout
+                    # (default 60 s).
+                    ("grpc.http2.ping_timeout_ms", 10_000),
                     ("grpc.keepalive_permit_without_calls", 1)]
+#: A client of several kernels (a pair) pings every 2 s and waits 2 s for the answer: a connection
+#: the network cut off (a partition) ends within 4 s, and the client turns to the other kernel.
+_PAIR_CHANNEL_OPTIONS = [o for o in _CHANNEL_OPTIONS
+                         if o[0] not in ("grpc.keepalive_time_ms", "grpc.keepalive_timeout_ms",
+                                         "grpc.http2.ping_timeout_ms")] + [
+    ("grpc.keepalive_time_ms", 2_000),
+    ("grpc.keepalive_timeout_ms", 2_000),
+    ("grpc.http2.ping_timeout_ms", 2_000),
+]
 #: gRPC codes that a retry does not change.
 _REFUSALS = {grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.PERMISSION_DENIED, grpc.StatusCode.FAILED_PRECONDITION,
              grpc.StatusCode.UNIMPLEMENTED, grpc.StatusCode.UNAUTHENTICATED}
@@ -1826,7 +1838,8 @@ class Kernable:
         so such a URL raises `ValueError` unless this is set; default `KERNABLE_INSECURE=1`, else
         False. `timeout_s`: how long a request (submit, query, files, cache, apply) waits in all,
         for the connection (e.g. while the kernel restarts) and its answer; default 60 s. A
-        connection the network dropped silently is noticed within 40 s by keepalive pings. A
+        connection the network dropped silently is noticed within 40 s by keepalive pings (within
+        4 s with several kernels, a pair, whose client then turns to the other). A
         submit (by its command ID), a cancel or a query that a kernel answers `UNAVAILABLE`
         (shutting down, handing over, a middleware or read model not connected) is asked again
         with backoff within this time; any other request may have run, and fails at once.
@@ -1853,18 +1866,19 @@ class Kernable:
         if not tls and not insecure and not _local(url):
             raise ValueError(f"{given_url} is not on this machine: connect with TLS (tls=...), or pass "
                              "insecure=True to send in plain text")
-        def open_channel(url: str):
+        def open_channel(url: str, several: bool = False):
+            options = _PAIR_CHANNEL_OPTIONS if several else _CHANNEL_OPTIONS
             if tls:
                 def read(path: str) -> bytes:
                     with open(path, "rb") as f:
                         return f.read()
 
                 creds = grpc.ssl_channel_credentials(read(tls.ca), read(tls.key), read(tls.cert))
-                return grpc.secure_channel(url, creds, options=_CHANNEL_OPTIONS)
+                return grpc.secure_channel(url, creds, options=options)
             # grpcio sends the socket path as :authority for unix: URLs, which the kernel's
             # HTTP/2 server rejects; any valid authority works.
             return grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost"),
-                                                       *_CHANNEL_OPTIONS])
+                                                       *options])
 
         grant = grant or os.environ.get("KERNABLE_GRANT")
         if grant is None and os.path.exists(default := key.removesuffix(".key") + ".grant"):
@@ -1879,7 +1893,7 @@ class Kernable:
         def channel_for(addresses: str) -> grpc.Channel:
             """A channel to the kernels at `addresses`, comma-separated (a pair: see `_Failover`)."""
             urls = [re.sub(r"^https?://", "", u.strip()).rstrip("/") for u in addresses.split(",") if u.strip()]
-            raw = [open_channel(u) for u in urls]
+            raw = [open_channel(u, len(urls) > 1) for u in urls]
             channels = []
             for c in raw:
                 if granted is not None:

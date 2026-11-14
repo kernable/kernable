@@ -610,12 +610,23 @@ export const DEFAULT_TIMEOUT_MS = 60_000;
 
 /**
  * Pings on every connection, also idle ones: a connection the network dropped without a word
- * (a dead host, a NAT that forgot it) ends within 40 s, and the workers and listeners on it
- * reconnect.
+ * (a dead host, a NAT that forgot it) ends within 40 s (within 4 s with several kernels, see
+ * `PAIR_KEEPALIVE`), and the workers and listeners on it reconnect.
  */
 const KEEPALIVE = {
   "grpc.keepalive_time_ms": 30_000,
   "grpc.keepalive_timeout_ms": 10_000,
+  "grpc.keepalive_permit_without_calls": 1,
+};
+
+/**
+ * A client of several kernels (a pair) pings every 2 s and waits 2 s for the answer: a
+ * connection the network cut off (a partition) ends within 4 s, and the client turns to the
+ * other kernel; a single kernel's client has nowhere else to go.
+ */
+const PAIR_KEEPALIVE = {
+  "grpc.keepalive_time_ms": 2_000,
+  "grpc.keepalive_timeout_ms": 2_000,
   "grpc.keepalive_permit_without_calls": 1,
 };
 
@@ -662,21 +673,22 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
   const creds = tls
     ? grpc.credentials.createSsl(readFileSync(tls.ca), readFileSync(tls.key), readFileSync(tls.cert))
     : grpc.credentials.createInsecure();
+  const keepalive = urls.length > 1 ? PAIR_KEEPALIVE : KEEPALIVE;
   const targets = urls.map((u) => ({
-    commands: new v1.CommandService(u, creds, KEEPALIVE),
-    workers: new v1.WorkerGateway(u, creds, KEEPALIVE),
-    events: new v1.EventService(u, creds, KEEPALIVE),
-    listeners: new v1.ListenerService(u, creds, KEEPALIVE),
-    queries: new v1.QueryService(u, creds, KEEPALIVE),
+    commands: new v1.CommandService(u, creds, keepalive),
+    workers: new v1.WorkerGateway(u, creds, keepalive),
+    events: new v1.EventService(u, creds, keepalive),
+    listeners: new v1.ListenerService(u, creds, keepalive),
+    queries: new v1.QueryService(u, creds, keepalive),
     data: new v1.DataService(u, creds, {
-      ...KEEPALIVE,
+      ...keepalive,
       "grpc.max_send_message_length": MAX_DATA_MESSAGE,
       "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
     }),
-    cache: new v1.CacheService(u, creds, KEEPALIVE),
-    memberships: new v1.MembershipService(u, creds, KEEPALIVE),
-    processes: new v1.ProcessService(u, creds, KEEPALIVE),
-    partitions: new v1.PartitionService(u, creds, KEEPALIVE),
+    cache: new v1.CacheService(u, creds, keepalive),
+    memberships: new v1.MembershipService(u, creds, keepalive),
+    processes: new v1.ProcessService(u, creds, keepalive),
+    partitions: new v1.PartitionService(u, creds, keepalive),
   }));
   type Target = (typeof targets)[number];
   let current = 0;

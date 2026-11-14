@@ -4,7 +4,9 @@ Run from sdks/python: .venv/bin/python -m unittest discover tests   (after `carg
 """
 
 import os
+import socket
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -29,6 +31,66 @@ class SeveralAddresses(unittest.TestCase):
         outcome = k.submit("counters", "Counter", "c1", "Increment", {"by": 2}, wait="committed")
         self.assertTrue(outcome.committed, outcome)
         self.assertEqual(len(outcome.events), 1)
+
+    def test_a_pair_client_turns_to_the_other_kernel_within_seconds_when_one_is_cut_off(self):
+        kernel = TestKernel(["counters.*"])
+        kernel.start()
+        self.addCleanup(kernel.dispose)
+        proxied, freeze = _freezable_proxy(kernel.url.removeprefix("unix:"))
+        # The worker connects directly: what is measured is the client's turn (through the
+        # proxy, the one kernel behind both addresses would lease the next command to the frozen
+        # worker session until its lease ran out).
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
+            direct = Kernable(kernel.url, kernel.app_key, timeout_s=10)
+            k = Kernable(f"{proxied},{kernel.url}", kernel.app_key, timeout_s=30)
+        self.addCleanup(direct.close)
+        self.addCleanup(k.close)
+        worker = direct.worker(counter)
+        threading.Thread(target=worker.run, daemon=True).start()
+        self.addCleanup(worker.stop)
+        self.assertTrue(worker.ready.wait(10), "the worker did not reach the kernel")
+        first = k.submit("counters", "Counter", "c1", "Increment", {"by": 1}, wait="committed")
+        self.assertTrue(first.committed, first)
+        # The proxy freezes: the connection the client holds looks open and answers nothing.
+        freeze.set()
+        started = time.monotonic()
+        second = k.submit("counters", "Counter", "c2", "Increment", {"by": 1}, wait="committed")
+        self.assertTrue(second.committed, second)
+        self.assertLess(time.monotonic() - started, 10, "the client turned to the other address too late")
+
+
+def _freezable_proxy(to: str) -> tuple[str, threading.Event]:
+    """A TCP proxy to the kernel's socket at `to` that can be frozen, as when the network cuts a
+    kernel off without a word (a partition): its address and the switch."""
+    frozen = threading.Event()
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def pump(r: socket.socket, w: socket.socket) -> None:
+        while True:
+            try:
+                data = r.recv(16 << 10)
+            except OSError:
+                return
+            if not data:
+                return
+            if frozen.is_set():
+                # Cut off: what comes in is dropped silently, nothing is closed.
+                threading.Event().wait()
+            try:
+                w.sendall(data)
+            except OSError:
+                return
+
+    def accept() -> None:
+        while True:
+            tcp, _ = listener.accept()
+            unix = socket.socket(socket.AF_UNIX)
+            unix.connect(to)
+            threading.Thread(target=pump, args=(tcp, unix), daemon=True).start()
+            threading.Thread(target=pump, args=(unix, tcp), daemon=True).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+    return f"127.0.0.1:{listener.getsockname()[1]}", frozen
 
 
 if __name__ == "__main__":

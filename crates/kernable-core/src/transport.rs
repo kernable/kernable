@@ -101,14 +101,30 @@ pub async fn connect_pinging(
     }
 }
 
+/// How often a client of several kernels (a pair) pings each connection, and how long it
+/// waits for the answer: one the network cut off without a word ends within twice this, and the
+/// client turns to the other kernel (a single kernel's client has nowhere else to go, and pings
+/// every 30 s).
+pub const PAIR_PING: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Pings on the connection, also when idle, so one the network dropped without a word (a dead
-/// host, a NAT that forgot it) ends within 40 s; and a bound on connecting.
-fn sdk_endpoint(endpoint: Endpoint) -> Endpoint {
+/// host, a NAT that forgot it) ends within 40 s, or within twice [`PAIR_PING`] for a client of
+/// `several` kernels; and a bound on connecting.
+fn sdk_endpoint(endpoint: Endpoint, several: bool) -> Endpoint {
+    let (every, answer, connect) = if several {
+        (PAIR_PING, PAIR_PING, PAIR_PING * 2)
+    } else {
+        (
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
+        )
+    };
     endpoint
-        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
-        .keep_alive_timeout(std::time::Duration::from_secs(10))
+        .http2_keep_alive_interval(every)
+        .keep_alive_timeout(answer)
         .keep_alive_while_idle(true)
-        .connect_timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(connect)
 }
 
 /// A channel to a kernel that connects on first use and again after the connection drops, so
@@ -118,6 +134,16 @@ pub fn connect_lazy(
     addr: &str,
     tls: Option<&Tls>,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    connect_lazy_among(addr, tls, false)
+}
+
+/// [`connect_lazy`] for a client of `several` kernels (a pair, a partition's kernels): a
+/// connection the network cut off ends within seconds, so the client turns to another.
+pub fn connect_lazy_among(
+    addr: &str,
+    tls: Option<&Tls>,
+    several: bool,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(tls) = tls {
         let config = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(std::fs::read(&tls.ca)?))
@@ -125,10 +151,10 @@ pub fn connect_lazy(
                 std::fs::read(&tls.cert)?,
                 std::fs::read(&tls.key)?,
             ));
-        return Ok(sdk_endpoint(Endpoint::from_shared(format!(
-            "https://{}",
-            tcp_addr(addr)
-        ))?)
+        return Ok(sdk_endpoint(
+            Endpoint::from_shared(format!("https://{}", tcp_addr(addr)))?,
+            several,
+        )
         .tls_config(config)?
         .connect_lazy());
     }
@@ -137,23 +163,23 @@ pub fn connect_lazy(
         Some(path) => {
             let path = path.to_owned();
             Ok(
-                sdk_endpoint(Endpoint::from_static("http://kernable")).connect_with_connector_lazy(
-                    service_fn(move |_: Uri| {
+                sdk_endpoint(Endpoint::from_static("http://kernable"), several)
+                    .connect_with_connector_lazy(service_fn(move |_: Uri| {
                         let path = path.clone();
                         async move {
                             let stream = tokio::net::UnixStream::connect(path).await?;
                             Ok::<_, std::io::Error>(TokioIo::new(stream))
                         }
-                    }),
-                ),
+                    })),
             )
         }
         #[cfg(not(unix))]
         Some(_) => Err("unix sockets need Unix".into()),
-        None => Ok(
-            sdk_endpoint(Endpoint::from_shared(format!("http://{}", tcp_addr(addr)))?)
-                .connect_lazy(),
-        ),
+        None => Ok(sdk_endpoint(
+            Endpoint::from_shared(format!("http://{}", tcp_addr(addr)))?,
+            several,
+        )
+        .connect_lazy()),
     }
 }
 

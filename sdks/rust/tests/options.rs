@@ -157,3 +157,88 @@ fn a_rejection_reads_as_its_message() {
     let rejected = kernable::Rejected::new("out of stock").code("empty");
     assert_eq!(rejected.to_string(), "out of stock");
 }
+
+/// Passes what `r` reads on to `w`; while `frozen`, nothing, and the connection stays open.
+async fn pump(
+    mut r: impl tokio::io::AsyncRead + Unpin,
+    mut w: impl tokio::io::AsyncWrite + Unpin,
+    frozen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0u8; 16 << 10];
+    loop {
+        let n = match r.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        if frozen.load(std::sync::atomic::Ordering::SeqCst) {
+            // Cut off: what comes in is dropped silently, nothing is closed.
+            return std::future::pending().await;
+        }
+        if w.write_all(&buf[..n]).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// A TCP proxy to the kernel's socket at `to` that can be frozen, as when the network cuts a
+/// kernel off without a word (a partition): its address and the switch.
+async fn freezable_proxy(to: PathBuf) -> (String, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let frozen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let f = std::sync::Arc::clone(&frozen);
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let Ok(unix) = tokio::net::UnixStream::connect(&to).await else {
+                continue;
+            };
+            let (tr, tw) = tcp.into_split();
+            let (ur, uw) = unix.into_split();
+            tokio::spawn(pump(tr, uw, std::sync::Arc::clone(&f)));
+            tokio::spawn(pump(ur, tw, std::sync::Arc::clone(&f)));
+        }
+    });
+    (format!("http://{addr}"), frozen)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pair_client_turns_to_the_other_kernel_within_seconds_when_one_is_cut_off() {
+    let kernel = TestKernel::new(&["shop.*"], &[]);
+    kernel.start().await;
+    let socket = PathBuf::from(kernel.url.trim_start_matches("unix:"));
+    let (proxied, frozen) = freezable_proxy(socket).await;
+    // Two addresses of the same kernel: the first through the proxy, the second direct.
+    let kernable = Kernable::new(
+        kernel
+            .options()
+            .url(format!("{proxied},{}", kernel.url))
+            .timeout(Duration::from_secs(30)),
+    )
+    .unwrap();
+    // The worker connects directly: what is measured is the client's turn. (Through the proxy,
+    // the one kernel behind both addresses would lease the next command to the frozen worker
+    // session until its lease ran out; a kernel that takes over never had that session.)
+    let direct = kernel.client();
+    let _worker = start(&direct);
+    // Through the proxy, once the worker is there.
+    let mut first = place(&kernable, "o1").await;
+    for _ in 0..100 {
+        if matches!(first, Ok(Outcome::Committed(_))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        first = place(&kernable, "o1").await;
+    }
+    assert!(matches!(first, Ok(Outcome::Committed(_))), "{first:?}");
+    // The proxy freezes: the connection the client holds looks open and answers nothing.
+    frozen.store(true, std::sync::atomic::Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let placed = place(&kernable, "o2").await;
+    assert!(matches!(placed, Ok(Outcome::Committed(_))), "{placed:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the client turned to the other address after {:?}",
+        started.elapsed()
+    );
+}

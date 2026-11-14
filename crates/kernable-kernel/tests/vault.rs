@@ -317,7 +317,12 @@ async fn a_snapshot_taken_before_an_erasure_is_not_stored_after_it() {
     // o2's worker has k-1's value while it works; k-1 is erased before it answers.
     let addr = env.addr.clone();
     let placing = tokio::spawn(async move {
-        let second = order("c2", "PlaceOrder", "o2", r#"{"customer":"k-1","slow":true}"#);
+        let second = order(
+            "c2",
+            "PlaceOrder",
+            "o2",
+            r#"{"customer":"k-1","slow":true}"#,
+        );
         submit(&addr, second).await.unwrap()
     });
     tokio::time::sleep(Duration::from_millis(300)).await;

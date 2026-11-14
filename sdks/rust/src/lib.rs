@@ -235,7 +235,8 @@ impl Options {
 
     /// How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the
     /// connection, e.g. while the kernel restarts, and for its answer. Default 60 s. A
-    /// connection the network dropped silently is noticed within 40 s by keepalive pings.
+    /// connection the network dropped silently is noticed within 40 s by keepalive pings, within
+    /// 4 s with several kernels (a pair), whose client then turns to the other.
     /// A submit (by its command ID), a cancel, a query or a data or cache read (get, list) that
     /// a kernel answers `UNAVAILABLE` (shutting down, handing over, a middleware or read model
     /// not connected) is asked again with backoff within this time; any other request (a
@@ -405,9 +406,12 @@ impl Client {
                     .addresses
                     .iter()
                     .map(|a| {
-                        transport::connect_lazy(a, self.parts.tls.as_ref()).map_err(|e| {
-                            tonic::Status::internal(format!("partition {name}, {a}: {e}"))
-                        })
+                        transport::connect_lazy_among(
+                            a,
+                            self.parts.tls.as_ref(),
+                            partition.addresses.len() > 1,
+                        )
+                        .map_err(|e| tonic::Status::internal(format!("partition {name}, {a}: {e}")))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let channels = Arc::new(Channels {
@@ -691,13 +695,19 @@ impl Kernable {
                  text with Options::insecure"
             )));
         }
-        // A pair of kernels: several addresses, comma-separated.
-        let all = url
+        // A pair of kernels: several addresses, comma-separated. Its connections are pinged
+        // often, so one the network cut off ends within seconds and the client turns to the
+        // other kernel.
+        let urls: Vec<&str> = url
             .split(',')
             .map(str::trim)
             .filter(|u| !u.is_empty())
+            .collect();
+        let several = urls.len() > 1;
+        let all = urls
+            .iter()
             .map(|u| {
-                transport::connect_lazy(u, tls.as_ref())
+                transport::connect_lazy_among(u, tls.as_ref(), several)
                     .map_err(|e| Error::Config(format!("kernel {u}: {e}")))
             })
             .collect::<Result<Vec<_>, _>>()?;

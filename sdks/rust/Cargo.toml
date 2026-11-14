@@ -34,4 +34,5 @@ tokio-stream.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["io-util"] }
 kernable-core = { path = "../../crates/kernable-core" }

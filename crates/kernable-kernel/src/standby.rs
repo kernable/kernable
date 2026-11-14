@@ -1748,7 +1748,6 @@ mod tests {
     }
     use std::path::Path;
 
-
     #[test]
     fn a_store_is_moved_aside_with_its_files() {
         let dir = std::env::temp_dir().join(format!("kn-aside-{}", std::process::id()));

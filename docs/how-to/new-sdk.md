@@ -34,7 +34,7 @@ Generate gRPC stubs from `proto/kernable/v1/kernable.proto`, package `kernable.v
 - Raise the message size limit for `DataService`: a file can be 16 MiB.
 - **Plain text stays on the machine:** without TLS, refuse a URL that is not a Unix socket or a loopback address (`localhost`, `127.x.x.x`, `::1`) unless `insecure` is set.
 - **Requests wait for the connection:** every unary call (submit, query, data, cache, apply) waits while the kernel cannot be reached (gRPC's wait-for-ready) and has a deadline, 60 s by default, above the kernel's own submit and settle timeouts; submit and query take their own. Never retry a call that may have reached the kernel: a data or cache write sent twice is refused as a replay. Give every request an `issued_at` later than the one before it in the process (now, or the last one plus 1 ms): two calls in the same millisecond would otherwise carry the same signature, and the second would be refused as a replay.
-- **Keepalive:** ping every 30 s, also when idle, and drop the connection after 10 s without an answer, so streams on a connection that died silently reconnect.
+- **Keepalive:** ping every 30 s, also when idle, and drop the connection after 10 s without an answer, so streams on a connection that died silently reconnect. With several addresses (a pair), ping every 2 s and drop after 2 s: a kernel the network cut off (a partition) shows within 4 s, not when the request times out, and the client turns to the other one. Check that your gRPC library times the ping out by that setting (grpcio needs `grpc.http2.ping_timeout_ms` as well).
 
 ## 3. Clients
 
