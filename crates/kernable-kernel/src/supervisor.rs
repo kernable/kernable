@@ -2013,15 +2013,21 @@ fn only_stopped_following(old: &Spec, new: &Spec, dir: &Path) -> bool {
     if stripped != *new {
         return false;
     }
+    // Its store: the flag, else the variable, else the flag's default.
     let new_command = command(new);
-    let Some(store) = new_command
+    let store = new_command
         .iter()
         .position(|a| a == "--store")
         .and_then(|i| new_command.get(i + 1))
-    else {
-        return false;
-    };
-    let Some(note) = crate::standby::marker(store, "following") else {
+        .or_else(|| new.env.get("KERNABLE_STORE"))
+        .map(String::as_str)
+        .or_else(|| {
+            crate::config::FLAGS
+                .iter()
+                .find(|(flag, ..)| *flag == "--store")
+                .map(|(_, _, default, _)| *default)
+        });
+    let Some(note) = store.and_then(|s| crate::standby::marker(s, "following")) else {
         return false;
     };
     !dir.join(note).exists()
@@ -3185,6 +3191,23 @@ env = { KERNABLE_LOG = "info" }
             // Not the other way round: a kernel that is to follow starts again.
             assert!(!only_stopped_following(&new, &old, &dir));
         }
+        // Without a store flag: the kernel's default store, kernable.db.
+        let following = following.replace(", store = \"sqlite:k.db\"", "");
+        let own = own.replace(", store = \"sqlite:k.db\"", "");
+        assert!(!following.contains("store") && !own.contains("store"));
+        let kernel = |text: &str| {
+            plan_on(text, &dir, this, true)
+                .unwrap()
+                .children
+                .into_iter()
+                .find(|c| c.name == "kernel")
+                .unwrap()
+        };
+        let (old, new) = (kernel(&following), kernel(&own));
+        std::fs::write(dir.join("kernable.db.following"), "a.example:443\n").unwrap();
+        assert!(!only_stopped_following(&old, &new, &dir));
+        std::fs::remove_file(dir.join("kernable.db.following")).unwrap();
+        assert!(only_stopped_following(&old, &new, &dir), "the default store");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
