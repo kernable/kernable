@@ -751,7 +751,6 @@ mod tests {
                         events: vec![e.clone()],
                         ..Default::default()
                     })),
-                    ..Default::default()
                 }),
             );
         }
