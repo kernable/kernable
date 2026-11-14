@@ -73,7 +73,7 @@ setup)
 
   # B: LazyFS over a plain directory, for power loss (lazyfs::clear-cache drops unsynced writes).
   if [ ! -x /opt/lazyfs/lazyfs/build/lazyfs ]; then
-    git clone -q https://github.com/dsrhaslab/lazyfs.git /opt/lazyfs
+    [ -d /opt/lazyfs/.git ] || git clone -q https://github.com/dsrhaslab/lazyfs.git /opt/lazyfs
     (cd /opt/lazyfs/libs/libpcache && ./build.sh >/dev/null)
     (cd /opt/lazyfs/lazyfs && ./build.sh >/dev/null)
   fi
