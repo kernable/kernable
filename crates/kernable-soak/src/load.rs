@@ -178,9 +178,13 @@ impl Load {
             }
             if channel.is_none() {
                 turn += 1;
-                *channel = transport::connect(addresses[turn % addresses.len()])
-                    .await
-                    .ok();
+                // Pinged: a connection the network dropped ends instead of holding the call.
+                *channel = transport::connect_pinging(
+                    addresses[turn % addresses.len()],
+                    Some(Duration::from_secs(2)),
+                )
+                .await
+                .ok();
             }
             let Some(ch) = channel.clone() else { continue };
             let request = SubmitRequest {
@@ -320,7 +324,10 @@ async fn listen_once(
         ..Default::default()
     };
     let _ = tx.send(send(In::Hello(hello))).await;
-    let channel = transport::connect(addr)
+    // Pinged, as the SDKs' listeners are: a connection the network drops without a word ends
+    // within seconds and the audit listener connects again. Unpinged it hung on one for good,
+    // and the flaggers, ordered after it, with it (a soak's B2 violations).
+    let channel = transport::connect_pinging(addr, Some(std::time::Duration::from_secs(2)))
         .await
         .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
     let mut inbound = ListenerServiceClient::new(channel)
