@@ -689,6 +689,16 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
                 if gap > longest {
                     (longest, at) = (gap, (start.elapsed() - gap).as_secs_f64());
                 }
+                // When it was, to set beside the servers' logs.
+                if gap > Duration::from_secs(2) {
+                    let now = std::time::SystemTime::now();
+                    eprintln!(
+                        "probe gap {} ms from {} to {} UTC",
+                        gap.as_millis(),
+                        utc_time(now - gap),
+                        utc_time(now)
+                    );
+                }
                 last = Instant::now();
                 committed += 1;
             }
@@ -717,6 +727,22 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
         longest.as_millis()
     );
     Ok(())
+}
+
+/// `at` as `HH:MM:SS.mmm` in UTC.
+fn utc_time(at: std::time::SystemTime) -> String {
+    let ms = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        % 86_400_000;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        ms / 3_600_000,
+        ms / 60_000 % 60,
+        ms / 1000 % 60,
+        ms % 1000
+    )
 }
 
 /// A channel to the kernel at `addr`, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT`
