@@ -722,12 +722,15 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
     let secrets_dir = runtime_dir()
         .join(format!("kernable-{name}"))
         .join("secrets");
-    // The services' ports the ingress reaches, as `kernable expose` takes them.
-    let mut exposed: Vec<String> = Vec::new();
+    // The services' ports the ingress reaches, as `kernable expose` takes them: (service, arg).
+    let mut exposed: Vec<(String, String)> = Vec::new();
     for svc in project.service {
-        if !valid_name(&svc.name) || matches!(svc.name.as_str(), "kernel" | "backup" | "expose") {
+        if !valid_name(&svc.name)
+            || matches!(svc.name.as_str(), "kernel" | "backup" | "expose")
+            || svc.name.starts_with("expose-")
+        {
             return Err(format!(
-                "[[service]] {}: a name has 1 to 63 lowercase letters, digits and -, and is not kernel, backup or expose",
+                "[[service]] {}: a name has 1 to 63 lowercase letters, digits and -, is not kernel, backup or expose and does not start with expose-",
                 svc.name
             )
             .into());
@@ -743,10 +746,13 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
                 )
                 .into());
             };
-            exposed.push(format!(
-                "{}={}",
-                sockets.join(format!("{}.sock", svc.name)).display(),
-                std::net::SocketAddr::from(([127, 0, 0, 1], port))
+            exposed.push((
+                svc.name.clone(),
+                format!(
+                    "{}={}",
+                    sockets.join(format!("{}.sock", svc.name)).display(),
+                    std::net::SocketAddr::from(([127, 0, 0, 1], port))
+                ),
             ));
         }
         let image = match (svc.build, svc.image) {
@@ -890,13 +896,18 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             watch: podman.clone(),
         });
     }
-    // One forwarder for the instance: each exposed service's socket in run/ to its port in the
-    // pod's own network.
-    if !exposed.is_empty() {
-        let args = std::iter::once("expose".to_owned())
-            .chain(exposed)
-            .collect();
-        specs.push(kernable("expose", args, BTreeMap::new(), &None, &None));
+    // A forwarder per exposed service: its socket in run/ to its port in the pod's own network.
+    // One each, so that a service added or removed (a deployment beside the one that serves)
+    // leaves the others' forwarders, and the requests under way through them, alone.
+    for (service, arg) in exposed {
+        let args = vec!["expose".to_owned(), arg];
+        specs.push(kernable(
+            &format!("expose-{service}"),
+            args,
+            BTreeMap::new(),
+            &None,
+            &None,
+        ));
     }
     Ok(Plan {
         children: specs,
@@ -3081,28 +3092,56 @@ build = "worker"
 "#;
         let (dir, this) = (Path::new("/srv/shop"), Path::new("/bin/kernable"));
         let plan = plan_on(text, dir, this, true).unwrap();
-        let forwarder = plan.children.last().unwrap();
-        assert_eq!(forwarder.name, "expose");
+        let forwarders: Vec<_> = plan
+            .children
+            .iter()
+            .filter(|c| c.name.starts_with("expose"))
+            .collect();
+        let commands: Vec<_> = forwarders
+            .iter()
+            .map(|f| (f.name.as_str(), f.container.as_ref().unwrap().command.clone()))
+            .collect();
         assert_eq!(
-            forwarder.container.as_ref().unwrap().command,
+            commands,
             [
-                "kernable",
-                "expose",
-                "/srv/shop/run/web.sock=127.0.0.1:3000",
-                "/srv/shop/run/api.sock=127.0.0.1:8080"
-            ]
+                (
+                    "expose-web",
+                    vec![
+                        "kernable".to_owned(),
+                        "expose".into(),
+                        "/srv/shop/run/web.sock=127.0.0.1:3000".into()
+                    ]
+                ),
+                (
+                    "expose-api",
+                    vec![
+                        "kernable".to_owned(),
+                        "expose".into(),
+                        "/srv/shop/run/api.sock=127.0.0.1:8080".into()
+                    ]
+                ),
+            ],
+            "one per service: adding one leaves the others' alone"
         );
-        assert!(forwarder.args.join(" ").contains("--pod kernable-shop"));
-        assert_eq!(
-            plan.children.iter().filter(|c| c.name == "expose").count(),
-            1,
-            "one for the instance"
-        );
-        let named = text.replace("name = \"worker\"", "name = \"expose\"");
         assert!(
-            plan_on(&named, dir, this, true).is_err(),
-            "the forwarder's name"
+            forwarders
+                .iter()
+                .all(|f| f.args.join(" ").contains("--pod kernable-shop"))
         );
+        // A service added: the forwarders there were stay as they were (not restarted).
+        let more = format!("{text}\n[[service]]\nname = \"admin\"\nbuild = \"admin\"\nexpose = 9090\n");
+        let after = plan_on(&more, dir, this, true).unwrap();
+        for f in &forwarders {
+            let same = after.children.iter().find(|c| c.name == f.name).unwrap();
+            assert_eq!(same.args, f.args, "{} unchanged", f.name);
+        }
+        for name in ["expose", "expose-web"] {
+            let named = text.replace("name = \"worker\"", &format!("name = \"{name}\""));
+            assert!(
+                plan_on(&named, dir, this, true).is_err(),
+                "a forwarder's name: {name}"
+            );
+        }
         let error = plan_on(text, dir, this, false).unwrap_err().to_string();
         assert!(error.contains("expose needs"), "{error}");
         let none = text
@@ -3113,7 +3152,7 @@ build = "worker"
                 .unwrap()
                 .children
                 .iter()
-                .all(|c| c.name != "expose")
+                .all(|c| !c.name.starts_with("expose"))
         );
     }
 
