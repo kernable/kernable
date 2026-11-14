@@ -48,6 +48,7 @@ cpus = "4"                                 # optional (Linux): the whole instanc
 network = "host"                           # optional (Linux): see Network; default own
 admin-socket = "admin.sock"                # optional: the kernel's local socket, this by default
 require-digest = true                      # optional: run images by digest only; see Images
+exclusive = true                           # optional: a changed service starts once every old one ended
 
 [[service]]                                # one per service, as many as you need
 name = "worker"
@@ -87,6 +88,8 @@ Each `[[service]]` is built with `podman build` on the machine, at start, when i
 Instead of `build`, a service may name an `image` to run as it is: `<repository>@sha256:<digest>`, or a tag (`registry.example.com/shop/web:2026-11-12`). Nothing is built, also not on SIGHUP; Podman pulls the image on the first start unless the node's user holds it already (one loaded with `podman load`, say). A change of `image` restarts the service on the new one. `file` goes with `build` only.
 
 A digest names exactly one image, a tag whatever it points at today. With `require-digest = true` in `[node]`, the node runs images by digest only: a service with a tag, a service with `build`, and a `[kernel] image` with a tag are refused (the default base image is pinned by digest), at start with exit code 2 and later with the error logged, the children running on as they are.
+
+A service whose `project.toml` entry changes is stopped and started anew; one that is new (another name) starts with the node's next look, while the old ones may still be stopping. For services that keep their state on the instance's disk without a kernel, that is two versions writing at once. With `exclusive = true` in `[node]`, a new or changed service starts only once every process the node is stopping has ended: stop, then start, with seconds without the app in between.
 
 Install Podman on the machine first (rootless is fine). Services run on Linux; on a Mac, Podman's containers live in a virtual machine and do not share its network.
 

@@ -33,6 +33,7 @@
 //! instance = "node-a"                        # KERNABLE_INSTANCE (default the host name)
 //! project = "shop"                           # names the containers (default the directory)
 //! podman = "podman"                          # optional
+//! exclusive = false                          # optional: see below
 //!
 //! [[service]]
 //! name = "worker"
@@ -241,6 +242,11 @@ struct NodeSection {
     /// Every image the node runs (a service's `image`, `[kernel] image`) must name its digest.
     #[serde(default)]
     require_digest: bool,
+    /// A service that is new or changed starts only once every process the node is stopping
+    /// has ended, not only one of the same name: an app whose state is on the instance's
+    /// volume never runs two versions at once (stop, then start).
+    #[serde(default)]
+    exclusive: bool,
 }
 
 /// What a `project.toml` asks the node for.
@@ -257,6 +263,8 @@ pub struct Plan {
     /// On Linux: the pod of the instance's containers.
     pub pod: Option<Pod>,
     pub podman: PathBuf,
+    /// `[node] exclusive`.
+    pub exclusive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -872,6 +880,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         secrets_dir,
         pod,
         podman,
+        exclusive: node.exclusive,
     })
 }
 
@@ -1501,7 +1510,9 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     // The file and the secrets read from files: a change to either is read at the next look.
     let mut watched = watched_files(&path, &first.secrets);
     let mut last_read = watched.iter().map(|p| modified(p)).collect::<Vec<_>>();
-    apply(&mut children, first.children).await;
+    // Exclusive: when what is stopping now has ended.
+    let mut ended = None;
+    apply(&mut children, first.children, first.exclusive, &mut ended).await;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let mut hangup = signal(libc::SIGHUP)?;
     let mut terminate = signal(libc::SIGTERM)?;
@@ -1562,7 +1573,7 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
                             "[node] metrics-listen changed: it applies when the node starts again"
                         );
                     }
-                    apply(&mut children, plan.children).await;
+                    apply(&mut children, plan.children, plan.exclusive, &mut ended).await;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "the project file is invalid: the children run on as they are")
@@ -1938,8 +1949,15 @@ fn signal(kind: libc::c_int) -> Result<tokio::signal::unix::Signal, BoxError> {
 }
 
 /// Brings `children` to `specs`: stops those gone or changed (reverse order); those new or
-/// changed start with the next look (in order).
-async fn apply(children: &mut Vec<Running>, specs: Vec<Spec>) {
+/// changed start with the next look (in order), once the old process of the same name ended,
+/// or, `exclusive`, once every process stopping here ended: also those of an earlier change
+/// still ending (`ended`, which this one replaces).
+async fn apply(
+    children: &mut Vec<Running>,
+    specs: Vec<Spec>,
+    exclusive: bool,
+    ended: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) {
     let mut keep = Vec::new();
     // Processes of changed or removed children still stopping: a child of the same name
     // starts once its old process ended.
@@ -1964,12 +1982,37 @@ async fn apply(children: &mut Vec<Running>, specs: Vec<Spec>) {
         }
     }
     keep.reverse();
+    // Exclusive: one signal once all of them ended, which every new child waits for.
+    let earlier = ended.take().filter(|e| !*e.borrow());
+    let all_ended = (exclusive && (!ending.is_empty() || earlier.is_some())).then(|| {
+        let (done, all) = tokio::sync::watch::channel(false);
+        let handles: Vec<JoinHandle<()>> = std::mem::take(&mut ending)
+            .into_iter()
+            .map(|(_, h)| h)
+            .collect();
+        tokio::spawn(async move {
+            if let Some(mut earlier) = earlier {
+                let _ = earlier.wait_for(|e| *e).await;
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+            let _ = done.send(true);
+        });
+        all
+    });
+    ended.clone_from(&all_ended);
     for spec in specs {
         match keep.iter().position(|c| c.spec == spec) {
             Some(i) => children.push(keep.remove(i)),
             None => {
                 let mut c = Running::new(spec);
-                if let Some(i) = ending.iter().position(|(name, _)| *name == c.spec.name) {
+                if let Some(ended) = &all_ended {
+                    let mut ended = ended.clone();
+                    c.stopping = Some(tokio::spawn(async move {
+                        let _ = ended.wait_for(|e| *e).await;
+                    }));
+                } else if let Some(i) = ending.iter().position(|(name, _)| *name == c.spec.name) {
                     c.stopping = Some(ending.remove(i).1);
                 }
                 children.push(c);
@@ -2519,6 +2562,61 @@ secrets = ["stripe"]
         assert!(specs_of(&both).unwrap_err().to_string().contains("either"));
         let twice = text.replace("name = \"smtp\"", "name = \"stripe\"");
         assert!(specs_of(&twice).unwrap_err().to_string().contains("twice"));
+    }
+
+    /// Whether service `b`, put in place of `a` (which takes a second to stop), started after
+    /// `a` had ended: what `b` saw when it started.
+    async fn replaced(exclusive: bool) -> String {
+        let dir = std::env::temp_dir().join(format!("kn-excl-{}-{exclusive}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = |name: &str, script: &str| Spec {
+            name: name.into(),
+            binary: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            env: BTreeMap::new(),
+            stop: Duration::from_secs(10),
+            container: None,
+            secrets: vec![],
+            watch: "/bin/sh".into(),
+        };
+        // `a` ends a second after it is asked to, as an app flushing its state.
+        let a = sh(
+            "web-d1",
+            "trap 'sleep 1; touch a.ended; exit 0' TERM; while true; do sleep 0.05; done",
+        );
+        let b = sh(
+            "web-d2",
+            "if [ -f a.ended ]; then echo after; else echo before; fi > b.started; sleep 30",
+        );
+        let (mut children, mut ended) = (Vec::new(), None);
+        apply(&mut children, vec![a], exclusive, &mut ended).await;
+        step(&mut children[0], &dir).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        apply(&mut children, vec![b], exclusive, &mut ended).await;
+        let started = dir.join("b.started");
+        for _ in 0..100 {
+            for c in &mut children {
+                step(c, &dir).await;
+            }
+            if std::fs::read_to_string(&started).is_ok_and(|t| !t.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for c in &mut children {
+            stop_now(c).await;
+        }
+        let saw = std::fs::read_to_string(&started).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        saw.trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn an_exclusive_node_starts_a_new_service_only_once_the_old_one_ended() {
+        assert_eq!(replaced(true).await, "after");
+        // Without: the new one starts beside the old one while it stops.
+        assert_eq!(replaced(false).await, "before");
     }
 
     #[tokio::test]
