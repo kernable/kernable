@@ -40,7 +40,7 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
   kernable cloud projects [--team <team>] [create <name> [--plan <plan>] [--escrow-key <age1…>] | show <name>
                        | usage <name> [--month <yyyy-mm>] | stop <name> | start <name>
                        | domain add <name> <host> | domain list <name> | domain remove <name> <host>
-                       | backups <name> | backups create <name>]
+                       | backups <name> | backups create <name> | backups restore <name> <backup> --yes]
                                           A new project is placed at once, past the checks before
                                           a team's first project. --escrow-key: your age key
                                           (age-keygen) its vault key is kept sealed for beside its
@@ -48,7 +48,9 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           never after. A host name of your own: set the TXT record
                                           `domain add` names, then run it again; keep the record:
                                           it is checked every day, and a name whose token is
-                                          missing for 7 days is dropped (`domain list` shows it)
+                                          missing for 7 days is dropped (`domain list` shows it).
+                                          backups restore: code and data as at the backup; what
+                                          was written since is discarded
   kernable cloud deploy [<dir>] --project <name> [--team <team>] [--backup | --no-backup]
                                           Packs the app in <dir> (default .; what .kernableignore
                                           names stays here), puts it, has kernable Cloud build its
@@ -1027,6 +1029,7 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
     let plan = flag(&mut rest, "--plan")?;
     let month = flag(&mut rest, "--month")?;
     let escrow = flag(&mut rest, "--escrow-key")?;
+    let yes = take(&mut rest, "--yes");
     let t = team(&mut s, team_flag)?;
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -1141,6 +1144,49 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                     println!("(a backup runs now)");
                 }
             });
+        }
+        ["backups", "restore", name, backup] => {
+            let path = format!("/v1/teams/{t}/projects/{name}/backups");
+            let listed = s.call("GET", &path, None)?;
+            let Some(b) = listed["backups"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|b| b["name"] == *backup)
+                .cloned()
+            else {
+                return Err(format!(
+                    "{name}: no backup {backup} (`kernable cloud projects backups {name}` lists them)"
+                ));
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            let hours = (now - b["at"].as_i64().unwrap_or(now)).max(0) / 3600;
+            let code = b["deployment"]
+                .as_str()
+                .map(|d| format!("; deployment {d}, which served then, serves again"))
+                .unwrap_or_default();
+            if !yes {
+                return Err(format!(
+                    "{name}: restoring {backup} stops the app and discards everything it wrote in the {hours} hours since{code}. Run it again with --yes"
+                ));
+            }
+            let before = listed["last"].clone();
+            s.call("POST", &format!("{path}/{backup}/restore"), None)?;
+            eprintln!("{name}: restoring {backup}");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let v = s.call("GET", &path, None)?;
+                if v["running_since"].is_null() && v["last"] != before {
+                    let result = v["last"]["result"].as_str().unwrap_or("?").to_owned();
+                    if result.starts_with("failed") {
+                        return Err(format!("{name}: {result}"));
+                    }
+                    s.show(&v["last"], |_| println!("{name}: {result}"));
+                    break;
+                }
+            }
         }
         ["backups", "create", name] => {
             let v = s.call(
