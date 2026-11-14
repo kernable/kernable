@@ -60,6 +60,7 @@ secrets = ["stripe"]                       # optional: see [[secret]]
 cpus = "1.5"                               # optional, as memory = "512m"
 stop-seconds = 10                          # optional
 writable = true                            # optional: see Hardening
+data = "/data"                             # optional: the project's app-data/, read-write
 expose = 3000                              # optional (Linux): see Network
 
 [[service]]                                # an image built elsewhere, run as it is
@@ -123,6 +124,8 @@ Every container the node starts, the kernel's included, gets the same protection
 - **At most 4096 processes**, so a fork bomb stays inside its container.
 - **A read-only root filesystem**, with a fresh, empty `/tmp`, `/var/tmp` and `/run` in memory. What has to last belongs in the kernel.
 - **On Linux, Podman's system call filter, tightened**: no new user namespaces, whose "root" would hold capabilities again and reach the kernel paths most container escapes go through, and no kernel keyrings, which nothing separates between containers. The node writes the profile from Podman's own (`/usr/share/containers/seccomp.json`, or yours in `/etc/containers/`) when it makes the pod, so Podman's updates reach it; without one it does not start.
+
+A service's root filesystem is gone when it stops. One that keeps state of its own (files, a SQLite database) names a path for it: `data = "/data"` mounts the project directory's `app-data/` there, read-write, the same directory for every service that names it and for every new version of the service. With the kernel, state lives in its store instead; `data` is for apps that run without it (see `exclusive` above, so two versions never write there at once).
 
 Most images run as they are. One that writes elsewhere (some frameworks keep a cache next to their code) takes `writable = true` in its `[[service]]`; the node logs it at each start. Images that start as root to switch to a user of their own, such as the official `nginx`, do not start without capabilities: use an image that runs as an ordinary user from the start (`nginxinc/nginx-unprivileged`, say). Software that builds a sandbox of its own from user namespaces runs without it, as is usual in containers: Chromium (Puppeteer, Playwright) with `--no-sandbox`; containers inside a service do not run.
 

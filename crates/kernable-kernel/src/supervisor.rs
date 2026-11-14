@@ -44,6 +44,7 @@
 //! env = { SHOP_MAIL = "smtp://mail:25" }     # optional
 //! cpus = "1.5"                               # optional, as memory = "512m"
 //! stop-seconds = 10                          # optional
+//! data = "/data"                             # optional: app-data/ of the project, read-write
 //! ```
 //!
 //! A service may name an `image` instead of `build` (`<repository>@sha256:<digest>`, or a tag
@@ -176,6 +177,8 @@ pub enum Network {
 const SOCKETS: &str = "run";
 const SOCKET: &str = "kernel.sock";
 const SOCKETS_INSIDE: &str = "/run/kernable/kernel";
+/// The directory in the project directory that services naming `data` keep their state in.
+const APP_DATA: &str = "app-data";
 /// The kernel's local socket (`--admin-socket`) in the project directory, unless `[node]
 /// admin-socket` names another place.
 const ADMIN_SOCKET: &str = "admin.sock";
@@ -292,6 +295,10 @@ struct ServiceSection {
     /// The port it serves HTTP on in the pod, for the ingress to reach it through
     /// `run/<name>.sock`.
     expose: Option<u16>,
+    /// Where in its container the project's `app-data` directory is mounted, read-write: what
+    /// the service keeps across restarts and new versions (an app that keeps its own state,
+    /// without the kernel). Every service that names it shares the one directory.
+    data: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -809,6 +816,24 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             args.extend([
                 "--volume".into(),
                 format!("{}:{SOCKETS_INSIDE}:ro", sockets.display()),
+            ]);
+        }
+        if let Some(inside) = &svc.data {
+            let inside = inside.to_str().unwrap_or_default();
+            if !inside.starts_with('/') || inside.contains([':', ',']) || inside == "/" {
+                return Err(format!(
+                    "[[service]] {}: data {inside:?}: an absolute path in the container",
+                    svc.name
+                )
+                .into());
+            }
+            // Made here if it is not there yet; one that cannot be made shows when Podman
+            // starts the service.
+            let outside = dir.join(APP_DATA);
+            let _ = std::fs::create_dir_all(&outside);
+            args.extend([
+                "--volume".into(),
+                format!("{}:{inside}:z", outside.display()),
             ]);
         }
         if let Some(key) = &svc.key {
@@ -2414,6 +2439,52 @@ writable = true
             }
             let read_only = spec.args.iter().any(|a| a == "--read-only");
             assert_eq!(read_only, spec.name != "legacy", "{}: {args}", spec.name);
+        }
+    }
+
+    #[test]
+    fn a_service_may_keep_its_state_in_the_project_s_app_data() {
+        let text = r#"
+[kernel]
+
+[[service]]
+name = "web"
+build = "."
+data = "/data"
+
+[[service]]
+name = "worker"
+build = "."
+"#;
+        let plan = plan_on(
+            text,
+            Path::new("/srv/shop"),
+            Path::new("/bin/kernable"),
+            true,
+        )
+        .unwrap();
+        let args = |name: &str| {
+            plan.children
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap()
+                .args
+                .join(" ")
+        };
+        assert!(args("web").contains("--volume /srv/shop/app-data:/data:z"));
+        assert!(!args("worker").contains("app-data"));
+        for bad in ["data", "/", "/a:b", "/a,ro"] {
+            let text = text.replace("\"/data\"", &format!("{bad:?}"));
+            assert!(
+                plan_on(
+                    &text,
+                    Path::new("/srv/shop"),
+                    Path::new("/bin/kernable"),
+                    true
+                )
+                .is_err(),
+                "{bad}"
+            );
         }
     }
 
