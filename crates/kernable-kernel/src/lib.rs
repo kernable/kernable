@@ -1561,6 +1561,18 @@ pub(crate) fn taking_over<T>(
     }
 }
 
+/// How long a standby that was just promoted waits for its stores' locks when it opens them as
+/// the primary: the standby let go of them a moment before, and a lock can outlast that by a
+/// little (a process forked in between holds it until it executes). Failing there instead would
+/// end the kernel, and it would start again following a primary that is gone.
+pub const PROMOTED_TAKE_OVER_MS: u64 = 2_000;
+
+/// `config` for opening the stores as the primary once `standby::run` returned (promoted).
+pub fn promoted(mut config: config::Config) -> config::Config {
+    config.take_over_ms = config.take_over_ms.max(PROMOTED_TAKE_OVER_MS);
+    config
+}
+
 /// Whether `e` says another process holds a store (its lock), as a kernel being replaced does.
 fn in_use(e: &BoxError) -> bool {
     e.to_string().contains("in use by another process")

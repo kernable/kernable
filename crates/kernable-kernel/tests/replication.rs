@@ -228,7 +228,7 @@ async fn a_standby_holds_every_write_a_client_was_told_and_takes_over() {
     let promoted = promote(&standby_config.listen).await.unwrap();
     assert!(promoted.seq > 0);
     following.await.unwrap().unwrap();
-    let new = open(&standby_config).await;
+    let new = open(&kernable_kernel::promoted(standby_config.clone())).await;
     // The grants came with the records: the worker's key registers without a new grant.
     start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
     let again = submit(&standby_config.listen, place(3)).await.unwrap();
@@ -346,7 +346,7 @@ async fn a_standby_takes_over_with_the_primarys_snapshots_and_cache() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     promote(&standby_config.listen).await.unwrap();
     following.await.unwrap().unwrap();
-    let _new = open(&standby_config).await;
+    let _new = open(&kernable_kernel::promoted(standby_config.clone())).await;
     assert_eq!(snapshot_of_o1(&standby_config), Some(4));
     let mut cache_client =
         CacheServiceClient::new(transport::connect(&standby_config.listen).await.unwrap());
@@ -456,7 +456,7 @@ async fn a_scheduled_command_reaches_the_standby_and_runs_after_a_promotion() {
 
     promote(&standby_config.listen).await.unwrap();
     following.await.unwrap().unwrap();
-    let _new = open(&standby_config).await;
+    let _new = open(&kernable_kernel::promoted(standby_config.clone())).await;
     start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
     until("the promoted standby ran it", || {
         held(&standby_config).result("s1").unwrap().is_some()
@@ -563,7 +563,7 @@ async fn processes_reach_the_standby() {
 
     promote(&standby_config.listen).await.unwrap();
     following.await.unwrap().unwrap();
-    let _new = open(&standby_config).await;
+    let _new = open(&kernable_kernel::promoted(standby_config.clone())).await;
     start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
     let issued_at = issued_now();
     let request = ProcessRegistration {
@@ -650,7 +650,7 @@ async fn a_case_goes_on_after_a_failover() {
 
     promote(&standby_config.listen).await.unwrap();
     following.await.unwrap().unwrap();
-    let _new = open(&standby_config).await;
+    let _new = open(&kernable_kernel::promoted(standby_config.clone())).await;
     start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
     let added = submit(
         &standby_config.listen,
@@ -1049,7 +1049,7 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
     runtime.shutdown_background();
 
     // The standby serves, with everything the primary told.
-    let new = open(&standby_config).await;
+    let new = open(&kernable_kernel::promoted(standby_config.clone())).await;
     start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
     for (i, result) in told.iter().enumerate() {
         let again = submit(&standby_config.listen, place(i as u32))
@@ -1107,7 +1107,11 @@ async fn a_switchover_on_the_local_socket_needs_no_key_and_makes_the_same_checks
     let alone_socket = dir.0.join("alone-admin.sock");
     alone.admin_socket = Some(alone_socket.display().to_string());
     let _alone = open(&alone).await;
-    until("the local socket is up", || alone_socket.exists()).await;
+    // Up once it takes a connection: the file is there from bind on, before it listens.
+    until("the local socket is up", || {
+        std::os::unix::net::UnixStream::connect(&alone_socket).is_ok()
+    })
+    .await;
     assert!(
         local(&alone_socket, "GET", "/api/switchover")
             .await
@@ -1172,7 +1176,7 @@ async fn a_switchover_on_the_local_socket_needs_no_key_and_makes_the_same_checks
     runtime.shutdown_background();
 
     // The standby serves, with everything the primary told.
-    let _new = open(&standby_config).await;
+    let _new = open(&kernable_kernel::promoted(standby_config.clone())).await;
     start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
     for (i, result) in told.iter().enumerate() {
         let again = submit(&standby_config.listen, place(i as u32))

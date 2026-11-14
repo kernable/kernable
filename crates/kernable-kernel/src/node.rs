@@ -185,7 +185,8 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
             }
         };
         if answer.granted {
-            let kernel = Kernel::open(config.clone())?;
+            // Its standby (if it followed before) let go of the stores a moment ago.
+            let kernel = Kernel::open(crate::promoted(config.clone()))?;
             let primary = kernel
                 .replication
                 .clone()

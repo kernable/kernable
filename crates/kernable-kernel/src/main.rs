@@ -895,7 +895,7 @@ async fn start(config: Config, dev_notes: Option<Vec<String>>) -> ExitCode {
         match standby::run(config.clone()).await {
             Ok(()) => {
                 leaving.abort();
-                run_kernel(config).await
+                run_kernel(kernable_kernel::promoted(config)).await
             }
             Err(e) => Err(e),
         }
