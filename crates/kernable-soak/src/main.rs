@@ -525,6 +525,8 @@ async fn run(a: Args) -> Result<(), String> {
     let filling = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut exits: BTreeMap<String, u64> = BTreeMap::new();
     let mut rounds = Vec::new();
+    // What each check round carries to the next: it reads only the log after it.
+    let mut checked = check::Checked::default();
     let failed = loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let now = Instant::now();
@@ -585,6 +587,7 @@ async fn run(a: Args) -> Result<(), String> {
                 standby.as_deref(),
                 &load,
                 &client,
+                &mut checked,
             )
             .await;
             say(&format!(

@@ -67,6 +67,19 @@ pub struct Log {
     pub head: u64,
     /// Problems `Store::verify` found (S1).
     pub integrity: Vec<String>,
+    /// The position after which `events` start: 0 for the whole log, else a window
+    /// ([`Log::read_since`]).
+    pub after: u64,
+}
+
+/// What the checks carry from one window of the log to the next ([`Log::check_carried`]), so a
+/// long-running check reads only what is new: the position checked up to, each stream's
+/// version and each event type's highest payload version.
+#[derive(Debug, Default, Clone)]
+pub struct Carry {
+    pub head: u64,
+    versions: BTreeMap<(String, String, String, String), u64>,
+    schemas: BTreeMap<(String, String), u32>,
 }
 
 impl Log {
@@ -104,16 +117,64 @@ impl Log {
         Ok(log)
     }
 
+    /// The events after `after` only (a window), with the commands they belong to, the
+    /// pending ones and `ids`; the store's integrity, listeners and index as they are now.
+    pub fn read_since(
+        store: &dyn Store,
+        kernel_key_ids: &[String],
+        ids: &[String],
+        after: u64,
+    ) -> Result<Log> {
+        let mut log = Log {
+            head: store.head_position()?,
+            listeners: store.listeners()?,
+            index: store.index()?,
+            integrity: store.verify(kernel_key_ids)?.problems,
+            after,
+            ..Log::default()
+        };
+        let mut from = after;
+        loop {
+            let events = store.read_all(from, 1000)?;
+            let Some(last) = events.last() else { break };
+            from = last.global_position;
+            log.events.extend(events);
+        }
+        for p in store.pending()? {
+            log.pending.insert(p.command.command_id);
+        }
+        let ids: BTreeSet<String> = log
+            .events
+            .iter()
+            .map(|e| e.command_id.clone())
+            .chain(log.pending.iter().cloned())
+            .chain(ids.iter().cloned())
+            .collect();
+        for id in ids {
+            let command = store.command(&id)?.map(|p| p.command);
+            log.commands.insert(id.clone(), command);
+            log.results.insert(id.clone(), store.result(&id)?);
+        }
+        Ok(log)
+    }
+
     /// Checks S1–S9.
     pub fn check(&self) -> Vec<Violation> {
+        self.check_carried(&mut Carry::default())
+    }
+
+    /// Checks S1–S9 on a window of the log, from what `carry` holds of the windows before it,
+    /// and carries this one's on.
+    pub fn check_carried(&self, carry: &mut Carry) -> Vec<Violation> {
         let mut v = Vec::new();
         for problem in &self.integrity {
             v.push(violation(S1, problem.clone()));
         }
         self.positions(&mut v);
-        self.streams(&mut v);
+        self.streams(&mut carry.versions, &mut v);
         self.commands(&mut v);
-        self.schemas(&mut v);
+        self.schemas(&mut carry.schemas, &mut v);
+        carry.head = self.head;
         for l in &self.listeners {
             if l.position > self.head {
                 v.push(violation(
@@ -125,13 +186,13 @@ impl Log {
                 ));
             }
         }
-        self.keys(&mut v);
+        self.keys(&carry.versions, &mut v);
         v
     }
 
     /// The event at a global position, if the log has it.
     pub fn event(&self, position: u64) -> Option<&Event> {
-        let i = usize::try_from(position.checked_sub(1)?).ok()?;
+        let i = usize::try_from(position.checked_sub(self.after + 1)?).ok()?;
         self.events
             .get(i)
             .filter(|e| e.global_position == position)
@@ -141,7 +202,7 @@ impl Log {
     /// S2: the positions are exactly 1..=head, in order.
     fn positions(&self, v: &mut Vec<Violation>) {
         for (i, e) in self.events.iter().enumerate() {
-            let expected = i as u64 + 1;
+            let expected = self.after + i as u64 + 1;
             if e.global_position != expected {
                 v.push(violation(
                     S2,
@@ -150,7 +211,7 @@ impl Log {
                 return;
             }
         }
-        let last = self.events.len() as u64;
+        let last = self.after + self.events.len() as u64;
         if self.head != last {
             v.push(violation(
                 S2,
@@ -160,14 +221,17 @@ impl Log {
     }
 
     /// S3: every stream's versions are exactly 1..=n, in log order.
-    fn streams(&self, v: &mut Vec<Violation>) {
-        let mut versions: BTreeMap<(&str, &str, &str, &str), u64> = BTreeMap::new();
+    fn streams(
+        &self,
+        versions: &mut BTreeMap<(String, String, String, String), u64>,
+        v: &mut Vec<Violation>,
+    ) {
         for e in &self.events {
             let stream = (
-                e.tenant_id.as_str(),
-                e.domain.as_str(),
-                e.aggregate_type.as_str(),
-                e.aggregate_id.as_str(),
+                e.tenant_id.clone(),
+                e.domain.clone(),
+                e.aggregate_type.clone(),
+                e.aggregate_id.clone(),
             );
             let version = versions.entry(stream).or_default();
             if e.version != *version + 1 {
@@ -276,11 +340,10 @@ impl Log {
     }
 
     /// S7: per qualified event type, the payload version never goes down.
-    fn schemas(&self, v: &mut Vec<Violation>) {
-        let mut highest: BTreeMap<(&str, &str), u32> = BTreeMap::new();
+    fn schemas(&self, highest: &mut BTreeMap<(String, String), u32>, v: &mut Vec<Violation>) {
         for e in &self.events {
             let schema = highest
-                .entry((e.domain.as_str(), e.event_type.as_str()))
+                .entry((e.domain.clone(), e.event_type.clone()))
                 .or_default();
             if e.schema < *schema {
                 v.push(violation(
@@ -298,19 +361,11 @@ impl Log {
     /// S9: no key ID is held by two streams, a key is held either by its ID or by a vault
     /// value, and only streams with events hold anything. Personal keys live in the vault, so
     /// their uniqueness is the kernel's to keep.
-    fn keys(&self, v: &mut Vec<Violation>) {
-        let written: BTreeSet<(&str, &str, &str, &str)> = self
-            .events
-            .iter()
-            .map(|e| {
-                (
-                    e.tenant_id.as_str(),
-                    e.domain.as_str(),
-                    e.aggregate_type.as_str(),
-                    e.aggregate_id.as_str(),
-                )
-            })
-            .collect();
+    fn keys(
+        &self,
+        written: &BTreeMap<(String, String, String, String), u64>,
+        v: &mut Vec<Violation>,
+    ) {
         let mut holders: BTreeMap<&[u8], &StreamId> = BTreeMap::new();
         for (stream, index) in &self.index {
             let name = format!(
@@ -318,12 +373,12 @@ impl Log {
                 stream.tenant_id, stream.domain, stream.aggregate_type, stream.aggregate_id
             );
             let key = (
-                stream.tenant_id.as_str(),
-                stream.domain.as_str(),
-                stream.aggregate_type.as_str(),
-                stream.aggregate_id.as_str(),
+                stream.tenant_id.clone(),
+                stream.domain.clone(),
+                stream.aggregate_type.clone(),
+                stream.aggregate_id.clone(),
             );
-            if !written.contains(&key) {
+            if !written.contains_key(&key) {
                 v.push(violation(
                     S9,
                     format!("{name} holds keys or facts but has no events"),
@@ -392,6 +447,9 @@ struct Connection {
     up_to: u64,
     /// The highest position it acknowledged.
     acked: u64,
+    /// The newest delivered position checked and forgotten already ([`Observed::forget_outcomes`]):
+    /// what comes later must come after it.
+    forgotten: u64,
 }
 
 impl Observed {
@@ -427,6 +485,20 @@ impl Observed {
     pub fn acked(&mut self, listener: &str, position: u64) {
         let connection = self.connection(listener);
         connection.acked = connection.acked.max(position);
+    }
+
+    /// Forgets what clients were told so far, once it was checked: a long run keeps only what
+    /// came after its last check (see [`Log::check_carried`]).
+    pub fn forget_outcomes(&mut self) {
+        self.outcomes.clear();
+        for connections in self.listeners.values_mut() {
+            for c in connections {
+                if let Some(last) = c.delivered.last() {
+                    c.forgotten = c.forgotten.max(last.global_position);
+                }
+                c.delivered.clear();
+            }
+        }
     }
 
     /// The IDs of every command a client was told about.
@@ -529,7 +601,7 @@ impl Connection {
     /// O2–O4 for one connection.
     fn check(&self, name: &str, n: usize, log: &Log, v: &mut Vec<Violation>) {
         let at = format!("listener {name}, connection {n}");
-        let mut last = self.after;
+        let mut last = self.after.max(self.forgotten);
         for e in &self.delivered {
             let pos = e.global_position;
             if pos <= last {
@@ -549,6 +621,8 @@ impl Connection {
                 ));
             }
             match log.event(pos) {
+                // Before the window this check reads: checked in a round before.
+                _ if pos <= log.after => {}
                 Some(stored) if stored == e => {}
                 Some(_) => v.push(violation(
                     O4,
@@ -573,7 +647,10 @@ impl Connection {
         let missing: Vec<u64> = log
             .events
             .iter()
-            .filter(|e| e.global_position > self.after && e.global_position <= self.acked)
+            .filter(|e| {
+                e.global_position > self.after.max(self.forgotten)
+                    && e.global_position <= self.acked
+            })
             .filter(|e| matches(&self.types, e))
             .map(|e| e.global_position)
             .filter(|pos| !delivered.contains(pos))
@@ -625,4 +702,80 @@ fn describe(outcome: Option<&Outcome>) -> String {
 
 fn violation(invariant: &'static str, detail: String) -> Violation {
     Violation { invariant, detail }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(position: u64, stream: &str, version: u64) -> Event {
+        Event {
+            global_position: position,
+            tenant_id: "t".into(),
+            domain: "bank".into(),
+            aggregate_type: "account".into(),
+            aggregate_id: stream.into(),
+            version,
+            event_type: "Deposited".into(),
+            schema: 1,
+            command_id: format!("c{position}"),
+            ..Default::default()
+        }
+    }
+
+    fn window(after: u64, events: Vec<Event>) -> Log {
+        let head = after + events.len() as u64;
+        let mut log = Log {
+            after,
+            head,
+            events,
+            ..Log::default()
+        };
+        // Each event its own committed command, as the store would hold it.
+        for e in &log.events {
+            log.commands.insert(
+                e.command_id.clone(),
+                Some(Command {
+                    tenant_id: e.tenant_id.clone(),
+                    domain: e.domain.clone(),
+                    aggregate_type: e.aggregate_type.clone(),
+                    aggregate_id: e.aggregate_id.clone(),
+                    ..Default::default()
+                }),
+            );
+            log.results.insert(
+                e.command_id.clone(),
+                Some(CommandResult {
+                    command_id: e.command_id.clone(),
+                    outcome: Some(Outcome::Committed(kernable_core::proto::Committed {
+                        events: vec![e.clone()],
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
+            );
+        }
+        log
+    }
+
+    #[test]
+    fn windows_checked_one_after_another_hold_what_the_whole_log_holds() {
+        let mut carry = Carry::default();
+        // a1 starts in the first window and goes on in the second.
+        let first = window(
+            0,
+            vec![event(1, "a1", 1), event(2, "a2", 1), event(3, "a1", 2)],
+        );
+        assert!(first.check_carried(&mut carry).is_empty());
+        let second = window(3, vec![event(4, "a1", 3), event(5, "a2", 2)]);
+        let found = second.check_carried(&mut carry);
+        assert!(found.is_empty(), "{found:?}");
+        // A version skipped across windows, and a gap in the positions, are found.
+        let third = window(5, vec![event(6, "a1", 5)]);
+        let found = third.check_carried(&mut carry.clone());
+        assert!(found.iter().any(|v| v.invariant == S3), "{found:?}");
+        let gap = window(5, vec![event(7, "a2", 3)]);
+        let found = gap.check_carried(&mut carry.clone());
+        assert!(found.iter().any(|v| v.invariant == S2), "{found:?}");
+    }
 }

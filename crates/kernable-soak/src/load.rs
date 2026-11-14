@@ -69,6 +69,7 @@ pub struct Stats {
 /// A command rejected with `unique_taken` or `requirement_missing`, and when the kernel decided:
 /// at a log position from `after` (the client's last committed event) to before `before` (the
 /// first event of its next committed command; `None`: none yet).
+#[derive(Clone)]
 pub struct Refusal {
     pub code: String,
     pub command: Command,

@@ -1,6 +1,8 @@
 //! A check round, while the load and the faults pause: wait until every listener has caught
 //! up, then check every invariant of the store (S1–S9) and of what clients and the audit
-//! listener were told (O1–O4), and the apps' own rules against the log:
+//! listener were told (O1–O4), and the apps' own rules against the log. Each round reads only
+//! the log after the round before ([`Checked`] carries what the rules need of it), so a run of
+//! days checks in bounded memory:
 //!
 //! - B1: no account is ever below zero;
 //! - B2: every withdrawal of 50 or more is flagged exactly once, and nothing else is;
@@ -27,7 +29,7 @@ use kernable_core::{
     proto::{Command, UniqueKey, command_result::Outcome},
     signing,
 };
-use kernable_store::invariants::Log;
+use kernable_store::invariants::{Carry, Log};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -58,14 +60,39 @@ fn positions(store: &str) -> Result<Positions, String> {
     Ok((head, listeners, pending))
 }
 
-/// Reads `store` as it is now, with its kernels' keys, off the runtime: a long log takes a
-/// while, and the load, the audit listener and the client of the check round go on meanwhile.
-async fn read_log(store: &str, kernel_key_ids: &[String], ids: &[String]) -> Result<Log, String> {
+/// Reads the log after `after` from `store` as it is now, with its kernels' keys and the
+/// commands `ids`, off the runtime: the load, the audit listener and the client of the check
+/// round go on meanwhile.
+async fn read_log(
+    store: &str,
+    kernel_key_ids: &[String],
+    ids: &[String],
+    after: u64,
+) -> Result<Log, String> {
     let (store, keys, ids) = (store.to_owned(), kernel_key_ids.to_vec(), ids.to_vec());
     tokio::task::spawn_blocking(move || {
         kernable_store::open_read_only(&store)
-            .and_then(|read| Log::read_with(read.as_ref(), &keys, &ids))
+            .and_then(|read| Log::read_since(read.as_ref(), &keys, &ids, after))
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The stored results of commands `ids`, by ID (`None`: not stored, or pending).
+async fn results_of(
+    store: &str,
+    ids: Vec<String>,
+) -> Result<BTreeMap<String, Option<kernable_core::proto::CommandResult>>, String> {
+    let store = store.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let read = kernable_store::open_read_only(&store).map_err(|e| e.to_string())?;
+        let mut out = BTreeMap::new();
+        for id in ids {
+            let r = read.result(&id).map_err(|e| e.to_string())?;
+            out.insert(id, r);
+        }
+        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -105,6 +132,30 @@ struct Row {
     balance: i64,
     flags: i64,
 }
+type Key = (&'static str, String);
+
+/// What the rules carry from one round to the next: the store invariants' state, and each
+/// app's accounts as the log left them.
+#[derive(Default)]
+pub struct Checked {
+    carry: Carry,
+    /// Balance and flags per account (B1, B3).
+    accounts: BTreeMap<Key, (i64, i64)>,
+    /// Withdrawals of 50 or more, by position, ever (B2, B7).
+    big: BTreeMap<u64, Key>,
+    /// Flags per withdrawal position, ever (B2).
+    flagged: BTreeMap<u64, Vec<Key>>,
+    /// Big withdrawals checked already (flagged, or justly parked).
+    settled: BTreeSet<u64>,
+    /// Parked positions checked already (B7).
+    parked_seen: BTreeSet<u64>,
+    /// Number and open per account; per number, who held it; per account, open or not (B4–B6).
+    numbers: BTreeMap<Key, (Option<String>, bool)>,
+    holders: BTreeMap<Key, History<Option<String>>>,
+    opens: BTreeMap<Key, History<bool>>,
+    /// Refusals checked already (B6): the load's list only grows.
+    refusals_checked: usize,
+}
 
 pub async fn round(
     store: &str,
@@ -112,6 +163,7 @@ pub async fn round(
     standby: Option<&str>,
     load: &Load,
     client: &Kernable,
+    checked: &mut Checked,
 ) -> Report {
     let started = Instant::now();
     let mut violations = Vec::new();
@@ -122,9 +174,10 @@ pub async fn round(
             0
         }
     };
+    let after = checked.carry.head;
     let mut ids = load.observed.lock().unwrap().command_ids();
     ids.extend(load.stats.unanswered.lock().unwrap().iter().cloned());
-    let log = match read_log(store, kernel_key_ids, &ids).await {
+    let log = match read_log(store, kernel_key_ids, &ids, after).await {
         Ok(log) => log,
         Err(e) => {
             violations.push(format!("reading the store: {e}"));
@@ -135,24 +188,26 @@ pub async fn round(
             };
         }
     };
-    violations.extend(log.check().iter().map(ToString::to_string));
     violations.extend(
-        load.observed
-            .lock()
-            .unwrap()
-            .check(&log)
+        log.check_carried(&mut checked.carry)
             .iter()
             .map(ToString::to_string),
     );
+    {
+        let mut observed = load.observed.lock().unwrap();
+        violations.extend(observed.check(&log).iter().map(ToString::to_string));
+        // Checked: what comes after is checked next round.
+        observed.forget_outcomes();
+    }
     // A pair: the standby holds exactly what the primary holds, once it has caught up (P2).
     if let Some(standby) = standby {
         let waited = Instant::now();
         loop {
-            match read_log(standby, kernel_key_ids, &ids).await {
+            match read_log(standby, kernel_key_ids, &[], after).await {
                 Ok(s) if s.events == log.events => break,
                 Ok(s) if waited.elapsed() > Duration::from_secs(120) => {
                     violations.push(format!(
-                        "P2 standby: {} events, the primary {} ({} differ)",
+                        "P2 standby: {} events after {after}, the primary {} ({} differ)",
                         s.events.len(),
                         log.events.len(),
                         s.events
@@ -171,14 +226,21 @@ pub async fn round(
             }
         }
     }
-    let expected = bank_rules(&log, &mut violations);
-    index_rules(&log, &load.refusals.lock().unwrap(), &mut violations);
+    bank_rules(&log, checked, &mut violations);
+    parking_rules(store, &log, checked, &mut violations).await;
+    let refusals: Vec<Refusal> = {
+        let all = load.refusals.lock().unwrap();
+        all[checked.refusals_checked.min(all.len())..].to_vec()
+    };
+    checked.refusals_checked += refusals.len();
+    index_rules(&log, checked, &refusals, &mut violations);
 
     // B3: every account of every app, as its read model answers.
     for domain in DOMAINS {
         for a in 0..ACCOUNTS {
             let id = format!("a{a}");
-            let want = expected
+            let want = checked
+                .accounts
                 .get(&(domain, id.clone()))
                 .map_or(Row::default(), |&(balance, flags)| Row { balance, flags });
             let query = Query::new(domain, "GetAccount")
@@ -203,23 +265,15 @@ pub async fn round(
     }
 }
 
-/// B1 and B2 over the log; the balance and flags of every account.
-fn bank_rules(
-    log: &Log,
-    violations: &mut Vec<String>,
-) -> BTreeMap<(&'static str, String), (i64, i64)> {
-    let events = &log.events;
-    let mut accounts: BTreeMap<(&'static str, String), (i64, i64)> = BTreeMap::new();
-    // Withdrawals of 50 or more by position, and how often each was flagged.
-    let mut big: BTreeMap<u64, (&'static str, String)> = BTreeMap::new();
-    let mut flagged: BTreeMap<u64, Vec<(&'static str, String)>> = BTreeMap::new();
-    for e in events {
+/// B1 and B2 over the new events, from the accounts and flags the rounds before left.
+fn bank_rules(log: &Log, checked: &mut Checked, violations: &mut Vec<String>) {
+    for e in &log.events {
         let Some(domain) = DOMAINS.iter().find(|d| **d == e.domain) else {
             continue;
         };
         let data: Value = serde_json::from_slice(&e.payload).unwrap_or(Value::Null);
         let key = (*domain, e.aggregate_id.clone());
-        let account = accounts.entry(key.clone()).or_default();
+        let account = checked.accounts.entry(key.clone()).or_default();
         let amount = data["amount"].as_i64().unwrap_or(0);
         match e.event_type.as_str() {
             "Deposited" => account.0 += amount,
@@ -232,50 +286,45 @@ fn bank_rules(
                     ));
                 }
                 if amount >= 50 {
-                    big.insert(e.global_position, key);
+                    checked.big.insert(e.global_position, key);
                 }
             }
             "Flagged" => {
                 account.1 += 1;
                 let at = data["position"].as_u64().unwrap_or(0);
-                flagged.entry(at).or_default().push(key);
+                checked.flagged.entry(at).or_default().push(key);
             }
             "Opened" | "Closed" | "Numbered" => {}
             other => violations.push(format!("unexpected event {other} at {}", e.global_position)),
         }
     }
-    for (position, key) in &big {
-        match flagged.get(position).map(Vec::as_slice) {
-            Some([one]) if one == key => {}
-            Some(flags) => violations.push(format!(
+    // Flags: each for a big withdrawal, once.
+    for (position, flags) in &checked.flagged {
+        match checked.big.get(position) {
+            Some(key) if flags.len() == 1 && &flags[0] == key => {}
+            Some(key) => violations.push(format!(
                 "B2 flagged once: the withdrawal at {position} ({key:?}) was flagged as {flags:?}"
             )),
             None => violations.push(format!(
-                "B2 flagged once: the withdrawal at {position} ({key:?}) was never flagged; \
-                 its Flag command: {}",
-                flag_command(log, *position)
+                "B2 flagged once: {flags:?} flag position {position}, no big withdrawal"
             )),
         }
     }
-    for (position, flags) in &flagged {
-        if !big.contains_key(position) {
-            violations.push(format!(
-                "B2 flagged once: {flags:?} flag position {position}, no big withdrawal"
-            ));
-        }
-    }
-    parking_rules(log, &big, &flagged, violations);
-    accounts
+    // Reported once: kept as one entry so the next rounds see it again only if it changes.
+    checked
+        .flagged
+        .retain(|p, f| checked.big.contains_key(p) && f.len() == 1);
 }
 
-/// B7: what the flaggers parked, against the withdrawals and their `Flag` commands.
-fn parking_rules(
+/// B7: what the flaggers parked, against the withdrawals and their `Flag` commands; and every
+/// big withdrawal not flagged by now (everything is quiet) was parked: nothing lost silently.
+async fn parking_rules(
+    store: &str,
     log: &Log,
-    big: &BTreeMap<u64, (&'static str, String)>,
-    flagged: &BTreeMap<u64, Vec<(&'static str, String)>>,
+    checked: &mut Checked,
     violations: &mut Vec<String>,
 ) {
-    let mut parked: BTreeMap<u64, (&str, &str, &str)> = BTreeMap::new();
+    let mut parked: BTreeMap<u64, (String, String, String)> = BTreeMap::new();
     for l in log
         .listeners
         .iter()
@@ -284,51 +333,79 @@ fn parking_rules(
         for p in &l.parked {
             parked.insert(
                 p.position,
-                (l.name.as_str(), p.code.as_str(), p.message.as_str()),
+                (l.name.clone(), p.code.clone(), p.message.clone()),
             );
         }
     }
-    for (position, (listener, code, message)) in &parked {
+    let open: Vec<u64> = checked
+        .big
+        .keys()
+        .filter(|p| !checked.settled.contains(p) && !checked.flagged.contains_key(p))
+        .copied()
+        .collect();
+    let fresh: Vec<u64> = parked
+        .keys()
+        .filter(|p| !checked.parked_seen.contains(p))
+        .copied()
+        .collect();
+    let ids: Vec<String> = open
+        .iter()
+        .chain(&fresh)
+        .map(|p| format!("flag-{p}"))
+        .collect();
+    let results = match results_of(store, ids).await {
+        Ok(r) => r,
+        Err(e) => {
+            violations.push(format!("B7: reading the Flag commands: {e}"));
+            return;
+        }
+    };
+    let describe = |position: u64| -> String {
         let id = format!("flag-{position}");
-        let rejected = match log.results.get(&id) {
+        match results.get(&id) {
+            None | Some(None) => format!("{id} was never stored, or is pending"),
             Some(Some(result)) => match &result.outcome {
-                Some(Outcome::Rejected(r)) => Some(r.code.as_str()),
+                Some(Outcome::Rejected(r)) => format!("{id} rejected ({}: {})", r.code, r.message),
+                Some(Outcome::Committed(_)) => format!("{id} committed, without a Flagged event"),
+                other => format!("{id}: {other:?}"),
+            },
+        }
+    };
+    for position in &fresh {
+        let (listener, code, message) = &parked[position];
+        let rejected = match results.get(&format!("flag-{position}")) {
+            Some(Some(result)) => match &result.outcome {
+                Some(Outcome::Rejected(r)) => Some(r.code.clone()),
                 _ => None,
             },
             _ => None,
         };
-        if !big.contains_key(position) || flagged.contains_key(position) || rejected != Some(*code)
+        if !checked.big.contains_key(position)
+            || checked.flagged.contains_key(position)
+            || rejected.as_deref() != Some(code.as_str())
         {
             violations.push(format!(
                 "B7 justified parking: {listener} parked the event at {position} ({code}: \
                  {message}); its Flag command: {}",
-                flag_command(log, *position)
+                describe(*position)
             ));
         }
+        checked.parked_seen.insert(*position);
     }
-    for (position, key) in big {
-        if !flagged.contains_key(position) && !parked.contains_key(position) {
+    for position in open {
+        if !parked.contains_key(&position) {
             violations.push(format!(
-                "B7 nothing lost silently: the withdrawal at {position} ({key:?}) was neither \
+                "B7 nothing lost silently: the withdrawal at {position} ({:?}) was neither \
                  flagged nor parked; its Flag command: {}",
-                flag_command(log, *position)
+                checked.big[&position],
+                describe(position)
             ));
         }
+        checked.settled.insert(position);
     }
-}
-
-/// What became of the reactor's Flag command for the withdrawal at `position`.
-fn flag_command(log: &Log, position: u64) -> String {
-    let id = format!("flag-{position}");
-    match log.results.get(&id) {
-        None => format!("{id} was never stored"),
-        Some(None) => format!("{id} is pending"),
-        Some(Some(result)) => match &result.outcome {
-            Some(Outcome::Rejected(r)) => format!("{id} rejected ({}: {})", r.code, r.message),
-            Some(Outcome::Committed(_)) => format!("{id} committed, without a Flagged event"),
-            other => format!("{id}: {other:?}"),
-        },
-    }
+    // Flagged ones are settled too: a later flag of them shows in `flagged` again.
+    let flagged: Vec<u64> = checked.flagged.keys().copied().collect();
+    checked.settled.extend(flagged);
 }
 
 /// What held a number or whether an account was open, from a log position on: in order.
@@ -352,30 +429,33 @@ fn ever<T>(
             .any(|(p, v)| *p > after && *p < before && holds(Some(v)))
 }
 
-/// B4, B5 and B6 over the log, the kernel's index and the refusals the load saw.
-fn index_rules(log: &Log, refusals: &[Refusal], violations: &mut Vec<String>) {
-    // Per account: its number and whether it is open; per number, who held it; per account,
-    // when it opened and closed.
-    let mut accounts: BTreeMap<(&str, &str), (Option<&str>, bool)> = BTreeMap::new();
-    let mut holders: BTreeMap<(&str, &str), History<Option<&str>>> = BTreeMap::new();
-    let mut opens: BTreeMap<(&str, &str), History<bool>> = BTreeMap::new();
-    let payloads: Vec<Value> = log
-        .events
-        .iter()
-        .map(|e| serde_json::from_slice(&e.payload).unwrap_or(Value::Null))
-        .collect();
-    for (e, data) in log.events.iter().zip(&payloads) {
+/// B4, B5 and B6 over the new events, the kernel's index and the refusals new since the round
+/// before.
+fn index_rules(
+    log: &Log,
+    checked: &mut Checked,
+    refusals: &[Refusal],
+    violations: &mut Vec<String>,
+) {
+    for e in &log.events {
         let Some(domain) = DOMAINS.iter().find(|d| **d == e.domain) else {
             continue;
         };
-        let (id, at) = (e.aggregate_id.as_str(), e.global_position);
-        let account = accounts.entry((domain, id)).or_default();
+        let data: Value = serde_json::from_slice(&e.payload).unwrap_or(Value::Null);
+        let (id, at) = (e.aggregate_id.clone(), e.global_position);
+        let account = checked
+            .numbers
+            .entry((domain, id.clone()))
+            .or_default()
+            .clone();
         match e.event_type.as_str() {
             "Numbered" => {
-                let number = data["number"].as_str();
-                if let Some(n) = number
-                    && let Some((_, Some(other))) =
-                        holders.get(&(*domain, n)).and_then(|h| h.last())
+                let number = data["number"].as_str().map(str::to_owned);
+                if let Some(n) = &number
+                    && let Some((_, Some(other))) = checked
+                        .holders
+                        .get(&(*domain, n.clone()))
+                        .and_then(|h| h.last())
                     && *other != id
                 {
                     violations.push(format!(
@@ -383,22 +463,46 @@ fn index_rules(log: &Log, refusals: &[Refusal], violations: &mut Vec<String>) {
                     ));
                 }
                 if account.0 != number {
-                    if let Some(old) = account.0 {
-                        holders.entry((domain, old)).or_default().push((at, None));
+                    if let Some(old) = &account.0 {
+                        checked
+                            .holders
+                            .entry((domain, old.clone()))
+                            .or_default()
+                            .push((at, None));
                     }
-                    if let Some(n) = number {
-                        holders.entry((domain, n)).or_default().push((at, Some(id)));
+                    if let Some(n) = &number {
+                        checked
+                            .holders
+                            .entry((domain, n.clone()))
+                            .or_default()
+                            .push((at, Some(id.clone())));
                     }
                 }
-                account.0 = number;
+                checked
+                    .numbers
+                    .get_mut(&(*domain, id.clone()))
+                    .expect("entered")
+                    .0 = number;
             }
             "Opened" | "Closed" => {
-                account.1 = e.event_type == "Opened";
-                opens.entry((domain, id)).or_default().push((at, account.1));
+                let open = e.event_type == "Opened";
+                checked
+                    .numbers
+                    .get_mut(&(*domain, id.clone()))
+                    .expect("entered")
+                    .1 = open;
+                checked
+                    .opens
+                    .entry((domain, id.clone()))
+                    .or_default()
+                    .push((at, open));
             }
             "Withdrawn" => {
                 if let Some(to) = data["to"].as_str()
-                    && !accounts.get(&(*domain, to)).is_some_and(|a| a.1)
+                    && !checked
+                        .numbers
+                        .get(&(*domain, to.to_owned()))
+                        .is_some_and(|a| a.1)
                 {
                     violations.push(format!(
                         "B5 requirement: the withdrawal at {at} from {domain} {id} was sent to \
@@ -413,11 +517,11 @@ fn index_rules(log: &Log, refusals: &[Refusal], violations: &mut Vec<String>) {
     // B4: the index holds what the log leaves every account with.
     type Held = (Vec<(String, Vec<u8>)>, Vec<String>);
     let mut want: BTreeMap<(String, String), Held> = BTreeMap::new();
-    for (&(domain, id), &(number, open)) in &accounts {
-        let keys = number.map_or(Vec::new(), |n| {
+    for ((domain, id), (number, open)) in &checked.numbers {
+        let keys = number.as_ref().map_or(Vec::new(), |n| {
             let stream = Command {
                 tenant_id: TENANT.into(),
-                domain: domain.into(),
+                domain: (*domain).into(),
                 aggregate_type: "account".into(),
                 ..Default::default()
             };
@@ -431,12 +535,12 @@ fn index_rules(log: &Log, refusals: &[Refusal], violations: &mut Vec<String>) {
                 signing::unique_key_id(&stream, &key).to_vec(),
             )]
         });
-        let facts = if open {
+        let facts = if *open {
             vec!["open".to_owned()]
         } else {
             Vec::new()
         };
-        want.insert((domain.to_owned(), id.to_owned()), (keys, facts));
+        want.insert(((*domain).to_owned(), id.clone()), (keys, facts));
     }
     let mut got: BTreeMap<(String, String), Held> = BTreeMap::new();
     for (stream, index) in &log.index {
@@ -482,17 +586,23 @@ fn index_rules(log: &Log, refusals: &[Refusal], violations: &mut Vec<String>) {
         let id = c.aggregate_id.as_str();
         let justified = match (r.code.as_str(), c.command_type.as_str()) {
             ("unique_taken", "Number") => data["number"].as_str().is_some_and(|n| {
-                holders.get(&(*domain, n)).is_some_and(|h| {
-                    ever(
-                        h,
-                        r.after,
-                        before,
-                        |v| matches!(v, Some(Some(other)) if *other != id),
-                    )
-                })
+                checked
+                    .holders
+                    .get(&(*domain, n.to_owned()))
+                    .is_some_and(|h| {
+                        ever(
+                            h,
+                            r.after,
+                            before,
+                            |v| matches!(v, Some(Some(other)) if other != id),
+                        )
+                    })
             }),
             ("requirement_missing", "Withdraw") => data["to"].as_str().is_some_and(|to| {
-                let h = opens.get(&(*domain, to)).map_or(&[][..], Vec::as_slice);
+                let h = checked
+                    .opens
+                    .get(&(*domain, to.to_owned()))
+                    .map_or(&[][..], Vec::as_slice);
                 ever(h, r.after, before, |v| v != Some(&true))
             }),
             _ => false,
