@@ -39,13 +39,15 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           shown once
   kernable cloud projects [--team <team>] [create <name> [--plan <plan>] [--escrow-key <age1…>] | show <name>
                        | usage <name> [--month <yyyy-mm>] | stop <name> | start <name>
-                       | domain add <name> <host> | domain remove <name> <host>]
+                       | domain add <name> <host> | domain list <name> | domain remove <name> <host>]
                                           A new project is placed at once, past the checks before
                                           a team's first project. --escrow-key: your age key
                                           (age-keygen) its vault key is kept sealed for beside its
                                           backups, only you can open it; set when it is created,
                                           never after. A host name of your own: set the TXT record
-                                          `domain add` names, then run it again
+                                          `domain add` names, then run it again; keep the record:
+                                          it is checked every day, and a name whose token is
+                                          missing for 7 days is dropped (`domain list` shows it)
   kernable cloud deploy [<dir>] --project <name> [--team <team>]
                                           Packs the app in <dir> (default .; what .kernableignore
                                           names stays here), puts it, has kernable Cloud build its
@@ -1014,6 +1016,35 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                 println!(
                     "{name}: {host} is checked and the project's (its routes come with a deploy)"
                 )
+            });
+        }
+        ["domain", "list", name] => {
+            let v = s.call(
+                "GET",
+                &format!("/v1/teams/{t}/projects/{name}/domains"),
+                None,
+            )?;
+            s.show(&v, |v| {
+                let held = v.as_array().cloned().unwrap_or_default();
+                if held.is_empty() {
+                    println!("{name}: no host names of its own");
+                }
+                for h in held {
+                    let host = h["host"].as_str().unwrap_or("?");
+                    match h["missing_since"].as_i64() {
+                        Some(since) => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs() as i64);
+                            let days = (now - since).max(0) / 86_400;
+                            println!(
+                                "{host}\tits TXT token has been missing for {days} days: set it again, \
+                                 or the name is dropped after 7"
+                            )
+                        }
+                        None => println!("{host}\tchecked"),
+                    }
+                }
             });
         }
         ["domain", "remove", name, host] => {
