@@ -39,7 +39,8 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           shown once
   kernable cloud projects [--team <team>] [create <name> [--plan <plan>] [--escrow-key <age1…>] | show <name>
                        | usage <name> [--month <yyyy-mm>] | stop <name> | start <name>
-                       | domain add <name> <host> | domain list <name> | domain remove <name> <host>]
+                       | domain add <name> <host> | domain list <name> | domain remove <name> <host>
+                       | backups <name> | backups create <name>]
                                           A new project is placed at once, past the checks before
                                           a team's first project. --escrow-key: your age key
                                           (age-keygen) its vault key is kept sealed for beside its
@@ -48,13 +49,17 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           `domain add` names, then run it again; keep the record:
                                           it is checked every day, and a name whose token is
                                           missing for 7 days is dropped (`domain list` shows it)
-  kernable cloud deploy [<dir>] --project <name> [--team <team>]
+  kernable cloud deploy [<dir>] --project <name> [--team <team>] [--backup | --no-backup]
                                           Packs the app in <dir> (default .; what .kernableignore
                                           names stays here), puts it, has kernable Cloud build its
                                           Containerfile on the project's server (scanned for known
                                           vulnerabilities), release it beside the deployment that
                                           serves and switch once it caught up; follows it and
-                                          prints the scan and, if it failed, the build's log
+                                          prints the scan and, if it failed, the build's log.
+                                          An app without the kernel (kernel = false) is stopped,
+                                          then started: before, it shows how old its newest
+                                          volume backup is and offers one ([Y/n]; --backup or
+                                          --no-backup for CI)
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
 const DEFAULT_API: &str = "https://api.kernable.com";
@@ -710,11 +715,99 @@ fn login(mut s: Session, no_browser: bool) -> Result<bool, String> {
 /// `kernable cloud deploy [<dir>] --project <name>`: packs the app's source (what
 /// `.kernableignore` leaves out stays here), puts it, has kernable Cloud build its Containerfile
 /// and release it, and follows the deploy until it serves or fails.
+/// Whether `rest` holds the flag `name`, taken out of it.
+fn take(rest: &mut Vec<String>, name: &str) -> bool {
+    let had = rest.iter().any(|w| w == name);
+    rest.retain(|w| w != name);
+    had
+}
+
+/// Before a deploy of an app without the kernel: says how old its newest volume backup is and
+/// takes one if `backup` says so, or, without it, if the person answers yes (a terminal; else
+/// none, with the reminder printed). Waits for it.
+fn backup_before_deploy(
+    s: &mut Session,
+    path: &str,
+    project: &str,
+    backup: Option<bool>,
+) -> Result<(), String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    };
+    let listed = s.call("GET", path, None)?;
+    let newest = listed["backups"][0]["at"].as_i64();
+    let age = match newest {
+        Some(at) => {
+            let m = (now() - at).max(0) / 60;
+            if m < 120 {
+                format!("{m} minutes old")
+            } else {
+                format!("{} hours old", m / 60)
+            }
+        }
+        None => "none yet".to_owned(),
+    };
+    let take = match backup {
+        Some(b) => b,
+        None if std::io::stdin().is_terminal() && !s.json => {
+            eprint!(
+                "{project} keeps its state on its volume, and the deploy stops it first. Its newest backup: {age}. Back it up now? [Y/n] "
+            );
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut answer)
+                .map_err(|e| e.to_string())?;
+            !matches!(answer.trim(), "n" | "N" | "no")
+        }
+        None => {
+            eprintln!(
+                "{project}: its newest volume backup: {age} (--backup takes one first, --no-backup says you know)"
+            );
+            false
+        }
+    };
+    if !take {
+        return Ok(());
+    }
+    let before = listed["backups"][0]["name"].as_str().map(str::to_owned);
+    s.call("POST", path, None)?;
+    eprintln!("{project}: backing its volume up");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let v = s.call("GET", path, None)?;
+        if v["running_since"].is_null() {
+            return match v["backups"][0]["name"].as_str() {
+                Some(name) if Some(name) != before.as_deref() => {
+                    eprintln!(
+                        "{project}: backed up ({} MB)",
+                        v["backups"][0]["bytes"].as_u64().unwrap_or(0) / 1_000_000
+                    );
+                    Ok(())
+                }
+                _ => Err(format!(
+                    "{project}: the backup did not finish; deploy with --no-backup to go on without"
+                )),
+            };
+        }
+    }
+}
+
 fn deploy(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
     use sha2::Digest;
     let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
     let project =
         flag(&mut rest, "--project")?.ok_or("kernable cloud deploy needs --project <name>")?;
+    let backup = match (take(&mut rest, "--backup"), take(&mut rest, "--no-backup")) {
+        (true, true) => return Err("--backup or --no-backup, not both".into()),
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    };
     let dir = match rest.as_slice() {
         [] => std::path::PathBuf::from("."),
         [d] => std::path::PathBuf::from(d),
@@ -745,6 +838,11 @@ fn deploy(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bo
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
     let t = team(&mut s, team_flag)?;
     let at = |p: &str| format!("/v1/teams/{t}/projects/{project}/{p}");
+    // Without the kernel the app's state is on the volume, and the deploy stops it first: a
+    // backup now is the way back (P42).
+    if !app.kernel {
+        backup_before_deploy(&mut s, &at("backups"), &project, backup)?;
+    }
     let up = s.call(
         "POST",
         &at("uploads"),
@@ -1016,6 +1114,42 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                 println!(
                     "{name}: {host} is checked and the project's (its routes come with a deploy)"
                 )
+            });
+        }
+        ["backups", name] => {
+            let v = s.call(
+                "GET",
+                &format!("/v1/teams/{t}/projects/{name}/backups"),
+                None,
+            )?;
+            s.show(&v, |v| {
+                let list = v["backups"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!(
+                        "{name}: no volume backups (an app without the kernel gets one daily)"
+                    );
+                }
+                for b in list {
+                    println!(
+                        "{}\t{}\t{} MB",
+                        b["name"].as_str().unwrap_or("?"),
+                        b["kind"].as_str().unwrap_or("?"),
+                        b["bytes"].as_u64().unwrap_or(0) / 1_000_000
+                    );
+                }
+                if !v["running_since"].is_null() {
+                    println!("(a backup runs now)");
+                }
+            });
+        }
+        ["backups", "create", name] => {
+            let v = s.call(
+                "POST",
+                &format!("/v1/teams/{t}/projects/{name}/backups"),
+                None,
+            )?;
+            s.show(&v, |_| {
+                println!("{name}: its volume is being backed up; `kernable cloud projects backups {name}` lists it once done")
             });
         }
         ["domain", "list", name] => {
