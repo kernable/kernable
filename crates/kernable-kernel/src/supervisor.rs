@@ -1553,7 +1553,7 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     let mut last_read = watched.iter().map(|p| modified(p)).collect::<Vec<_>>();
     // Exclusive: when what is stopping now has ended.
     let mut ended = None;
-    apply(&mut children, first.children, first.exclusive, &mut ended).await;
+    apply(&dir, &mut children, first.children, first.exclusive, &mut ended).await;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let mut hangup = signal(libc::SIGHUP)?;
     let mut terminate = signal(libc::SIGTERM)?;
@@ -1614,7 +1614,7 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
                             "[node] metrics-listen changed: it applies when the node starts again"
                         );
                     }
-                    apply(&mut children, plan.children, plan.exclusive, &mut ended).await;
+                    apply(&dir, &mut children, plan.children, plan.exclusive, &mut ended).await;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "the project file is invalid: the children run on as they are")
@@ -1963,6 +1963,70 @@ async fn handing_over(c: &mut Running) {
     });
 }
 
+/// The kernel's settings for following a primary: flags with their values, and the TLS
+/// environment it reaches the primary with.
+const FOLLOW_FLAGS: [&str; 3] = ["--follow", "--follow-key", "--primary-kernel-key"];
+const FOLLOW_ENV: [&str; 3] = ["KERNABLE_TLS_CA", "KERNABLE_TLS_CERT", "KERNABLE_TLS_KEY"];
+
+/// `args` without the follow flags (and their values) and `--env` of the follow environment.
+fn without_following(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let next = args.get(i + 1).map(String::as_str);
+        if FOLLOW_FLAGS.contains(&a.as_str())
+            || (a == "--env" && next.is_some_and(|n| FOLLOW_ENV.contains(&n)))
+        {
+            i += 2;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    out
+}
+
+/// Whether `new` is the kernel `old` without its follow settings, and that kernel follows no
+/// more: its store's `.following` note, which a kernel removes once it opened its stores as the
+/// primary, is gone (relative store paths are the project directory `dir`'s).
+fn only_stopped_following(old: &Spec, new: &Spec, dir: &Path) -> bool {
+    if old.name != "kernel" || new.name != "kernel" {
+        return false;
+    }
+    let command = |s: &Spec| {
+        s.container
+            .as_ref()
+            .map_or_else(|| s.args.clone(), |c| c.command.clone())
+    };
+    if !command(old).iter().any(|a| a == "--follow") || command(new).iter().any(|a| a == "--follow") {
+        return false;
+    }
+    let mut stripped = old.clone();
+    stripped.args = without_following(&old.args);
+    stripped
+        .env
+        .retain(|k, _| !FOLLOW_ENV.contains(&k.as_str()));
+    if let Some(c) = &mut stripped.container {
+        c.command = without_following(&c.command);
+    }
+    if stripped != *new {
+        return false;
+    }
+    let new_command = command(new);
+    let Some(store) = new_command
+        .iter()
+        .position(|a| a == "--store")
+        .and_then(|i| new_command.get(i + 1))
+    else {
+        return false;
+    };
+    let Some(note) = crate::standby::marker(store, "following") else {
+        return false;
+    };
+    !dir.join(note).exists()
+}
+
 /// Whether `new` is `old` with only another kernable binary: a kernel that hands over.
 fn only_binary_changed(old: &Spec, new: &Spec) -> bool {
     if old.name != "kernel" || new.name != "kernel" || old.watch == new.watch {
@@ -1994,6 +2058,7 @@ fn signal(kind: libc::c_int) -> Result<tokio::signal::unix::Signal, BoxError> {
 /// or, `exclusive`, once every process stopping here ended: also those of an earlier change
 /// still ending (`ended`, which this one replaces).
 async fn apply(
+    dir: &Path,
     children: &mut Vec<Running>,
     specs: Vec<Spec>,
     exclusive: bool,
@@ -2005,6 +2070,17 @@ async fn apply(
     let mut ending: Vec<(String, JoinHandle<()>)> = Vec::new();
     for mut c in std::mem::take(children).into_iter().rev() {
         if specs.contains(&c.spec) {
+            keep.push(c);
+        } else if let Some(new) = specs
+            .iter()
+            .find(|s| only_stopped_following(&c.spec, s, dir))
+        {
+            // A standby promoted already serves as the primary: the settings it followed with
+            // are of no use any more, and a restart would only interrupt it (a live move's
+            // target, its project made its own after the switchover). They go with its next
+            // start.
+            tracing::info!(child = %c.spec.name, "it serves as the primary: it runs on without its follow settings");
+            c.spec = new.clone();
             keep.push(c);
         } else if let Some(new) = specs.iter().find(|s| only_binary_changed(&c.spec, s)) {
             // The next look hands the stores over to a kernel on the new binary.
@@ -2678,10 +2754,10 @@ secrets = ["stripe"]
             "if [ -f a.ended ]; then echo after; else echo before; fi > b.started; sleep 30",
         );
         let (mut children, mut ended) = (Vec::new(), None);
-        apply(&mut children, vec![a], exclusive, &mut ended).await;
+        apply(Path::new("."), &mut children, vec![a], exclusive, &mut ended).await;
         step(&mut children[0], &dir).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        apply(&mut children, vec![b], exclusive, &mut ended).await;
+        apply(Path::new("."), &mut children, vec![b], exclusive, &mut ended).await;
         let started = dir.join("b.started");
         for _ in 0..100 {
             for c in &mut children {
@@ -3069,6 +3145,47 @@ build = "."
                 .iter()
                 .any(|a| a.starts_with("unix:"))
         );
+    }
+
+    #[test]
+    fn a_promoted_kernel_runs_on_when_only_its_follow_settings_go() {
+        let dir = std::env::temp_dir().join(format!("kernable-promoted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let this = Path::new("/bin/kernable");
+        let following = r#"
+[kernel]
+flags = { root = "root.pub", store = "sqlite:k.db", follow = "a.example:443", follow-key = "follow.key", primary-kernel-key = "abcd" }
+env = { KERNABLE_TLS_CA = "ca.pem", KERNABLE_LOG = "info" }
+"#;
+        let own = r#"
+[kernel]
+flags = { root = "root.pub", store = "sqlite:k.db" }
+env = { KERNABLE_LOG = "info" }
+"#;
+        for contained in [false, true] {
+            let kernel = |text: &str| {
+                plan_on(text, &dir, this, contained)
+                    .unwrap()
+                    .children
+                    .into_iter()
+                    .find(|c| c.name == "kernel")
+                    .unwrap()
+            };
+            let (old, new) = (kernel(following), kernel(own));
+            assert_ne!(old, new);
+            // Still following (its note is there): it starts again, as its own primary.
+            std::fs::write(dir.join("k.db.following"), "a.example:443\n").unwrap();
+            assert!(!only_stopped_following(&old, &new, &dir), "contained={contained}");
+            // Promoted (the note gone): it runs on.
+            std::fs::remove_file(dir.join("k.db.following")).unwrap();
+            assert!(only_stopped_following(&old, &new, &dir), "contained={contained}");
+            // Anything else changed too: it starts again.
+            let other = kernel(&own.replace("info", "debug"));
+            assert!(!only_stopped_following(&old, &other, &dir));
+            // Not the other way round: a kernel that is to follow starts again.
+            assert!(!only_stopped_following(&new, &old, &dir));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
