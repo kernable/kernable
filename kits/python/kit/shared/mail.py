@@ -11,7 +11,8 @@ class Mail:
     subject: str
     text: str
     #: What the mail is for, and the token it carries: tests and logs read these.
-    purpose: Literal["verify", "reset", "email_change", "invitation", "account_exists"]
+    # "notice": a notice from the application, without a token.
+    purpose: Literal["verify", "reset", "email_change", "invitation", "account_exists", "notice"]
     token: str
 
 

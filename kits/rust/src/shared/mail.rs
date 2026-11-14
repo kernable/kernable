@@ -9,6 +9,8 @@ pub enum Purpose {
     EmailChange,
     Invitation,
     AccountExists,
+    /// A notice to a person from the application: no token (`token` empty).
+    Notice,
 }
 
 #[derive(Clone, Debug)]

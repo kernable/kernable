@@ -5,7 +5,8 @@ export interface Mail {
   subject: string;
   text: string;
   /** What the mail is for, and the token it carries: tests and logs read these. */
-  purpose: "verify" | "reset" | "email_change" | "invitation" | "account_exists";
+  /** `notice`: a notice from the application, without a token. */
+  purpose: "verify" | "reset" | "email_change" | "invitation" | "account_exists" | "notice";
   token: string;
 }
 
