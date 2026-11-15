@@ -76,7 +76,9 @@ kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --key pusher.key \
   --to relay.example.net:7400 --copy shop --copy-key copy.key
 ```
 
-With a pair, name both kernels: it follows whichever is the writer. It reads `pusher.grant`
+`KERNABLE_TLS_*` are for the relay, and for the writer if it listens on TCP with mutual TLS; the
+writer's Unix socket (`--follow unix:/srv/shop/kernel.sock`) is reached without. With a pair,
+name both kernels: it follows whichever is the writer. It reads `pusher.grant`
 again on every connection and tries again after every failure. A [node](./node) runs it for you
 with a `[push]` section (`to`, `copy`, `key`, `copy-key`).
 

@@ -1383,7 +1383,8 @@ fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
 }
 
 /// A channel to the primary, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and
-/// `KERNABLE_TLS_KEY` name the files, as for the SDKs.
+/// `KERNABLE_TLS_KEY` name the files, as for the SDKs; to a Unix socket always without (a kernel
+/// there takes none), so a pusher reaches its writer's socket and a relay over TLS.
 pub(crate) async fn connect(addr: &str) -> Result<tonic::transport::Channel, BoxError> {
     connect_pinging(addr, None).await
 }
@@ -1395,6 +1396,9 @@ pub(crate) async fn connect_pinging(
     every: Option<Duration>,
 ) -> Result<tonic::transport::Channel, BoxError> {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    if transport::unix_path(addr).is_some() {
+        return Ok(transport::connect_pinging(addr, every).await?);
+    }
     match (
         var("KERNABLE_TLS_CA"),
         var("KERNABLE_TLS_CERT"),
