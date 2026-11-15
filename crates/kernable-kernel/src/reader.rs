@@ -81,6 +81,10 @@ pub(crate) struct Reader {
     applied: AtomicU64,
     /// How far the writer said it may follow, last.
     head: AtomicU64,
+    /// When it last held everything the writer may tell (ms since epoch).
+    current_at: AtomicI64,
+    /// `--reader-max-lag-ms`; 0: no limit.
+    max_lag_ms: u64,
     /// Its stream to the writer is open.
     connected: AtomicBool,
     /// When the writer last sent anything (ms since epoch).
@@ -123,6 +127,9 @@ impl Reader {
             copy_key: standby::copy_key(follow, true)?,
             applied: AtomicU64::new(applied),
             head: AtomicU64::new(applied),
+            // It just caught up (`kernable start` catches up first).
+            current_at: AtomicI64::new(now_ms()),
+            max_lag_ms: config.replication.reader_max_lag_ms,
             connected: AtomicBool::new(false),
             heard_at: AtomicI64::new(0),
             channels: Mutex::default(),
@@ -183,10 +190,31 @@ impl Reader {
         self.heard_at.store(now_ms(), SeqCst);
     }
 
-    /// Why it is not ready, if it is not: it lost the writer.
+    /// Notes that it holds everything the writer may tell, if it does.
+    fn current_if_caught_up(&self) {
+        if self.applied() >= self.head() {
+            self.current_at.store(now_ms(), SeqCst);
+        }
+    }
+
+    /// Milliseconds since it last held everything the writer may tell, when that is longer
+    /// than `--reader-max-lag-ms`.
+    pub(crate) fn too_far_behind(&self) -> Option<i64> {
+        let behind = now_ms() - self.current_at.load(SeqCst);
+        (self.max_lag_ms > 0 && behind > self.max_lag_ms as i64).then_some(behind)
+    }
+
+    /// Why it is not ready, if it is not: it lost the writer, or fell too far behind.
     pub(crate) fn unready(&self) -> Option<String> {
         if self.following() {
-            return None;
+            return self.too_far_behind().map(|ms| {
+                format!(
+                    "a reader of {}: behind its writer for {} s (more than --reader-max-lag-ms), {} records",
+                    self.writer(),
+                    ms / 1000,
+                    self.lag()
+                )
+            });
         }
         Some(match self.silent_ms() {
             Some(ms) => format!(
@@ -411,6 +439,7 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
             Some(follow_response::Msg::Records(batch)) => {
                 reader.heard();
                 reader.head.store(batch.head, SeqCst);
+                reader.current_if_caught_up();
                 if batch.records.is_empty() {
                     continue;
                 }
@@ -454,6 +483,7 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
                     Ended::Restart(format!("applying the writer's records failed: {e}"))
                 })?;
                 reader.applied.store(seq, SeqCst);
+                reader.current_if_caught_up();
                 applied(kernel, changes);
                 tx.send(FollowRequest {
                     msg: Some(follow_request::Msg::Ack(FollowAck { seq })),
@@ -610,6 +640,26 @@ async fn until_held(
     tokio::time::timeout(timeout, held)
         .await
         .map_err(|_| behind(kernel, reader, position))
+}
+
+/// UNAVAILABLE `reader_behind` for a reader further behind its writer than
+/// `--reader-max-lag-ms`: the SDKs ask another copy.
+pub(crate) fn current_enough(reader: &Reader) -> Result<(), Status> {
+    match reader.too_far_behind() {
+        None => Ok(()),
+        Some(ms) => Err(Status::unavailable(format!(
+            "reader_behind: this reader has been behind its writer {} for {} s, more than its maximum lag ({} ms); {} records behind{}; ask another copy",
+            reader.writer(),
+            ms / 1000,
+            reader.max_lag_ms,
+            reader.lag(),
+            if reader.following() {
+                ""
+            } else {
+                ", and it cannot reach the writer"
+            }
+        ))),
+    }
 }
 
 /// UNAVAILABLE `reader_behind`: this reader does not hold `position` yet; the SDKs try again,

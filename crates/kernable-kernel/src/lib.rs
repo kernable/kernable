@@ -2843,6 +2843,9 @@ impl QueryService for Api {
             ));
         }
         let caller = kernel.caller(&query.listener, &name, true)?;
+        if let Some(reader) = &kernel.reader {
+            reader::current_enough(reader)?;
+        }
         if query.wait_only {
             return wait_only(kernel, &name, query, caller.as_ref()).await;
         }

@@ -120,6 +120,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Run as a reader, a read-only copy of the writer at these addresses (comma-separated: both kernels of a pair; it follows whichever is the primary). It applies the writer's records as a standby does, answers queries, subscriptions and live listeners from its own copy, forwards commands and every other write to the writer, and is never promoted. Reactors and workers that connect to it wait (`reader_of`); scheduled commands and business processes run on the writer. Needs `--follow-key` (granted `read`, not `replicate`: a reader's key never follows as a standby) and `--primary-kernel-key`; the writer needs `--readers on`. Not with `--follow`, `--witness`, `--replication sync`, `--backup on` or `--readers on`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
     ),
     (
+        "--reader-max-lag-ms",
+        "KERNABLE_READER_MAX_LAG_MS",
+        "30000",
+        "With `--reader`: once the reader has not held everything its writer may tell for longer than this (it cannot reach the writer or its relay, or cannot keep up), it refuses queries with `UNAVAILABLE` `reader_behind`, so the SDKs ask another copy, and `/ready` answers 503 until it caught up again. 0: it answers however far behind it is.",
+    ),
+    (
         "--reader-copy",
         "KERNABLE_READER_COPY",
         "",
@@ -454,6 +460,9 @@ pub struct Replication {
     pub reader: bool,
     /// `--from-backup`: where a new reader restores from before it catches up.
     pub from_backup: Option<FromBackup>,
+    /// `--reader-max-lag-ms`: a reader that has not held everything its writer may tell for
+    /// longer refuses queries and is not ready; 0: never.
+    pub reader_max_lag_ms: u64,
 }
 
 /// A backup a new reader starts from.
@@ -767,6 +776,7 @@ impl Config {
             },
             reader: reader.is_some(),
             from_backup,
+            reader_max_lag_ms: number("--reader-max-lag-ms")?,
         };
         if replication.reader {
             let wrong = [

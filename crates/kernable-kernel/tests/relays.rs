@@ -462,12 +462,51 @@ async fn readers_of_a_copy_whose_pusher_is_gone_count_the_writer_as_away() {
     grant_defaults(&writer);
     let relay = start_relay(&dir.0).await;
     let pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
-    let reader_config = reader_config(&dir.0, "reader", 21, &relay, "shop");
+    let mut reader_config = reader_config(&dir.0, "reader", 21, &relay, "shop");
+    reader_config.replication.reader_max_lag_ms = 1_500;
     let reader = start_reader(&reader_config).await;
     until_async("the reader is ready", async || reader.readiness().is_ok()).await;
+    let query = async || {
+        let mut q = kernable_core::proto::QueryRequest {
+            protocol: kernable_core::PROTOCOL,
+            query_id: format!("q{}", issued_now()),
+            tenant_id: "t1".into(),
+            domain: "orders".into(),
+            query_type: "CountOrders".into(),
+            payload: b"{}".to_vec(),
+            issued_at: issued_now(),
+            ..Default::default()
+        };
+        q.client_sig = Some(kernable_core::signing::sign(
+            &key(1),
+            &kernable_core::signing::query_message(&q),
+        ));
+        let channel = kernable_core::transport::connect(&reader_config.listen)
+            .await
+            .unwrap();
+        kernable_core::proto::query_service_client::QueryServiceClient::new(channel)
+            .query(with_grant(q, &key(1)))
+            .await
+    };
+    // Current: no read model answers, but it is not refused for its lag.
+    let early = query().await.unwrap_err();
+    assert!(!early.message().starts_with("reader_behind"), "{early:?}");
 
     // The pusher is gone: the copy no longer follows the writer, and its reader says so.
     pusher.abort();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match query().await {
+                Err(s) if s.message().starts_with("reader_behind") => {
+                    assert_eq!(s.code(), Code::Unavailable);
+                    return;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .expect("beyond its maximum lag the reader refuses queries");
     // The relay waits 3 s for the pusher, the reader 5 s for the relay's beat.
     tokio::time::timeout(Duration::from_secs(20), async {
         while reader.readiness().is_ok() {
@@ -476,7 +515,13 @@ async fn readers_of_a_copy_whose_pusher_is_gone_count_the_writer_as_away() {
     })
     .await
     .expect("the reader counts the writer as away");
-    assert_eq!(reader.role()["state"], "away", "{}", reader.role());
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while reader.role()["state"] != "away" {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("it hears nothing more and counts the writer as away");
 
     // Back again: the reader is ready again.
     let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
