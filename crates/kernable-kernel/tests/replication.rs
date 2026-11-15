@@ -86,6 +86,7 @@ fn standby_config(dir: &Path, primary: &Config) -> Config {
         key: key_path,
         primary_kernel_keys: vec![id(&key(3))],
         copy: String::new(),
+        copy_key: None,
     });
     config
 }
@@ -1073,6 +1074,7 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
         key: dir.0.join("standby.key"),
         primary_kernel_keys: vec![id(&key(3)), id(&key(8))],
         copy: String::new(),
+        copy_key: None,
     });
     // A note left from before on its socket goes once it serves there again.
     let back_note = kernable_kernel::handed_over_note(back.listen.trim_start_matches("unix:"));

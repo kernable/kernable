@@ -226,6 +226,7 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
             key: pair.node_key.clone(),
             primary_kernel_keys: pair.kernel_keys.clone(),
             copy: String::new(),
+            copy_key: None,
         });
         tracing::info!(term = answer.term, primary = %answer.primary, address = %answer.primary_address, "this kernel follows the primary");
         standby::run_with(follow, Some(Arc::clone(&link))).await?;

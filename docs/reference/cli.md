@@ -83,13 +83,21 @@ kernable relay --dir <dir> --root <root.pub> --allow-push <key.pub>[,<key.pub>] 
 
 Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per copy), taken from pushers whose keys `--allow-push` names (kernable push), and serves each to readers (kernable start `--reader <relay>` `--reader-copy <copy>`) whose grants a `--root` signed with read. It applies and checks nothing: readers check every record against the writer's checkpoints. Listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).
 
+### `kernable relay key`
+
+```text
+kernable relay key <file>
+```
+
+Writes a new copy key (hex, mode 600): the pusher seals what it sends a relay with it (`--copy-key`) and the copy's readers open it (`--reader-copy-key`). The relay never holds it: it sees records' positions, hashes and sizes, nothing else.
+
 ### `kernable push`
 
 ```text
-kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name>
+kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file>
 ```
 
-Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Connections use `KERNABLE_TLS_*`, as the SDKs do.
+Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record, sealed with the copy key, to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Connections use `KERNABLE_TLS_*`, as the SDKs do.
 
 ### `kernable partitions apply`
 

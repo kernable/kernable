@@ -125,11 +125,17 @@ Keys and trust:
                                           the writer's checkpoints. Listens on 127.0.0.1:7400 by
                                           default, elsewhere only with mutual TLS (--tls-cert,
                                           --tls-key, --tls-client-ca).
-  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name>
+  kernable relay key <file>               Writes a new copy key (hex, mode 600): the pusher seals
+                                          what it sends a relay with it (--copy-key) and the
+                                          copy's readers open it (--reader-copy-key). The relay
+                                          never holds it: it sees records' positions, hashes and
+                                          sizes, nothing else.
+  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file>
                                           Follows the writer at <addr> (started with --readers on;
                                           both kernels of a pair, comma-separated) as a reader and
-                                          sends every record to the copy <name> at the relay <relay>
-                                          over a connection it opens itself, until stopped. <key>
+                                          sends every record, sealed with the copy key, to the copy
+                                          <name> at the relay <relay> over a connection it opens
+                                          itself, until stopped. <key>
                                           needs a grant for read on * (the grant file next to it is
                                           sent along, read again on every connection) and must be
                                           one the relay takes (--allow-push). The writer keeps its
@@ -601,6 +607,7 @@ async fn main() -> ExitCode {
             witness_generation(root, generation, address)
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
+        ["relay", "key", file] => relay_key(file),
         ["relay", flags @ ..] => return run_relay(flags).await,
         ["push", flags @ ..] => return run_push(flags).await,
         ["node", project] => return run_node(project).await,
@@ -1612,7 +1619,10 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
 /// `kernable push --follow <addr> --key <key> --to <relay> --copy <name>`: pushes until stopped.
 async fn run_push(flags: &[&str]) -> ExitCode {
     let parsed = (|| -> Result<push::Pusher> {
-        let values = flag_values(flags, &["--follow", "--key", "--to", "--copy"])?;
+        let values = flag_values(
+            flags,
+            &["--follow", "--key", "--to", "--copy", "--copy-key"],
+        )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
         let need = |flag: &str| one(flag).ok_or_else(|| format!("{flag} is missing"));
         let key_path = need("--key")?;
@@ -1636,6 +1646,8 @@ async fn run_push(flags: &[&str]) -> ExitCode {
             grant_file,
             relay: need("--to")?.to_owned(),
             copy: need("--copy")?.to_owned(),
+            copy_key: kernable_kernel::seal::CopyKey::read(Path::new(need("--copy-key")?))
+                .map_err(boxed)?,
         })
     })();
     let pusher = match parsed {
@@ -1660,6 +1672,14 @@ async fn run_push(flags: &[&str]) -> ExitCode {
         },
         _ = shutdown_signal() => ExitCode::SUCCESS,
     }
+}
+
+/// `kernable relay key <file>`: a new copy key.
+fn relay_key(file: &str) -> Result<bool> {
+    kernable_kernel::seal::CopyKey::create(Path::new(file)).map_err(boxed)?;
+    let key = kernable_kernel::seal::CopyKey::read(Path::new(file)).map_err(boxed)?;
+    println!("wrote the copy key {} to {file}", key.id());
+    Ok(true)
 }
 
 /// `kernable backup --follow ...`: runs the backup follower until stopped.

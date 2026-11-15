@@ -36,6 +36,14 @@ service ReplicationService {
 // follow a copy as they follow a writer (ReplicationService.Follow, `reader`, `copy`), and check
 // every record against the writer's checkpoints as they always do: a relay can withhold records,
 // never change one.
+//
+// What reaches a relay is sealed with the copy key, which the pusher and the copy's readers hold
+// and the relay does not: each record (ReplicatedRecord.sealed), each record batch's vault values
+// and files (RecordBatch.sealed), each image batch (ImageBatch.sealed) and the image's length
+// (ImageEnd.sealed). A relay sees records' positions, hashes and sizes, nothing else. A sealed
+// value is the key's ID (the first 8 bytes of its SHA-256), a random 24-byte nonce and the
+// XChaCha20-Poly1305 ciphertext, its associated data a label of what it is and where it belongs
+// (see the kernel's src/seal.rs), so a relay cannot move one elsewhere unnoticed.
 service RelayService {
   // PushRequest.hello -> PushResponse.challenge -> PushRequest.challenge_response ->
   // PushResponse.start (where the copy stands), then the writer's records from there: an image
@@ -214,12 +222,18 @@ message ImageBatch {
   repeated LogRecord records = 1;
   repeated VaultRow vault = 2;
   repeated DataFile files = 3;
+  // On the way through a relay, instead of the rest: this batch sealed with the copy key, bound
+  // to its place in the image (0, 1, ...).
+  bytes sealed = 4;
 }
 
 // The image stands at this record: the standby's record log starts here.
 message ImageEnd {
   uint64 seq = 1;
   bytes hash = 2;
+  // On the way through a relay: how many batches the image has, sealed with the copy key and
+  // bound to `seq` and `hash`, so a relay cannot leave any out.
+  bytes sealed = 3;
 }
 
 // Records of the primary's log, with the vault rows and files they refer to. `head` is the
@@ -229,6 +243,15 @@ message RecordBatch {
   repeated VaultRow vault = 2;
   repeated DataFile files = 3;
   uint64 head = 4;
+  // On the way through a relay, instead of `vault` and `files`: a SealedAttachments sealed with
+  // the copy key, bound to the batch's last record.
+  bytes sealed = 5;
+}
+
+// What a sealed record batch refers to (RecordBatch.sealed).
+message SealedAttachments {
+  repeated VaultRow vault = 1;
+  repeated DataFile files = 2;
 }
 
 // A vault value with what the vault keeps about it, decrypted: the standby encrypts it with

@@ -1417,6 +1417,7 @@ impl Store for SqliteStore {
         let mut out = Vec::with_capacity(rows.len());
         for (seq, hash, body) in rows {
             out.push(ReplicatedRecord {
+                sealed: Vec::new(),
                 seq,
                 hash,
                 record: Some(LogRecord::decode(body.as_slice())?),

@@ -70,6 +70,15 @@ fn reading_key(dir: &Path, name: &str, seed: u8) -> std::path::PathBuf {
     path
 }
 
+/// The copy key in `dir`, made once.
+fn copy_key(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("copy.key");
+    if !path.exists() {
+        std::fs::write(&path, format!("{}\n", hex(&[42; 32]))).unwrap();
+    }
+    path
+}
+
 /// A reader `name` of the copy `copy` at the relay `relay`.
 fn reader_config(dir: &Path, name: &str, seed: u8, relay: &str, copy: &str) -> Config {
     let mut config = config(dir, name, seed);
@@ -79,6 +88,7 @@ fn reader_config(dir: &Path, name: &str, seed: u8, relay: &str, copy: &str) -> C
         key: reading_key(dir, name, seed + 50),
         primary_kernel_keys: vec![id(&key(3))],
         copy: copy.into(),
+        copy_key: Some(copy_key(dir)),
     });
     config.replication.reader = true;
     config
@@ -124,6 +134,7 @@ fn start_pusher(dir: &Path, writer: &str, relay: &str, copy: &str) -> JoinHandle
         grant_file: path.with_extension("grant"),
         relay: relay.to_owned(),
         copy: copy.to_owned(),
+        copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(dir)).unwrap(),
     };
     tokio::spawn(async move {
         push::run(pusher).await.unwrap();
@@ -169,8 +180,8 @@ async fn a_reader_follows_the_writer_through_a_copy_at_a_relay() {
     })
     .await;
 
-    let reader_config = reader_config(&dir.0, "reader", 21, &relay, "shop");
-    let reader = start_reader(&reader_config).await;
+    let first = reader_config(&dir.0, "reader", 21, &relay, "shop");
+    let reader = start_reader(&first).await;
     assert_eq!(reader.role()["role"], "reader");
     let at = held(&writer);
     until_async("the reader holds what the writer wrote", async || {
@@ -188,8 +199,27 @@ async fn a_reader_follows_the_writer_through_a_copy_at_a_relay() {
     })
     .await;
 
+    // The relay holds the records sealed: nothing of them reads there.
+    let log = std::fs::read(dir.0.join("copies/shop/log")).unwrap();
+    let plain = |needle: &[u8]| log.windows(needle.len()).any(|w| w == needle);
+    assert!(!plain(b"PlaceOrder") && !plain(b"OrderPlaced"));
+    let mut store = std::fs::read(dir.0.join("writer.db")).unwrap();
+    store.extend(std::fs::read(dir.0.join("writer.db-wal")).unwrap_or_default());
+    assert!(
+        store.windows(10).any(|w| w == b"PlaceOrder"),
+        "the writer's store holds it in plain"
+    );
+
+    // A reader with another key gets nothing it could read.
+    let mut wrong = reader_config(&dir.0, "wrong", 23, &relay, "shop");
+    let other = dir.0.join("other-copy.key");
+    std::fs::write(&other, format!("{}\n", hex(&[43; 32]))).unwrap();
+    wrong.replication.follow.as_mut().unwrap().copy_key = Some(other);
+    let refused = tokio::time::timeout(Duration::from_secs(2), standby::run(wrong)).await;
+    assert!(refused.is_err(), "it never catches up: {refused:?}");
+
     // A relay takes no writes: the reader says so.
-    let refused = submit(&reader_config.listen, place(99)).await.unwrap_err();
+    let refused = submit(&first.listen, place(99)).await.unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
     assert!(refused.message().contains("relay"), "{refused:?}");
 }
@@ -212,6 +242,7 @@ async fn a_relay_serves_only_granted_readers_of_a_copy_it_holds() {
         grant_file: path.with_extension("grant"),
         relay: relay.clone(),
         copy: "shop".into(),
+        copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
     };
     let pushing = tokio::spawn(push::run(stranger));
     tokio::time::sleep(Duration::from_millis(500)).await;

@@ -129,6 +129,9 @@ message ReplicatedRecord {
   uint64 seq = 1;
   bytes hash = 2;
   LogRecord record = 3;
+  // On the way through a relay, instead of `record`: the record sealed with the copy key
+  // (see SealedCopy in replication.proto), bound to `seq` and `hash`.
+  bytes sealed = 4;
 }
 
 // A key that must no longer be trusted: the kernel refuses it from now on, and `kernable

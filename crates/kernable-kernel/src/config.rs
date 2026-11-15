@@ -123,7 +123,13 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--reader-copy",
         "KERNABLE_READER_COPY",
         "",
-        "With `--reader`: its addresses are relays (`kernable relay`), not the writer, and the reader follows this copy of the writer's records there. It checks every record against the writer's checkpoints as it does from the writer, so a relay can hold records back but never change one. Commands and other writes are refused for now (`unavailable`): send them to the writer.",
+        "With `--reader`: its addresses are relays (`kernable relay`), not the writer, and the reader follows this copy of the writer's records there. It checks every record against the writer's checkpoints as it does from the writer, so a relay can hold records back but never change one. Commands and other writes are refused for now (`unavailable`): send them to the writer. Needs `--reader-copy-key`.",
+    ),
+    (
+        "--reader-copy-key",
+        "KERNABLE_READER_COPY_KEY",
+        "",
+        "With `--reader-copy`: the file of the key the copy is sealed with (`kernable relay key`), the pusher's `--copy-key`. The relay holds the records sealed and never this key.",
     ),
     (
         "--from-backup",
@@ -492,6 +498,8 @@ pub struct Follow {
     pub primary_kernel_keys: Vec<String>,
     /// `--reader-copy`: the addresses are relays, and the reader follows this copy there.
     pub copy: String,
+    /// `--reader-copy-key`: the key the copy is sealed with.
+    pub copy_key: Option<PathBuf>,
 }
 
 /// What the kernel takes on at most. Beyond a limit, a request is refused with
@@ -662,11 +670,25 @@ impl Config {
                 key: get("--follow-key").expect("has a default").into(),
                 primary_kernel_keys: kernel_keys()?,
                 copy: get("--reader-copy").unwrap_or_default(),
+                copy_key: get("--reader-copy-key").map(PathBuf::from),
             }),
             (None, None) => None,
         };
-        if get("--reader-copy").is_some() && reader.is_none() {
-            return Err("--reader-copy is for a reader: give --reader <relay address> too".into());
+        match (get("--reader-copy"), get("--reader-copy-key")) {
+            (Some(_), _) if reader.is_none() => {
+                return Err(
+                    "--reader-copy is for a reader: give --reader <relay address> too".into(),
+                );
+            }
+            (Some(_), None) => {
+                return Err(
+                    "--reader-copy needs --reader-copy-key: the key the copy is sealed with".into(),
+                );
+            }
+            (None, Some(_)) => {
+                return Err("--reader-copy-key goes with --reader-copy".into());
+            }
+            _ => {}
         }
         let from_backup = match (get("--from-backup"), &reader) {
             (None, _) => {

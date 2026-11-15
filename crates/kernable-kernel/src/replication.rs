@@ -1100,6 +1100,7 @@ async fn run(
                 send(
                     out,
                     follow_response::Msg::Records(RecordBatch {
+                        sealed: Vec::new(),
                         records,
                         vault,
                         files,
@@ -1362,6 +1363,7 @@ async fn send_image(
                 .map(|r| LogRecord { record: Some(r) })
                 .collect();
             tx.blocking_send(ImageBatch {
+                sealed: Vec::new(),
                 records,
                 vault,
                 files,
@@ -1429,6 +1431,7 @@ async fn send_image(
     send(
         out,
         follow_response::Msg::ImageEnd(ImageEnd {
+            sealed: Vec::new(),
             seq: head.seq,
             hash: head.hash.clone(),
         }),

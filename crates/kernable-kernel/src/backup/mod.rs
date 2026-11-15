@@ -1528,6 +1528,7 @@ mod tests {
     fn a_batch_cut_at_a_record_keeps_only_its_files() {
         use kernable_core::proto::{DataChangedRecord, DataFile, LogRecord, ReplicatedRecord};
         let changed = |seq: u64, key: &str| ReplicatedRecord {
+            sealed: Vec::new(),
             seq,
             hash: vec![seq as u8],
             record: Some(LogRecord {
@@ -1604,6 +1605,7 @@ mod tests {
             }),
         };
         ReplicatedRecord {
+            sealed: Vec::new(),
             seq,
             hash: vec![seq as u8; 32],
             record: Some(LogRecord {

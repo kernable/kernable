@@ -50,6 +50,7 @@ mod reader;
 pub mod relay;
 mod replays;
 mod replication;
+pub mod seal;
 pub use replication::{MAX_MESSAGE_BYTES, refuse_if_handed_over, switchover_keeper};
 pub mod standby;
 pub mod supervisor;

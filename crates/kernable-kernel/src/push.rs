@@ -10,7 +10,7 @@
 //! and the writer's records go there from the first. The relay's acknowledgements go on to the
 //! writer, which keeps its records until the copy holds them, as it does for a slow reader.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
@@ -25,7 +25,7 @@ use kernable_store::replication::ZERO;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::{BoxError, replication, standby};
+use crate::{BoxError, replication, seal::CopyKey, standby};
 
 /// How a pusher runs.
 pub struct Pusher {
@@ -39,6 +39,8 @@ pub struct Pusher {
     pub relay: String,
     /// The copy's name there.
     pub copy: String,
+    /// The key the copy is sealed with: the relay never holds it.
+    pub copy_key: Arc<CopyKey>,
 }
 
 /// The longest pause between tries.
@@ -115,7 +117,7 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
         tx: to_writer,
         inbound: mut from_writer,
         start: begun,
-    } = standby::open_stream(writer, &pusher.key, &grant, hello, PING).await?;
+    } = standby::open_stream(writer, &pusher.key, &grant, hello, PING, None).await?;
     match begun.mode() {
         FollowMode::Follow => {
             tracing::info!(%writer, copy = %pusher.copy, from = start.seq, "pushing");
@@ -125,11 +127,17 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
         }
         FollowMode::Diverged if start.seq > 0 => {
             tracing::warn!(%writer, copy = %pusher.copy, message = %begun.message, "the writer's log no longer continues the copy: it begins anew, empty");
+            let mut empty = follow_response::Msg::ImageEnd(ImageEnd {
+                seq: 0,
+                hash: ZERO.to_vec(),
+                sealed: Vec::new(),
+            });
+            crate::seal::seal(&pusher.copy_key, &mut empty, &mut 0);
+            let follow_response::Msg::ImageEnd(empty) = empty else {
+                unreachable!("sealed in place")
+            };
             to_relay
-                .send(say(push_request::Msg::ImageEnd(ImageEnd {
-                    seq: 0,
-                    hash: ZERO.to_vec(),
-                })))
+                .send(say(push_request::Msg::ImageEnd(empty)))
                 .await?;
             return match next(&mut from_relay).await? {
                 Some(push_response::Msg::Ack(_)) => Ok(()),
@@ -140,18 +148,25 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
             return Err(format!("the writer answered {other:?}: {}", begun.message).into());
         }
     }
+    // The batches of the image under way, for sealing.
+    let mut images = 0;
     loop {
         tokio::select! {
             message = from_writer.message() => match message?.and_then(|m| m.msg) {
-                Some(follow_response::Msg::Image(batch)) => {
-                    to_relay.send(say(push_request::Msg::Image(batch))).await?;
-                }
-                Some(follow_response::Msg::ImageEnd(end)) => {
-                    tracing::info!(record = end.seq, "the image ended");
-                    to_relay.send(say(push_request::Msg::ImageEnd(end))).await?;
-                }
-                Some(follow_response::Msg::Records(batch)) => {
-                    to_relay.send(say(push_request::Msg::Records(batch))).await?;
+                Some(mut msg @ (follow_response::Msg::Image(_)
+                    | follow_response::Msg::ImageEnd(_)
+                    | follow_response::Msg::Records(_))) => {
+                    crate::seal::seal(&pusher.copy_key, &mut msg, &mut images);
+                    let msg = match msg {
+                        follow_response::Msg::Image(batch) => push_request::Msg::Image(batch),
+                        follow_response::Msg::ImageEnd(end) => {
+                            tracing::info!(record = end.seq, "the image ended");
+                            push_request::Msg::ImageEnd(end)
+                        }
+                        follow_response::Msg::Records(batch) => push_request::Msg::Records(batch),
+                        _ => unreachable!("matched above"),
+                    };
+                    to_relay.send(say(msg)).await?;
                 }
                 Some(_) => {}
                 None => return Ok(()),

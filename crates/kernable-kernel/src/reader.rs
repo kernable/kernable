@@ -75,6 +75,8 @@ pub(crate) struct Reader {
     kernel_keys: Vec<String>,
     /// `--reader-copy`: the addresses are relays, and it follows this copy there.
     copy: String,
+    /// `--reader-copy-key`: what it gets from a relay is opened with it.
+    copy_key: Option<Arc<crate::seal::CopyKey>>,
     /// The newest record applied.
     applied: AtomicU64,
     /// How far the writer said it may follow, last.
@@ -118,6 +120,7 @@ impl Reader {
             grant,
             kernel_keys: follow.primary_kernel_keys.clone(),
             copy: follow.copy.clone(),
+            copy_key: standby::copy_key(follow, true)?,
             applied: AtomicU64::new(applied),
             head: AtomicU64::new(applied),
             connected: AtomicBool::new(false),
@@ -372,7 +375,15 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
         tx,
         mut inbound,
         start,
-    } = standby::open_stream(&writer, &reader.key, &reader.grant, hello, STALE / 3).await?;
+    } = standby::open_stream(
+        &writer,
+        &reader.key,
+        &reader.grant,
+        hello,
+        STALE / 3,
+        reader.copy_key.clone(),
+    )
+    .await?;
     if start.mode() != FollowMode::Follow {
         return Err(Ended::Restart(format!(
             "the writer {writer} answered {:?} at record {} ({})",

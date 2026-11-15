@@ -38,6 +38,8 @@ tracing = "0.1"
 # The backup follower's S3 requests: a small blocking client with rustls.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 hmac = "0.12"
+# The sealed copies at relays: XChaCha20-Poly1305, a random 192-bit nonce per record.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Dependencies (SQLite, ring, prost, tonic) optimized in debug builds: tests spend most of their time in them.

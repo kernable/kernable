@@ -96,6 +96,7 @@ pub fn produce(
         end.records += batch.len() as u64;
         end.vault_values += vault.len() as u64;
         f(frame(Frame::Batch(ImageBatch {
+            sealed: Vec::new(),
             records: batch
                 .drain(..)
                 .map(|r| LogRecord { record: Some(r) })

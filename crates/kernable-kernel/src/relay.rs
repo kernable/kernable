@@ -30,10 +30,9 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Challenge, FollowMode, FollowRequest, FollowResponse, FollowStart, Grant, ImageEnd,
-        PromoteRequest, PromoteResult, PushRequest, PushResponse, RecordBatch, RecordPoint,
-        SwitchoverRequest, SwitchoverResult, follow_request, follow_response, push_request,
-        push_response,
+        Challenge, FollowMode, FollowRequest, FollowResponse, FollowStart, Grant, PromoteRequest,
+        PromoteResult, PushRequest, PushResponse, RecordBatch, RecordPoint, SwitchoverRequest,
+        SwitchoverResult, follow_request, follow_response, push_request, push_response,
         relay_service_server::{RelayService, RelayServiceServer},
         replication_service_server::{ReplicationService, ReplicationServiceServer},
     },
@@ -539,6 +538,12 @@ async fn push(
     let mut image: Option<Image> = None;
     let dir = copy.log().dir.clone();
     while let Some(message) = inbound.message().await? {
+        // It keeps only what is sealed: a pusher that sends plain values is misconfigured.
+        if !sealed(&message) {
+            return Err(Status::invalid_argument(
+                "a relay keeps sealed records only: give the pusher --copy-key",
+            ));
+        }
         let ack = match message.msg {
             Some(push_request::Msg::Image(batch)) => {
                 if image.is_none() {
@@ -599,6 +604,25 @@ async fn push(
         }
     }
     Ok(())
+}
+
+/// Whether `message` carries nothing in plain but positions, hashes and sizes.
+fn sealed(message: &PushRequest) -> bool {
+    match &message.msg {
+        Some(push_request::Msg::Image(b)) => {
+            b.records.is_empty() && b.vault.is_empty() && b.files.is_empty() && !b.sealed.is_empty()
+        }
+        Some(push_request::Msg::ImageEnd(e)) => !e.sealed.is_empty(),
+        Some(push_request::Msg::Records(b)) => {
+            b.vault.is_empty()
+                && b.files.is_empty()
+                && b.records
+                    .iter()
+                    .all(|r| r.record.is_none() && !r.sealed.is_empty())
+                && (b.records.is_empty() || !b.sealed.is_empty())
+        }
+        _ => true,
+    }
 }
 
 type FollowOut = mpsc::Sender<Result<FollowResponse, Status>>;
@@ -721,8 +745,8 @@ async fn follow(
                     Some(push_request::Msg::Image(batch)) => {
                         tell(out, follow_response::Msg::Image(batch)).await?;
                     }
-                    Some(push_request::Msg::ImageEnd(ImageEnd { seq, hash })) => {
-                        tell(out, follow_response::Msg::ImageEnd(ImageEnd { seq, hash })).await?;
+                    Some(push_request::Msg::ImageEnd(end)) => {
+                        tell(out, follow_response::Msg::ImageEnd(end)).await?;
                     }
                     _ => return Err(internal("the copy's image holds something else")),
                 }
@@ -915,7 +939,7 @@ pub async fn run(config: RelayConfig) -> Result<(), BoxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kernable_core::proto::{ImageBatch, ReplicatedRecord};
+    use kernable_core::proto::{ImageBatch, ImageEnd, ReplicatedRecord};
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("kn-relay-{name}-{}", std::process::id()));
@@ -927,6 +951,7 @@ mod tests {
         RecordBatch {
             records: (from..=to)
                 .map(|seq| ReplicatedRecord {
+                    sealed: Vec::new(),
                     seq,
                     hash: vec![seq as u8; 32],
                     record: None,
@@ -986,6 +1011,7 @@ mod tests {
                 Kind::End,
                 10,
                 &msg(push_request::Msg::ImageEnd(ImageEnd {
+                    sealed: Vec::new(),
                     seq: 10,
                     hash: vec![10; 32],
                 })),

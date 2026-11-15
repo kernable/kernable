@@ -11,6 +11,12 @@ inward), a **relay** holds a copy of the writer's records for them:
   readers as a writer would;
 - **readers** follow the copy at the relay (`--reader <relay> --reader-copy <copy>`).
 
+What reaches the relay is **sealed** with a copy key that the pusher and the copy's readers hold
+and the relay does not: every record, every vault value and file, every part of an image. The
+relay sees the records' positions, hashes and sizes, nothing else, so it can run anywhere,
+operated by anyone. Each sealed value is bound to its place: a relay cannot move one to another
+position or leave a part of an image out unnoticed.
+
 The relay applies nothing and checks no record. Every reader checks each record against the
 writer's checkpoints, as it does from the writer: a relay can hold records back, never change
 one. One relay holds the copies of several writers, one directory each.
@@ -27,9 +33,9 @@ The writer keeps its records until the copy holds them, as for a slow reader, a 
 at most. A reader that holds more than the copy (it followed the writer directly before) waits
 until the copy catches up.
 
-For now the copy holds what a reader gets, vault values in plaintext included: run the relay
-where you would run a reader. Commands and other writes sent to a reader of a relay are refused
-(`unavailable`): send them to the writer.
+A reader of a relay holds what any reader holds, vault values included: keep its keys as a
+reader's. Commands and other writes sent to a reader of a relay are refused (`unavailable`) for
+now: send them to the writer.
 
 ## 1. Keys
 
@@ -39,7 +45,11 @@ takes pushes only from the keys it names. Readers need keys granted `read`, as f
 ```sh
 kernable keys new pusher && kernable grant root.key pusher.pub 'read=*'
 kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*'
+kernable relay key copy.key
 ```
+
+`copy.key` goes to the pusher and to every reader of the copy, never to the relay. Whoever holds
+it reads everything the writer tells a reader: keep it as carefully as a reader's key.
 
 ## 2. The relay
 
@@ -49,14 +59,14 @@ kernable relay --dir /srv/relay --root root.pub --allow-push pusher.pub \
 ```
 
 It listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS. A reader presents its
-grant, which must come from a `--root` and allow `read`.
+grant, which must come from a `--root` and allow `read`. It refuses a push that is not sealed.
 
 ## 3. The pusher, beside the writer
 
 ```sh
 KERNABLE_TLS_CA=ca.tls.crt KERNABLE_TLS_CERT=pusher.tls.crt KERNABLE_TLS_KEY=pusher.tls.key \
 kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --key pusher.key \
-  --to relay.example.net:7400 --copy shop
+  --to relay.example.net:7400 --copy shop --copy-key copy.key
 ```
 
 With a pair, name both kernels: it follows whichever is the writer. It reads `pusher.grant`
@@ -66,7 +76,8 @@ again on every connection and tries again after every failure.
 
 ```sh
 kernable start --root root.pub \
-  --reader relay.example.net:7400 --reader-copy shop --follow-key reader-1.key \
+  --reader relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
+  --follow-key reader-1.key \
   --primary-kernel-key kernel-a.pub --primary-kernel-key kernel-b.pub \
   --kernel-key reader-1-kernel.key --vault-key reader-1-vault.key --listen 10.1.0.5:7233
 ```

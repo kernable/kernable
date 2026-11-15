@@ -98,6 +98,7 @@ fn reader_config(dir: &Path, name: &str, seed: u8, writers: &str) -> Config {
         key: key_path,
         primary_kernel_keys: vec![id(&key(3)), id(&key(8))],
         copy: String::new(),
+        copy_key: None,
     });
     config.replication.reader = true;
     config
@@ -116,6 +117,7 @@ fn standby_config(dir: &Path, writer: &Config) -> Config {
         key: key_path,
         primary_kernel_keys: vec![id(&key(3))],
         copy: String::new(),
+        copy_key: None,
     });
     config.replication.readers = true;
     config

@@ -1450,6 +1450,7 @@ impl Store for FileStore {
             hash = replication::record_hash(&hash, at, &replication::digest(body)).to_vec();
             if at > seq {
                 out.push(ReplicatedRecord {
+                    sealed: Vec::new(),
                     seq: at,
                     hash: hash.clone(),
                     record: Some(LogRecord {

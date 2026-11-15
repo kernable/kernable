@@ -68,6 +68,7 @@ pub fn next(head: &Head, record: Record) -> ReplicatedRecord {
     let seq = head.seq + 1;
     let hash = record_hash(&head.hash, seq, &digest(&body(&record)));
     ReplicatedRecord {
+        sealed: Vec::new(),
         seq,
         hash: hash.to_vec(),
         record: Some(LogRecord {

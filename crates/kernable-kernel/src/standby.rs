@@ -732,18 +732,42 @@ fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
 /// how the primary started it.
 pub(crate) struct Opened {
     pub(crate) tx: mpsc::Sender<FollowRequest>,
-    pub(crate) inbound: Streaming<FollowResponse>,
+    pub(crate) inbound: Inbound,
     pub(crate) start: kernable_core::proto::FollowStart,
 }
 
+/// What comes on a follower's stream. From a relay it is sealed: opened here with the copy key,
+/// so nothing past this reads a sealed value (src/seal.rs).
+pub(crate) struct Inbound {
+    stream: Streaming<FollowResponse>,
+    key: Option<Arc<crate::seal::CopyKey>>,
+    /// The batches of the image under way.
+    images: u64,
+}
+
+impl Inbound {
+    pub(crate) async fn message(&mut self) -> Result<Option<FollowResponse>, Status> {
+        let Some(mut message) = self.stream.message().await? else {
+            return Ok(None);
+        };
+        if let (Some(key), Some(msg)) = (&self.key, message.msg.as_mut()) {
+            crate::seal::open(key, msg, &mut self.images)
+                .map_err(|e| Status::data_loss(format!("what the relay sent: {e}")))?;
+        }
+        Ok(Some(message))
+    }
+}
+
 /// Opens a `Follow` stream to `addr` with `hello`: the challenge answered with `key`, `grant`
-/// presented. Pinged every `every`, so a primary the network cut off ends it.
+/// presented. Pinged every `every`, so a primary the network cut off ends it. With `copy_key`,
+/// `addr` is a relay and what comes is opened with it.
 pub(crate) async fn open_stream(
     addr: &str,
     key: &SigningKey,
     grant: &str,
     hello: FollowHello,
     every: Duration,
+    copy_key: Option<Arc<crate::seal::CopyKey>>,
 ) -> Result<Opened, BoxError> {
     let mut client = ReplicationServiceClient::new(connect_pinging(addr, Some(every)).await?)
         .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
@@ -753,7 +777,11 @@ pub(crate) async fn open_stream(
     tx.send(say(follow_request::Msg::Hello(hello))).await?;
     let mut request = Request::new(ReceiverStream::new(rx));
     request.metadata_mut().insert(GRANT_HEADER, grant.parse()?);
-    let mut inbound = client.follow(request).await?.into_inner();
+    let mut inbound = Inbound {
+        stream: client.follow(request).await?.into_inner(),
+        key: copy_key,
+        images: 0,
+    };
     let Some(follow_response::Msg::Challenge(challenge)) = next(&mut inbound).await? else {
         return Err("the primary sent no challenge".into());
     };
@@ -814,7 +842,15 @@ async fn follow_once(
         tx,
         mut inbound,
         start,
-    } = open_stream(&standby.current(), key, grant, hello, every).await?;
+    } = open_stream(
+        &standby.current(),
+        key,
+        grant,
+        hello,
+        every,
+        copy_key(&standby.follow, standby.reader)?,
+    )
+    .await?;
     *GOODBYE.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
     let _following = Following;
     // Whether it is in sync now, the primary tells it again once it caught up.
@@ -960,17 +996,24 @@ async fn follow_once(
     }
 }
 
-async fn next(
-    inbound: &mut Streaming<FollowResponse>,
-) -> Result<Option<follow_response::Msg>, Status> {
+/// A reader of a relay's copy key (`--reader-copy-key`).
+pub(crate) fn copy_key(
+    follow: &Follow,
+    reader: bool,
+) -> Result<Option<Arc<crate::seal::CopyKey>>, BoxError> {
+    match (&follow.copy_key, reader && !follow.copy.is_empty()) {
+        (Some(path), true) => Ok(Some(crate::seal::CopyKey::read(path)?)),
+        (None, true) => Err("a reader of a relay needs --reader-copy-key".into()),
+        (_, false) => Ok(None),
+    }
+}
+
+async fn next(inbound: &mut Inbound) -> Result<Option<follow_response::Msg>, Status> {
     Ok(inbound.message().await?.and_then(|m| m.msg))
 }
 
 /// Receives a full image into the empty stores; returns the record it stands at.
-async fn take_image(
-    standby: &Arc<Standby>,
-    inbound: &mut Streaming<FollowResponse>,
-) -> Result<u64, BoxError> {
+async fn take_image(standby: &Arc<Standby>, inbound: &mut Inbound) -> Result<u64, BoxError> {
     let marker = image_marker(&standby.config.store).ok_or("no place for the image marker")?;
     std::fs::write(&marker, b"an image from the primary is being applied\n")?;
     let mut records = 0;
@@ -987,7 +1030,7 @@ async fn take_image(
                 tokio::task::spawn_blocking(move || apply_image(&stores, batch, &keys)).await??;
                 crate::crash::point("standby.imaging");
             }
-            Some(follow_response::Msg::ImageEnd(ImageEnd { seq, hash })) => {
+            Some(follow_response::Msg::ImageEnd(ImageEnd { seq, hash, .. })) => {
                 let stores = standby.stores();
                 tokio::task::spawn_blocking(move || -> Result<(), BoxError> {
                     stores.store.start_record_log(&Head { seq, hash })?;
