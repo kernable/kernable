@@ -2017,10 +2017,13 @@ class Kernable:
                                    processes=[p.qualified if isinstance(p, Process) else p for p in processes],
                                    deployment=deployment)
         switch = _switch(switch)
-        rpc.MembershipServiceStub(self._parts.control()).Apply(
-            pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
-                            protocol=PROTOCOL, force=switch == "now", no_switch=switch == "never",
-                            no_rollback=switch == "caught-up"))
+        request = pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
+                                  protocol=PROTOCOL, force=switch == "now", no_switch=switch == "never",
+                                  no_rollback=switch == "caught-up")
+        # The same membership again is fine (the kernel takes a retried deploy): a dropped
+        # connection, or a kernel starting, is asked again.
+        _idempotent(self._timeout_s, lambda left: rpc.MembershipServiceStub(self._parts.control()).Apply(
+            request, timeout=left))
 
     def process_act(self, name: str, context: RequestContext) -> bool:
         """Sets as whom the process `name` (qualified: `shop.fulfilment`) acts: the request context

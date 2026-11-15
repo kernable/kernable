@@ -852,10 +852,12 @@ impl Kernable {
             no_switch: manifest_switch == Switch::Never,
             no_rollback: manifest_switch == Switch::CaughtUp,
         };
+        // The same membership again is fine (the kernel takes a retried deploy), so a request
+        // whose connection dropped, or a kernel starting, is asked again.
         self.client
             .control()
             .await?
-            .call(None, request, |channel, r| async move {
+            .call_with(None, request, true, |channel, r| async move {
                 MembershipServiceClient::new(channel).apply(r).await
             })
             .await?;
@@ -1856,6 +1858,8 @@ fn dropped(status: &tonic::Status) -> bool {
         || message.contains("connection closed")
         || message.contains("error reading a body from connection")
         || message.contains("h2 protocol error")
+        // hyper: the request never went out, its connection had closed (net-reset in the soak).
+        || message.contains("operation was canceled")
 }
 
 fn not_connected(status: &tonic::Status) -> bool {
@@ -1925,6 +1929,7 @@ mod dropped_tests {
         assert!(dropped(&tonic::Status::cancelled(
             "h2 protocol error: error reading a body from connection"
         )));
+        assert!(dropped(&tonic::Status::cancelled("operation was canceled")));
         assert!(!dropped(&tonic::Status::cancelled("Timeout expired")));
         assert!(!dropped(&tonic::Status::unknown("a worker's error")));
         assert!(!dropped(&tonic::Status::invalid_argument(

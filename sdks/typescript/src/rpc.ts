@@ -772,7 +772,8 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     listData: (req) => unary("data", "ListData", req, timeoutMs, true),
     cache: (op, req) => unary("cache", op, req, timeoutMs, op === "GetCache"),
     apply: async (membership, sig, flags = {}) => {
-      await unary("memberships", "Apply", { membership, sig, ...flags });
+      // The same membership again is fine (the kernel takes a retried deploy): idempotent.
+      await unary("memberships", "Apply", { membership, sig, ...flags }, timeoutMs, true);
     },
     registerProcess: (req) => unary<WireProcessRegistered>("processes", "Register", req),
     processAct: (req) => unary<{ changed: boolean }>("processes", "Act", req),
