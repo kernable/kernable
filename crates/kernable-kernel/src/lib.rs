@@ -34,7 +34,6 @@ pub mod global_keys;
 pub mod grants;
 mod http;
 mod index;
-pub mod init;
 mod listeners;
 mod memberships;
 mod metrics;

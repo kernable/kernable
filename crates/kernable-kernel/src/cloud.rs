@@ -37,31 +37,10 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                        [--expires <days>] | revoke <id>]
                                           Tokens for CI (KERNABLE_CLOUD_TOKEN), never an owner's;
                                           shown once
-  kernable cloud projects [--team <team>] [create <name> [--plan <plan>] [--escrow-key <age1…>] | show <name>
-                       | usage <name> [--month <yyyy-mm>] | stop <name> | start <name>
-                       | domain add <name> <host> | domain list <name> | domain remove <name> <host>
-                       | backups <name> | backups create <name> | backups restore <name> <backup> --yes]
-                                          A new project is placed at once, past the checks before
-                                          a team's first project. --escrow-key: your age key
-                                          (age-keygen) its vault key is kept sealed for beside its
-                                          backups, only you can open it; set when it is created,
-                                          never after. A host name of your own: set the TXT record
-                                          `domain add` names, then run it again; keep the record:
-                                          it is checked every day, and a name whose token is
-                                          missing for 7 days is dropped (`domain list` shows it).
-                                          backups restore: code and data as at the backup; what
-                                          was written since is discarded
-  kernable cloud deploy [<dir>] --project <name> [--team <team>] [--backup | --no-backup]
-                                          Packs the app in <dir> (default .; what .kernableignore
-                                          names stays here), puts it, has kernable Cloud build its
-                                          Containerfile on the project's server (scanned for known
-                                          vulnerabilities), release it beside the deployment that
-                                          serves and switch once it caught up; follows it and
-                                          prints the scan and, if it failed, the build's log.
-                                          An app without the kernel (kernel = false) is stopped,
-                                          then started: before, it shows how old its newest
-                                          volume backup is and offers one ([Y/n]; --backup or
-                                          --no-backup for CI)
+  kernable cloud projects [--team <team>] [create <name> | show <name> | usage <name> [--month <yyyy-mm>]]
+                                          A project is your team's record its kernels link to
+                                          (kernable Cloud runs no code of yours); past the checks
+                                          before a team's first project
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
 const DEFAULT_API: &str = "https://api.kernable.com";
@@ -612,7 +591,6 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         ["members", rest @ ..] => members(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["tokens", rest @ ..] => tokens(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["projects", rest @ ..] => projects(Session::open(api.as_deref(), json)?, team_flag, rest),
-        ["deploy", rest @ ..] => deploy(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["help" | "--help"] | [] => {
             println!("{USAGE}");
             Ok(true)
@@ -711,217 +689,6 @@ fn login(mut s: Session, no_browser: bool) -> Result<bool, String> {
             "~/.config/kernable/cloud.json"
         }
     );
-    Ok(true)
-}
-
-/// `kernable cloud deploy [<dir>] --project <name>`: packs the app's source (what
-/// `.kernableignore` leaves out stays here), puts it, has kernable Cloud build its Containerfile
-/// and release it, and follows the deploy until it serves or fails.
-/// Whether `rest` holds the flag `name`, taken out of it.
-fn take(rest: &mut Vec<String>, name: &str) -> bool {
-    let had = rest.iter().any(|w| w == name);
-    rest.retain(|w| w != name);
-    had
-}
-
-/// Before a deploy of an app without the kernel: says how old its newest volume backup is and
-/// takes one if `backup` says so, or, without it, if the person answers yes (a terminal; else
-/// none, with the reminder printed). Waits for it.
-fn backup_before_deploy(
-    s: &mut Session,
-    path: &str,
-    project: &str,
-    backup: Option<bool>,
-) -> Result<(), String> {
-    use std::io::{BufRead, IsTerminal, Write};
-    let now = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64)
-    };
-    let listed = s.call("GET", path, None)?;
-    let newest = listed["backups"][0]["at"].as_i64();
-    let age = match newest {
-        Some(at) => {
-            let m = (now() - at).max(0) / 60;
-            if m < 120 {
-                format!("{m} minutes old")
-            } else {
-                format!("{} hours old", m / 60)
-            }
-        }
-        None => "none yet".to_owned(),
-    };
-    let take = match backup {
-        Some(b) => b,
-        None if std::io::stdin().is_terminal() && !s.json => {
-            eprint!(
-                "{project} keeps its state on its volume, and the deploy stops it first. Its newest backup: {age}. Back it up now? [Y/n] "
-            );
-            let _ = std::io::stderr().flush();
-            let mut answer = String::new();
-            std::io::stdin()
-                .lock()
-                .read_line(&mut answer)
-                .map_err(|e| e.to_string())?;
-            !matches!(answer.trim(), "n" | "N" | "no")
-        }
-        None => {
-            eprintln!(
-                "{project}: its newest volume backup: {age} (--backup takes one first, --no-backup says you know)"
-            );
-            false
-        }
-    };
-    if !take {
-        return Ok(());
-    }
-    let before = listed["backups"][0]["name"].as_str().map(str::to_owned);
-    s.call("POST", path, None)?;
-    eprintln!("{project}: backing its volume up");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        let v = s.call("GET", path, None)?;
-        if v["running_since"].is_null() {
-            return match v["backups"][0]["name"].as_str() {
-                Some(name) if Some(name) != before.as_deref() => {
-                    eprintln!(
-                        "{project}: backed up ({} MB)",
-                        v["backups"][0]["bytes"].as_u64().unwrap_or(0) / 1_000_000
-                    );
-                    Ok(())
-                }
-                _ => Err(format!(
-                    "{project}: the backup did not finish; deploy with --no-backup to go on without"
-                )),
-            };
-        }
-    }
-}
-
-fn deploy(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
-    use sha2::Digest;
-    let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
-    let project =
-        flag(&mut rest, "--project")?.ok_or("kernable cloud deploy needs --project <name>")?;
-    let backup = match (take(&mut rest, "--backup"), take(&mut rest, "--no-backup")) {
-        (true, true) => return Err("--backup or --no-backup, not both".into()),
-        (true, false) => Some(true),
-        (false, true) => Some(false),
-        (false, false) => None,
-    };
-    let dir = match rest.as_slice() {
-        [] => std::path::PathBuf::from("."),
-        [d] => std::path::PathBuf::from(d),
-        _ => return Ok(false),
-    };
-    let app = crate::init::App::read(&dir)?;
-    if !dir.join("Containerfile").is_file() {
-        return Err(format!(
-            "{}: no Containerfile (kernable init writes one)",
-            dir.display()
-        ));
-    }
-    // The source, packed by the system's tar, leaving out what .kernableignore names.
-    let packed =
-        std::env::temp_dir().join(format!("kernable-source-{}.tar.gz", std::process::id()));
-    let mut tar = std::process::Command::new("tar");
-    tar.arg("-czf").arg(&packed);
-    if dir.join(".kernableignore").is_file() {
-        tar.arg("-X").arg(dir.join(".kernableignore"));
-    }
-    tar.arg("-C").arg(&dir).arg(".");
-    let status = tar.status().map_err(|e| format!("tar: {e}"))?;
-    if !status.success() {
-        return Err(format!("tar ended {status}"));
-    }
-    let bytes = std::fs::read(&packed).map_err(|e| format!("{}: {e}", packed.display()))?;
-    let _ = std::fs::remove_file(&packed);
-    let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
-    let t = team(&mut s, team_flag)?;
-    let at = |p: &str| format!("/v1/teams/{t}/projects/{project}/{p}");
-    // Without the kernel the app's state is on the volume, and the deploy stops it first: a
-    // backup now is the way back (P42).
-    if !app.kernel {
-        backup_before_deploy(&mut s, &at("backups"), &project, backup)?;
-    }
-    let up = s.call(
-        "POST",
-        &at("uploads"),
-        Some(json!({ "sha256": sha256, "size": bytes.len() })),
-    )?;
-    let url = up["url"].as_str().ok_or("no upload URL")?;
-    if !s.json {
-        eprintln!(
-            "{project}: uploading the source ({} kB)",
-            bytes.len() / 1000
-        );
-    }
-    ureq::put(url)
-        .send(&bytes[..])
-        .map_err(|e| format!("uploading the source: {e}"))?;
-    let started = s.call(
-        "POST",
-        &at("deploys"),
-        Some(json!({ "sha256": sha256, "app": app })),
-    )?;
-    let id = started["id"].as_str().ok_or("no deploy ID")?.to_owned();
-    let mut last = String::new();
-    let job = loop {
-        let job = s.call("GET", &at(&format!("deploys/{id}")), None)?;
-        let state = job["state"].as_str().unwrap_or_default().to_owned();
-        if state != last && !s.json {
-            eprintln!("{project}: {state}");
-            last = state.clone();
-        }
-        if state == "serving" || state == "failed" {
-            break job;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(3));
-    };
-    s.show(&job, |j| {
-        let report = &j["report"];
-        let scan = &report["scan"];
-        if scan.is_object() {
-            match scan["note"].as_str() {
-                Some(note) => println!("scan: {note}"),
-                None => println!(
-                    "scan: {} critical, {} high",
-                    scan["critical"].as_u64().unwrap_or(0),
-                    scan["high"].as_u64().unwrap_or(0)
-                ),
-            }
-            for f in scan["findings"].as_array().into_iter().flatten().take(10) {
-                println!(
-                    "  {} {} {} {} (fixed in {})",
-                    text(f, "severity"),
-                    text(f, "id"),
-                    text(f, "package"),
-                    text(f, "installed"),
-                    f["fixed"]
-                        .as_str()
-                        .filter(|x| !x.is_empty())
-                        .unwrap_or("none yet")
-                );
-            }
-        }
-        match j["state"].as_str() {
-            Some("serving") => println!(
-                "{project}: {} serves (built in {} s)",
-                text(j, "deployment"),
-                report["seconds"].as_u64().unwrap_or(0)
-            ),
-            _ => {
-                println!("{project}: failed: {}", text(j, "error"));
-                if let Some(log) = report["log"].as_str().filter(|l| !l.is_empty()) {
-                    println!("the build's log, its end:\n{log}");
-                }
-            }
-        }
-    });
-    if job["state"] != "serving" {
-        return Err(format!("the deploy of {project} failed"));
-    }
     Ok(true)
 }
 
@@ -1026,10 +793,7 @@ fn tokens(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bo
 
 fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
     let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
-    let plan = flag(&mut rest, "--plan")?;
     let month = flag(&mut rest, "--month")?;
-    let escrow = flag(&mut rest, "--escrow-key")?;
-    let yes = take(&mut rest, "--yes");
     let t = team(&mut s, team_flag)?;
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -1054,46 +818,15 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
             let v = s.call(
                 "POST",
                 &format!("/v1/teams/{t}/projects"),
-                Some(json!({
-                    "name": name,
-                    "plan": plan.as_deref().unwrap_or("preview"),
-                    "escrow_key": escrow,
-                })),
+                Some(json!({ "name": name })),
             )?;
-            s.show(&v, |v| {
-                println!(
-                    "{name}: {} on {}",
-                    text(v, "status"),
-                    v["server"]
-                        .as_str()
-                        .map_or("-", |_| "a server of the installation")
-                )
-            });
+            s.show(&v, |v| println!("{name}: {}", text(v, "status")));
         }
         ["show", name] => {
             let v = s.call("GET", &format!("/v1/teams/{t}/projects/{name}"), None)?;
             s.show(&v, |v| {
                 let p = &v["project"];
-                println!("{name}\t{}\t{}", text(p, "plan"), text(p, "status"));
-                let at = &v["placement"];
-                if at.is_object() {
-                    println!(
-                        "  running: {}, {}",
-                        if at["run"] == true {
-                            "yes"
-                        } else {
-                            "no (stopped, its data kept)"
-                        },
-                        if at["state"].as_str().unwrap_or_default().is_empty() {
-                            "not reported yet".to_owned()
-                        } else {
-                            format!("its node {}", text(at, "state"))
-                        }
-                    );
-                    for h in at["hosts"].as_array().into_iter().flatten() {
-                        println!("  reached at {}", h.as_str().unwrap_or_default());
-                    }
-                }
+                println!("{name}\t{}", text(p, "status"));
             });
         }
         ["usage", name] => {
@@ -1104,152 +837,6 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
             let v = s.call("GET", &path, None)?;
             s.show(&v, |v| {
                 println!("{}", serde_json::to_string_pretty(v).unwrap_or_default())
-            });
-        }
-        ["domain", "add", name, host] => {
-            // While the record is missing the API says which to set (409), as the error.
-            let v = s.call(
-                "POST",
-                &format!("/v1/teams/{t}/projects/{name}/domains"),
-                Some(json!({ "host": host })),
-            )?;
-            s.show(&v, |_| {
-                println!(
-                    "{name}: {host} is checked and the project's (its routes come with a deploy)"
-                )
-            });
-        }
-        ["backups", name] => {
-            let v = s.call(
-                "GET",
-                &format!("/v1/teams/{t}/projects/{name}/backups"),
-                None,
-            )?;
-            s.show(&v, |v| {
-                let list = v["backups"].as_array().cloned().unwrap_or_default();
-                if list.is_empty() {
-                    println!(
-                        "{name}: no volume backups (an app without the kernel gets one daily)"
-                    );
-                }
-                for b in list {
-                    println!(
-                        "{}\t{}\t{} MB",
-                        b["name"].as_str().unwrap_or("?"),
-                        b["kind"].as_str().unwrap_or("?"),
-                        b["bytes"].as_u64().unwrap_or(0) / 1_000_000
-                    );
-                }
-                if !v["running_since"].is_null() {
-                    println!("(a backup runs now)");
-                }
-            });
-        }
-        ["backups", "restore", name, backup] => {
-            let path = format!("/v1/teams/{t}/projects/{name}/backups");
-            let listed = s.call("GET", &path, None)?;
-            let Some(b) = listed["backups"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|b| b["name"] == *backup)
-                .cloned()
-            else {
-                return Err(format!(
-                    "{name}: no backup {backup} (`kernable cloud projects backups {name}` lists them)"
-                ));
-            };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs() as i64);
-            let hours = (now - b["at"].as_i64().unwrap_or(now)).max(0) / 3600;
-            let code = b["deployment"]
-                .as_str()
-                .map(|d| format!("; deployment {d}, which served then, serves again"))
-                .unwrap_or_default();
-            if !yes {
-                return Err(format!(
-                    "{name}: restoring {backup} stops the app and discards everything it wrote in the {hours} hours since{code}. Run it again with --yes"
-                ));
-            }
-            let before = listed["last"].clone();
-            s.call("POST", &format!("{path}/{backup}/restore"), None)?;
-            eprintln!("{name}: restoring {backup}");
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let v = s.call("GET", &path, None)?;
-                if v["running_since"].is_null() && v["last"] != before {
-                    let result = v["last"]["result"].as_str().unwrap_or("?").to_owned();
-                    if result.starts_with("failed") {
-                        return Err(format!("{name}: {result}"));
-                    }
-                    s.show(&v["last"], |_| println!("{name}: {result}"));
-                    break;
-                }
-            }
-        }
-        ["backups", "create", name] => {
-            let v = s.call(
-                "POST",
-                &format!("/v1/teams/{t}/projects/{name}/backups"),
-                None,
-            )?;
-            s.show(&v, |_| {
-                println!("{name}: its volume is being backed up; `kernable cloud projects backups {name}` lists it once done")
-            });
-        }
-        ["domain", "list", name] => {
-            let v = s.call(
-                "GET",
-                &format!("/v1/teams/{t}/projects/{name}/domains"),
-                None,
-            )?;
-            s.show(&v, |v| {
-                let held = v.as_array().cloned().unwrap_or_default();
-                if held.is_empty() {
-                    println!("{name}: no host names of its own");
-                }
-                for h in held {
-                    let host = h["host"].as_str().unwrap_or("?");
-                    match h["missing_since"].as_i64() {
-                        Some(since) => {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0, |d| d.as_secs() as i64);
-                            let days = (now - since).max(0) / 86_400;
-                            println!(
-                                "{host}\tits TXT token has been missing for {days} days: set it again, \
-                                 or the name is dropped after 7"
-                            )
-                        }
-                        None => println!("{host}\tchecked"),
-                    }
-                }
-            });
-        }
-        ["domain", "remove", name, host] => {
-            let v = s.call(
-                "DELETE",
-                &format!("/v1/teams/{t}/projects/{name}/domains/{host}"),
-                None,
-            )?;
-            s.show(&v, |_| println!("{name}: {host} taken away"));
-        }
-        [verb @ ("stop" | "start"), name] => {
-            let v = s.call(
-                "POST",
-                &format!("/v1/teams/{t}/projects/{name}/{verb}"),
-                None,
-            )?;
-            s.show(&v, |_| {
-                println!(
-                    "{name}: {}",
-                    if *verb == "stop" {
-                        "stopped, its data kept"
-                    } else {
-                        "running again"
-                    }
-                )
             });
         }
         _ => return Ok(false),
