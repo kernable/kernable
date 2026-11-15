@@ -191,11 +191,19 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
 fn run_node(config: Config) -> (JoinHandle<String>, oneshot::Receiver<Arc<Kernel>>) {
     let (tx, rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let listen = config.listen.clone();
         let primary = node::become_primary(config).await.unwrap();
-        let _ = tx.send(Arc::clone(&primary.kernel));
+        // Handed out once it serves: a client that came sooner would find no socket.
+        let kernel = Arc::clone(&primary.kernel);
+        let hand_out = async move {
+            wait_for(&listen).await;
+            let _ = tx.send(kernel);
+            std::future::pending::<()>().await
+        };
         tokio::select! {
             result = serve(primary.kernel) => panic!("the server stopped: {result:?}"),
             why = primary.lease => why.to_string(),
+            () = hand_out => unreachable!("it waits for good"),
         }
     });
     (task, rx)
