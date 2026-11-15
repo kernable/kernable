@@ -1616,6 +1616,24 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         plan(&text, &dir, &this).map_err(|e| format!("{}: {e}", path.display()).into())
     };
+    // A managed node starts with its current settings: a reader never starts as a writer first.
+    if crate::managed::link(&dir)?.is_some() {
+        let d = dir.clone();
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::task::spawn_blocking(move || crate::managed::pull(&d)),
+        )
+        .await
+        {
+            Ok(Ok(Ok(_))) => {}
+            Ok(Ok(Err(e))) => {
+                tracing::warn!(error = %e, "[node] the control point's settings: starts with those it holds")
+            }
+            _ => tracing::warn!(
+                "[node] the control point did not answer: starts with the settings it holds"
+            ),
+        }
+    }
     let mut first = read()?;
     let mut secrets = Secrets::default();
     secrets
