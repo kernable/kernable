@@ -245,10 +245,19 @@ async fn calls_once(pusher: &Arc<Pusher>, current: &Arc<Mutex<String>>) -> Resul
     .await?;
     tracing::info!(relay = %pusher.relay, copy = %pusher.copy, "taking the copy's readers' writes");
     let channels: Arc<Mutex<Option<(String, tonic::transport::Channel)>>> = Arc::default();
+    let mut seen = Seen::default();
     while let Some(message) = inbound.message().await? {
         let Some(calls_response::Msg::Call(call)) = message.msg else {
             continue;
         };
+        // A relay cannot send a call again, or late: each is made once, within a minute.
+        if !seen.first(call.id, call.issued_at) {
+            tracing::warn!(
+                id = call.id,
+                "a call through the relay came late or twice: dropped"
+            );
+            continue;
+        }
         let (pusher, tx) = (Arc::clone(pusher), tx.clone());
         let writer = current
             .lock()
@@ -260,6 +269,7 @@ async fn calls_once(pusher: &Arc<Pusher>, current: &Arc<Mutex<String>>) -> Resul
                 &pusher.copy_key,
                 &pusher.copy,
                 call.id,
+                call.issued_at,
                 &call.sealed,
             ) {
                 Ok(forwarded) => make_call(&writer, &channels, forwarded).await,
@@ -280,6 +290,26 @@ async fn calls_once(pusher: &Arc<Pusher>, current: &Arc<Mutex<String>>) -> Resul
         });
     }
     Ok(())
+}
+
+/// How old a call through the relay may be when the pusher gets it.
+const CALL_AGE_MS: i64 = 60_000;
+
+/// The calls made lately, so none is made twice.
+#[derive(Default)]
+struct Seen(std::collections::HashMap<u64, i64>);
+
+impl Seen {
+    /// Whether call `id`, sent at `issued_at`, is new and on time; notes it.
+    fn first(&mut self, id: u64, issued_at: i64) -> bool {
+        let now = crate::now_ms();
+        if (now - issued_at).abs() > CALL_AGE_MS {
+            return false;
+        }
+        // Kept until it could no longer be on time.
+        self.0.retain(|_, at| now - *at <= 2 * CALL_AGE_MS);
+        self.0.insert(id, issued_at).is_none()
+    }
 }
 
 /// Hop-by-hop headers and those the transport sets again.
@@ -380,5 +410,21 @@ async fn make_call(
         headers: headers(&parts.headers),
         body: collected.to_bytes().to_vec(),
         trailers,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_is_made_once_and_only_while_it_is_new() {
+        let mut seen = Seen::default();
+        let now = crate::now_ms();
+        assert!(seen.first(1, now));
+        assert!(!seen.first(1, now), "twice");
+        assert!(seen.first(2, now - 1_000));
+        assert!(!seen.first(3, now - 2 * CALL_AGE_MS), "late");
+        assert!(!seen.first(4, now + 2 * CALL_AGE_MS), "from the future");
     }
 }

@@ -480,5 +480,8 @@ async fn readers_of_a_copy_whose_pusher_is_gone_count_the_writer_as_away() {
 
     // Back again: the reader is ready again.
     let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
-    until_async("the reader is ready again", async || reader.readiness().is_ok()).await;
+    until_async("the reader is ready again", async || {
+        reader.readiness().is_ok()
+    })
+    .await;
 }

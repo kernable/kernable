@@ -44,8 +44,13 @@ the same way, and a command's answer comes once the reader's own copy holds its 
 a writer. While no pusher is connected, the reader answers `writer_away` and the SDKs try again.
 A request or answer larger than 64 MiB does not pass a relay.
 
+Each write through a relay is sealed with the time it was sent; the pusher makes it only within a
+minute and only once, so a relay cannot send one again later.
+
 A reader of a relay holds what any reader holds, vault values included: keep its keys as a
-reader's.
+reader's. The relay knows no revocations, and a reader whose key you revoked still holds the copy
+key: to shut one out for good, start a new copy (another name) with a new copy key and give it to
+the pusher and the remaining readers.
 
 ## 1. Keys
 

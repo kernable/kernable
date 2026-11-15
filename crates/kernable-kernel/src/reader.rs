@@ -865,8 +865,8 @@ impl RelayRoute {
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).map_err(|_| "no randomness")?;
         let id = u64::from_le_bytes(id);
-        let sealed = crate::seal::seal_call(&self.key, &self.copy, id, &call);
         let issued_at = now_ms();
+        let sealed = crate::seal::seal_call(&self.key, &self.copy, id, issued_at, &call);
         let sig = signing::sign(
             &self.signer,
             &signing::relay_call_message(&self.copy, id, &sealed, issued_at),

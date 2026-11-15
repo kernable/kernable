@@ -12,9 +12,10 @@
 //! - an image batch: `kernable.v1.sealed.image` and its place in the image (8 bytes);
 //! - an image's end: `kernable.v1.sealed.image-end`, its seq and hash; the plaintext is the
 //!   number of batches (8 bytes), so a reader notices a batch left out;
-//! - a write a reader sends through the relay, and the writer's answer:
-//!   `kernable.v1.sealed.call` and `kernable.v1.sealed.reply`, the call's ID and the copy's
-//!   name, so an answer cannot go to another call.
+//! - a write a reader sends through the relay: `kernable.v1.sealed.call`, the call's ID, the
+//!   copy's name and when it was sent (8 bytes), so the pusher can refuse it late or twice; the
+//!   writer's answer: `kernable.v1.sealed.reply`, the call's ID and the copy's name, so an
+//!   answer cannot go to another call.
 
 use std::{path::Path, sync::Arc};
 
@@ -124,9 +125,21 @@ fn label(what: &str, seq: u64, hash: &[u8]) -> Vec<u8> {
     aad
 }
 
-/// A write for the writer, sealed by a reader of `copy`.
-pub(crate) fn seal_call(key: &CopyKey, copy: &str, id: u64, call: &ForwardedCall) -> Vec<u8> {
-    key.seal(&label("call", id, copy.as_bytes()), &call.encode_to_vec())
+fn call_label(copy: &str, id: u64, issued_at: i64) -> Vec<u8> {
+    let mut aad = label("call", id, copy.as_bytes());
+    aad.extend_from_slice(&issued_at.to_be_bytes());
+    aad
+}
+
+/// A write for the writer, sealed by a reader of `copy` at `issued_at` (ms).
+pub(crate) fn seal_call(
+    key: &CopyKey,
+    copy: &str,
+    id: u64,
+    issued_at: i64,
+    call: &ForwardedCall,
+) -> Vec<u8> {
+    key.seal(&call_label(copy, id, issued_at), &call.encode_to_vec())
 }
 
 /// Opened by the pusher.
@@ -134,9 +147,10 @@ pub(crate) fn open_call(
     key: &CopyKey,
     copy: &str,
     id: u64,
+    issued_at: i64,
     sealed: &[u8],
 ) -> Result<ForwardedCall, BoxError> {
-    let plain = key.open(&label("call", id, copy.as_bytes()), sealed)?;
+    let plain = key.open(&call_label(copy, id, issued_at), sealed)?;
     Ok(ForwardedCall::decode(plain.as_slice())?)
 }
 
@@ -323,7 +337,7 @@ mod tests {
         assert!(open_reply(&key, "shop", 2, &sealed).is_err());
         assert!(open_reply(&key, "other", 1, &sealed).is_err());
         assert!(
-            open_call(&key, "shop", 1, &sealed).is_err(),
+            open_call(&key, "shop", 1, 0, &sealed).is_err(),
             "nor as a call"
         );
     }
