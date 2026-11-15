@@ -135,6 +135,7 @@ fn start_pusher(dir: &Path, writer: &str, relay: &str, copy: &str) -> JoinHandle
         relay: relay.to_owned(),
         copy: copy.to_owned(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(dir)).unwrap(),
+        trust: push::Trust::load(vec![id(&root())], Some(dir.join("copy.revoked"))).unwrap(),
     };
     tokio::spawn(async move {
         push::run(pusher).await.unwrap();
@@ -266,6 +267,7 @@ async fn a_relay_serves_only_granted_readers_of_a_copy_it_holds() {
         relay: relay.clone(),
         copy: "shop".into(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
+        trust: push::Trust::load(Vec::new(), None).unwrap(),
     };
     let pushing = tokio::spawn(push::run(stranger));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -529,4 +531,93 @@ async fn readers_of_a_copy_whose_pusher_is_gone_count_the_writer_as_away() {
         reader.readiness().is_ok()
     })
     .await;
+}
+
+/// A reader `name` that has no copy key yet, its grant `grant`.
+fn new_reader(
+    dir: &Path,
+    name: &str,
+    seed: u8,
+    relay: &str,
+    grant: kernable_core::proto::Grant,
+) -> Config {
+    let mut config = reader_config(dir, name, seed, relay, "shop");
+    std::fs::write(
+        dir.join(format!("{name}.grant")),
+        hex(&grant.encode_to_vec()),
+    )
+    .unwrap();
+    config.replication.follow.as_mut().unwrap().copy_key =
+        Some(dir.join(format!("{name}-copy.key")));
+    config
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_reader_gets_the_copy_key_on_the_word_of_the_customers_enrol_key() {
+    use kernable_core::proto::Permission;
+    let dir = Dir::new("relays-enrol");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..3 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let relay = start_relay(&dir.0).await;
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    // The customer's enrol key: the root lets it grant `read`, nothing else.
+    let enrol = key(80);
+    let enrol_grant = grant(&enrol, &[("grant", &["read"])]);
+    let by_enrol = |to: &ed25519_dalek::SigningKey| {
+        kernable_core::signing::delegated_grant(
+            &enrol,
+            enrol_grant.clone(),
+            &id(to),
+            vec![Permission {
+                action: "read".into(),
+                types: vec!["*".into()],
+            }],
+            issued_now(),
+        )
+    };
+
+    // A reader the enrol key granted gets the key, sealed for it, and follows.
+    let config = new_reader(&dir.0, "enrolled", 31, &relay, by_enrol(&key(81)));
+    let reader = start_reader(&config).await;
+    let at = held(&writer);
+    until_async(
+        "the enrolled reader holds the writer's records",
+        async || held(&reader) >= at,
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("enrolled-copy.key")).unwrap(),
+        std::fs::read_to_string(copy_key(&dir.0)).unwrap()
+    );
+
+    // A grant from a root the pusher does not trust: refused, at once.
+    let stranger_root = key(82);
+    let mut foreign = grant(&key(83), &[("read", &["*"])]);
+    foreign.root_sig = Some(kernable_core::signing::sign(
+        &stranger_root,
+        &kernable_core::signing::grant_message(&foreign),
+    ));
+    let refused = standby::run(new_reader(&dir.0, "foreign", 33, &relay, foreign))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("copy key"), "{refused}");
+    assert!(!dir.0.join("foreign-copy.key").exists());
+
+    // The writer revokes the enrol key: the pusher sees it pass and refuses what it granted.
+    writer.revoke(&id(&enrol), 0).unwrap();
+    submit(&writer_config.listen, place(10)).await.unwrap();
+    let revoked_file = dir.0.join("copy.revoked");
+    until_async("the pusher noted the revocation", async || {
+        std::fs::read_to_string(&revoked_file).is_ok_and(|f| f.contains(&id(&enrol)))
+    })
+    .await;
+    let refused = standby::run(new_reader(&dir.0, "late", 34, &relay, by_enrol(&key(84))))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("revoked"), "{refused}");
 }

@@ -90,6 +90,29 @@ name both kernels: it follows whichever is the writer. It reads `pusher.grant`
 again on every connection and tries again after every failure. A [node](./node) runs it for you
 with a `[push]` section (`to`, `copy`, `key`, `copy-key`).
 
+## New readers without copying the key
+
+Copying `copy.key` by hand to every reader works, but the key is better handed over by the pusher:
+give it `--root root.pub` (`root` in a node's `[push]`), and a reader started with a
+`--reader-copy-key` file that does not exist yet asks the relay for it. The pusher seals the key for
+the reader's own key, so the relay never sees it, and writes it to that file (mode 600). It does so
+only for a reader whose grant comes from a root it trusts and allows `read`, and only while neither
+the reader's key nor whoever granted it is revoked (the pusher notes every revocation it forwards,
+in `copy.revoked` beside the copy key).
+
+So that new readers need no ceremony with the root key, let a narrow **enrol key** grant them:
+the root allows it `grant=read` and nothing else, and it can live online, in your CI or vault:
+
+```sh
+kernable keys new enrol && kernable grant root.key enrol.pub 'grant=read'
+kernable keys new reader-2 && kernable grant enrol.key reader-2.pub --delegated 'read=*'
+```
+
+Whoever may grant `read` can let an instance of their own read the copy: keep the enrol key as
+yours, never with the relay's operator. If it leaks, revoke it with the root key; readers it
+granted get no copy key from then on (the ones that have one keep it, so start a new copy with a
+new copy key to shut them out).
+
 ## 4. Readers at the relay
 
 ```sh

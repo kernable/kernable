@@ -130,7 +130,7 @@ Keys and trust:
                                           copy's readers open it (--reader-copy-key). The relay
                                           never holds it: it sees records' positions, hashes and
                                           sizes, nothing else.
-  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file>
+  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--root <root.pub>]...
                                           Follows the writer at <addr> (started with --readers on;
                                           both kernels of a pair, comma-separated) as a reader and
                                           sends every record, sealed with the copy key, to the copy
@@ -141,7 +141,12 @@ Keys and trust:
                                           one the relay takes (--allow-push). The writer keeps its
                                           records until the copy holds them. Beside the push it
                                           takes the writes the copy's readers send through the
-                                          relay and makes them on the writer. Connections use
+                                          relay and makes them on the writer. With --root, a new
+                                          reader may ask it for the copy key: it seals the key for
+                                          the reader's own key if a root (or the root's enrol key,
+                                          granted grant=read) granted the reader read and nothing
+                                          involved is revoked (it notes revocations as they pass,
+                                          in <copy-key>.revoked). Connections use
                                           KERNABLE_TLS_*, as the SDKs do.
   kernable partitions apply <addr> <key> <map.json>
                                           Applies a partition map on the control partition at
@@ -381,7 +386,7 @@ Run a node:
                                           binary, image, cpus, memory, stop-seconds), [backup] (to,
                                           key, backup-key, follow, segment-seconds, base-hours,
                                           keep, check-hours, signer, cpus, memory, env), [push] (to,
-                                          copy, key, copy-key, follow, cpus, memory, env), [pair] (witness,
+                                          copy, key, copy-key, root, follow, cpus, memory, env), [pair] (witness,
                                           node-key, advertise, peer, kernel-keys,
                                           standby-timeout-ms, witness-generation: this node's
                                           kernel of a pair), [node]
@@ -1625,7 +1630,14 @@ async fn run_push(flags: &[&str]) -> ExitCode {
     let parsed = (|| -> Result<push::Pusher> {
         let values = flag_values(
             flags,
-            &["--follow", "--key", "--to", "--copy", "--copy-key"],
+            &[
+                "--follow",
+                "--key",
+                "--to",
+                "--copy",
+                "--copy-key",
+                "--root",
+            ],
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
         let need = |flag: &str| one(flag).ok_or_else(|| format!("{flag} is missing"));
@@ -1652,6 +1664,18 @@ async fn run_push(flags: &[&str]) -> ExitCode {
             copy: need("--copy")?.to_owned(),
             copy_key: kernable_kernel::seal::CopyKey::read(Path::new(need("--copy-key")?))
                 .map_err(boxed)?,
+            // The revocations it saw, beside the copy key.
+            trust: push::Trust::load(
+                values
+                    .get("--root")
+                    .map(|v| v.as_slice())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|r| key_id_of("--root", r))
+                    .collect::<Result<Vec<_>>>()?,
+                Some(Path::new(need("--copy-key")?).with_extension("revoked")),
+            )
+            .map_err(boxed)?,
         })
     })();
     let pusher = match parsed {

@@ -30,10 +30,11 @@ use std::{
 
 use kernable_core::{
     proto::{
-        CallsRequest, CallsResponse, Challenge, FollowMode, FollowRequest, FollowResponse,
-        FollowStart, Grant, PromoteRequest, PromoteResult, PushRequest, PushResponse, RecordBatch,
-        RecordPoint, SealedCall, SealedReply, SwitchoverRequest, SwitchoverResult, calls_request,
-        calls_response, follow_request, follow_response, push_request, push_response,
+        CallsRequest, CallsResponse, Challenge, CopyKeyReply, CopyKeyRequest, FollowMode,
+        FollowRequest, FollowResponse, FollowStart, Grant, PromoteRequest, PromoteResult,
+        PushRequest, PushResponse, RecordBatch, RecordPoint, SealedCall, SealedReply,
+        SwitchoverRequest, SwitchoverResult, calls_request, calls_response, follow_request,
+        follow_response, push_request, push_response,
         relay_service_server::{RelayService, RelayServiceServer},
         replication_service_server::{ReplicationService, ReplicationServiceServer},
     },
@@ -363,6 +364,8 @@ struct Copy {
     calls: Mutex<Option<mpsc::Sender<Result<CallsResponse, Status>>>>,
     /// Calls sent down it, waiting for their answers, by ID.
     pending: Mutex<HashMap<u64, oneshot::Sender<SealedReply>>>,
+    /// Asks for the copy key sent down it, waiting for their answers, by ID.
+    keys: Mutex<HashMap<u64, oneshot::Sender<CopyKeyReply>>>,
 }
 
 impl Copy {
@@ -458,6 +461,7 @@ impl Relay {
             changed,
             calls: Mutex::default(),
             pending: Mutex::default(),
+            keys: Mutex::default(),
         });
         copies.insert(name.to_owned(), Arc::clone(&copy));
         Ok(copy)
@@ -471,19 +475,26 @@ impl Relay {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| hex::decode(v.trim()).ok())
             .and_then(|b| Grant::decode(b.as_slice()).ok())
-            .filter(|g| g.key_id == key)
-            .filter(|g| crate::grants::chain(g, &self.config.roots, None).is_ok())
             .ok_or_else(|| {
                 Status::permission_denied("present the reader's grant, signed by a trusted root")
             })?;
-        let grants = HashMap::from([(grant.key_id.clone(), grant)]);
-        if !config::allowed(&Permissions::new(&grants, &HashMap::new()).read, key, "*") {
-            return Err(Status::permission_denied(
-                "the key may not follow as a reader: its grant needs read",
-            ));
-        }
-        Ok(())
+        grant_reads(&grant, &self.config.roots, key).map_err(Status::permission_denied)
     }
+}
+
+/// Whether `grant` is `key`'s, signed by one of `roots` (or by a delegate of one, as the
+/// customer's enrol key), and allows `read` for everything.
+pub(crate) fn grant_reads(grant: &Grant, roots: &[String], key: &str) -> Result<(), String> {
+    if grant.key_id != key {
+        return Err("the grant is another key's".into());
+    }
+    crate::grants::chain(grant, roots, None)
+        .map_err(|e| format!("the reader's grant is not from a trusted root: {e}"))?;
+    let grants = HashMap::from([(grant.key_id.clone(), grant.clone())]);
+    if !config::allowed(&Permissions::new(&grants, &HashMap::new()).read, key, "*") {
+        return Err("the key may not follow as a reader: its grant needs read".into());
+    }
+    Ok(())
 }
 
 fn internal(e: impl std::fmt::Display) -> Status {
@@ -702,15 +713,28 @@ async fn calls(
     *copy.calls.lock().unwrap_or_else(PoisonError::into_inner) = Some(out.clone());
     tracing::info!(copy = %copy.name, key = %hello.key_id, "a pusher takes calls");
     while let Some(message) = inbound.message().await? {
-        if let Some(calls_request::Msg::Reply(reply)) = message.msg {
-            let waiting = copy
-                .pending
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&reply.id);
-            if let Some(waiting) = waiting {
-                let _ = waiting.send(reply);
+        match message.msg {
+            Some(calls_request::Msg::Reply(reply)) => {
+                let waiting = copy
+                    .pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&reply.id);
+                if let Some(waiting) = waiting {
+                    let _ = waiting.send(reply);
+                }
             }
+            Some(calls_request::Msg::KeyReply(reply)) => {
+                let waiting = copy
+                    .keys
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&reply.id);
+                if let Some(waiting) = waiting {
+                    let _ = waiting.send(reply);
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -783,6 +807,75 @@ async fn call(
             forget();
             Err(Status::deadline_exceeded(
                 "the writer did not answer through the relay in time",
+            ))
+        }
+    }
+}
+
+/// A new reader's ask for the copy key, passed to the copy's pusher, which decides.
+async fn copy_key(relay: Arc<Relay>, ask: CopyKeyRequest) -> Result<CopyKeyReply, Status> {
+    let sig = ask
+        .sig
+        .as_ref()
+        .filter(|s| s.key_id == ask.key_id)
+        .ok_or_else(|| Status::unauthenticated("the ask is not signed by its key"))?;
+    let msg = signing::copy_key_message(&ask.copy, &ask.key_id, ask.id, ask.issued_at);
+    if signing::verify(sig, &msg).is_err() {
+        return Err(Status::unauthenticated("invalid signature"));
+    }
+    if (now_ms() - ask.issued_at).abs() > MAX_REQUEST_AGE_MS {
+        return Err(Status::unauthenticated("the ask expired; check the clock"));
+    }
+    let grant = ask
+        .grant
+        .as_ref()
+        .ok_or_else(|| Status::permission_denied("present the reader's grant"))?;
+    grant_reads(grant, &relay.config.roots, &ask.key_id).map_err(Status::permission_denied)?;
+    let copy = relay.copy(&ask.copy, false)?;
+    let out = copy
+        .calls
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .filter(|o| !o.is_closed())
+        .ok_or_else(|| {
+            Status::unavailable(format!(
+                "no pusher of the copy {} is connected to this relay; try again",
+                copy.name
+            ))
+        })?;
+    let (tx, rx) = oneshot::channel();
+    copy.keys
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(ask.id, tx);
+    let id = ask.id;
+    let forget = || {
+        copy.keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+    };
+    if out
+        .send(Ok(CallsResponse {
+            msg: Some(calls_response::Msg::KeyRequest(ask)),
+        }))
+        .await
+        .is_err()
+    {
+        forget();
+        return Err(Status::unavailable("the copy's pusher left; try again"));
+    }
+    match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(reply)) if reply.refused.is_empty() => Ok(reply),
+        Ok(Ok(reply)) => Err(Status::permission_denied(reply.refused)),
+        Ok(Err(_)) => Err(Status::unavailable(
+            "the copy's pusher left before it answered; try again",
+        )),
+        Err(_) => {
+            forget();
+            Err(Status::deadline_exceeded(
+                "the copy's pusher did not answer in time",
             ))
         }
     }
@@ -1020,6 +1113,15 @@ impl RelayService for Api {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
+    async fn copy_key(
+        &self,
+        request: Request<CopyKeyRequest>,
+    ) -> Result<Response<CopyKeyReply>, Status> {
+        copy_key(Arc::clone(&self.0), request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
     async fn call(&self, request: Request<SealedCall>) -> Result<Response<SealedReply>, Status> {
         let metadata = request.metadata().clone();
         call(Arc::clone(&self.0), &metadata, request.into_inner())
@@ -1189,6 +1291,7 @@ mod tests {
                 changed,
                 calls: Mutex::default(),
                 pending: Mutex::default(),
+                keys: Mutex::default(),
             }
         };
         copy.log().add(batch(1, 4)).unwrap();

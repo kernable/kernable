@@ -520,6 +520,9 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         .map_err(|e| format!("the standby's grant {}: {e}", grant_path.display()))?
         .trim()
         .to_owned();
+    if config.replication.reader && !follow.copy.is_empty() {
+        ask_copy_key(&follow, &key, &grant).await?;
+    }
     // A standby on a new binary waits for the old one to let go of the stores; only then
     // are its snapshots, a cache the primary does not send, removed: they start empty.
     let stores = crate::taking_over(config.take_over_ms, || {
@@ -994,6 +997,67 @@ async fn follow_once(
             Some(_) => return Err("the primary sent something other than records".into()),
         }
     }
+}
+
+/// A new reader of a relay's copy whose `--reader-copy-key` file does not exist yet asks the
+/// relays for it, and the copy's pusher seals it for the reader's key if the reader's grant
+/// allows it; written to the file (mode 0600). Asked again while no pusher answers.
+async fn ask_copy_key(follow: &Follow, key: &SigningKey, grant: &str) -> Result<(), BoxError> {
+    let Some(path) = follow.copy_key.as_ref().filter(|p| !p.exists()) else {
+        return Ok(());
+    };
+    let grant = kernable_core::proto::Grant::decode(hex::decode(grant)?.as_slice())?;
+    let relays = crate::reader::addresses(&follow.primary);
+    let mut delay = Duration::from_millis(200);
+    for attempt in 0usize.. {
+        let relay = &relays[attempt % relays.len()];
+        let mut id = [0u8; 8];
+        getrandom::fill(&mut id).map_err(|_| "no randomness")?;
+        let id = u64::from_le_bytes(id);
+        let key_id = signing::key_id(&key.verifying_key());
+        let issued_at = crate::now_ms();
+        let ask = kernable_core::proto::CopyKeyRequest {
+            copy: follow.copy.clone(),
+            sig: Some(signing::sign(
+                key,
+                &signing::copy_key_message(&follow.copy, &key_id, id, issued_at),
+            )),
+            key_id,
+            issued_at,
+            grant: Some(grant.clone()),
+            id,
+        };
+        let answer = async {
+            kernable_core::proto::relay_service_client::RelayServiceClient::new(
+                connect(relay).await?,
+            )
+            .copy_key(ask)
+            .await
+            .map_err(BoxError::from)
+        }
+        .await;
+        match answer {
+            Ok(reply) => {
+                let copy_key =
+                    crate::seal::open_key(key, &follow.copy, &reply.into_inner().sealed)?;
+                crate::seal::CopyKey::write(path, &copy_key)?;
+                tracing::info!(copy = %follow.copy, file = %path.display(), "got the copy key");
+                return Ok(());
+            }
+            Err(e) => {
+                // A refusal is final: the grant does not allow it.
+                if let Some(status) = e.downcast_ref::<Status>()
+                    && status.code() == tonic::Code::PermissionDenied
+                {
+                    return Err(format!("the copy key: {}", status.message()).into());
+                }
+                tracing::warn!(%relay, error = %e, "asking for the copy key failed; asking again in {delay:?}");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
+    unreachable!("asks until it has the key or is refused")
 }
 
 /// A reader of a relay's copy key (`--reader-copy-key`).

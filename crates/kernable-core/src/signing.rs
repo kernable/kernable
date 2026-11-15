@@ -610,6 +610,16 @@ pub fn relay_call_message(copy: &str, id: u64, sealed: &[u8], issued_at: i64) ->
         .0
 }
 
+/// What a new reader of a relay's copy signs to ask for the copy key.
+pub fn copy_key_message(copy: &str, key_id: &str, id: u64, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.copy-key")
+        .str(copy)
+        .str(key_id)
+        .u64(id)
+        .i64(issued_at)
+        .0
+}
+
 /// What an operator's key signs to hand a pair's primary role over (`kernable switchover`).
 pub fn switchover_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.switchover").i64(issued_at).0

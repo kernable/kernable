@@ -39,6 +39,8 @@ ureq.workspace = true
 hmac.workspace = true
 aes-gcm.workspace = true
 chacha20poly1305.workspace = true
+# The copy key sealed for a reader's own key: X25519 from its Ed25519 key.
+curve25519-dalek = "4"
 tracing-subscriber.workspace = true
 
 [features]

@@ -59,6 +59,31 @@ service RelayService {
   // answered with the writer's answer, sealed. The relay passes it to the copy's pusher, which
   // makes the call on the writer; UNAVAILABLE while no pusher is connected.
   rpc Call(SealedCall) returns (SealedReply);
+  // A new reader of a copy asks for the copy key. The relay passes the ask to the copy's
+  // pusher, which seals the key for the reader's own key if the reader's grant comes from a root
+  // the pusher trusts (or a delegate of one, such as the customer's enrol key) and allows `read`,
+  // and neither the key nor its grant's issuer is revoked. The relay never sees the key.
+  rpc CopyKey(CopyKeyRequest) returns (CopyKeyReply);
+}
+
+// Signed by the reader's key over kernable.v1.copy-key, valid 60 s around issued_at.
+message CopyKeyRequest {
+  string copy = 1;
+  string key_id = 2;
+  int64 issued_at = 3;
+  Signature sig = 4;
+  // The reader's grant.
+  Grant grant = 5;
+  // Random, the reader's: matches the answer to the ask.
+  uint64 id = 6;
+}
+
+// The copy key sealed for the reader's key (X25519 from its Ed25519 key, XChaCha20-Poly1305),
+// or why not.
+message CopyKeyReply {
+  uint64 id = 1;
+  bytes sealed = 2;
+  string refused = 3;
 }
 
 // A write a reader sends through a relay: a ForwardedCall sealed with the copy key, bound to
@@ -83,6 +108,7 @@ message CallsRequest {
     PushHello hello = 1;
     ChallengeResponse challenge_response = 2;
     SealedReply reply = 3;
+    CopyKeyReply key_reply = 4;
   }
 }
 
@@ -90,6 +116,7 @@ message CallsResponse {
   oneof msg {
     Challenge challenge = 1;
     SealedCall call = 2;
+    CopyKeyRequest key_request = 3;
   }
 }
 

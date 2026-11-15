@@ -37,6 +37,7 @@ to = "relay.example.net:7400"
 copy = "shop"
 key = "pusher.key"
 copy-key = "copy.key"
+root = ["root.pub"]                        # optional: new readers may ask for the copy key
 follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's listen
 
 [pair]                                     # optional: one node of a pair

@@ -30,6 +30,7 @@
 //! copy = "shop"
 //! key = "pusher.key"
 //! copy-key = "copy.key"
+//! root = ["root.pub"]                        # optional: new readers may ask for the copy key
 //! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
 //! ```
 //!
@@ -380,6 +381,9 @@ struct PushSection {
     key: String,
     copy_key: String,
     follow: Option<String>,
+    /// Roots whose (or whose enrol key's) grants let a new reader have the copy key.
+    #[serde(default)]
+    root: Vec<String>,
     cpus: Option<String>,
     memory: Option<String>,
     #[serde(default)]
@@ -712,7 +716,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         for (what, value) in [("[push] key", &p.key), ("[push] copy-key", &p.copy_key)] {
             inside(what, value)?;
         }
-        let args = vec![
+        let mut args = vec![
             "push".to_owned(),
             "--follow".into(),
             p.follow.unwrap_or_else(|| followed.clone()),
@@ -725,6 +729,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             "--copy-key".into(),
             p.copy_key,
         ];
+        for root in p.root {
+            args.extend(["--root".into(), root]);
+        }
         specs.push(kernable("push", args, p.env, &p.cpus, &p.memory));
     }
     let metrics_listen = node.metrics_listen.clone();
