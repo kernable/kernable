@@ -76,6 +76,17 @@ kernable relay --dir /srv/relay --root root.pub --allow-push pusher.pub \
 It listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS. A reader presents its
 grant, which must come from a `--root` and allow `read`. It refuses a push that is not sealed.
 
+### Limits and what a copy served
+
+Each copy lives in its own directory under `--dir`, the log in `log`. To cap a copy, write the
+most it may hold, in bytes, to `max-bytes` there: a push that would grow the log beyond it is
+refused (`RESOURCE_EXHAUSTED`), the copy stops following and its readers go unready, until the
+limit rises. The relay writes the bytes it sent to the copy's readers to `served` every ten
+seconds. A copy's log is never compacted: it grows with what the writer writes.
+
+The log only ever grows at its end, sealed, so it can be backed up by copying its new bytes as
+they come, without the copy key and without a stop.
+
 ## 3. The pusher, beside the writer
 
 ```sh

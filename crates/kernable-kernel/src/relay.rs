@@ -14,6 +14,11 @@
 //! first and last record it holds and a checksum. A new image (or an empty one, which empties the
 //! copy) is written to `log.new` and replaces `log` once it ended. On start the relay reads each
 //! log up to its last whole frame and cuts off the rest.
+//!
+//! Beside the log, for whoever operates the relay: `max-bytes`, if it exists, the most the log may
+//! hold (a push that would make it larger is refused with `RESOURCE_EXHAUSTED`, and the copy
+//! stops following until the limit rises), and `served`, the bytes sent to readers since the copy
+//! began, written every ten seconds.
 
 use std::{
     collections::HashMap,
@@ -23,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicU64, Ordering::SeqCst},
     },
     time::Duration,
 };
@@ -317,6 +322,7 @@ impl Log {
         let msg = PushRequest {
             msg: Some(push_request::Msg::Records(batch)),
         };
+        within_limit(&self.dir, self.end + (HEADER + msg.encoded_len()) as u64)?;
         let frame = append(&mut self.file, self.end, Kind::Records, first, last, &msg)
             .and_then(|f| self.file.sync_data().map(|()| f))
             .map_err(|e| Status::internal(format!("writing the copy failed: {e}")))?;
@@ -327,8 +333,26 @@ impl Log {
     }
 }
 
+/// The most a copy in `dir` may hold (`max-bytes`), if it is limited.
+fn limit(dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(dir.join("max-bytes"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// RESOURCE_EXHAUSTED when a copy in `dir` would hold `bytes`, more than its limit.
+fn within_limit(dir: &Path, bytes: u64) -> Result<(), Status> {
+    match limit(dir) {
+        Some(max) if bytes > max => Err(Status::resource_exhausted(format!(
+            "the copy is full: {bytes} bytes would exceed its limit of {max} (max-bytes)"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// A new image being written, until it ends.
 struct Image {
+    dir: PathBuf,
     file: File,
     end: u64,
     frames: Vec<Frame>,
@@ -337,14 +361,16 @@ struct Image {
 impl Image {
     fn begin(dir: &Path) -> std::io::Result<Image> {
         Ok(Image {
+            dir: dir.to_owned(),
             file: File::create(dir.join("log.new"))?,
             end: 0,
             frames: Vec::new(),
         })
     }
 
-    fn push(&mut self, kind: Kind, seq: u64, msg: &PushRequest) -> std::io::Result<()> {
-        let frame = append(&mut self.file, self.end, kind, seq, seq, msg)?;
+    fn push(&mut self, kind: Kind, seq: u64, msg: &PushRequest) -> Result<(), Status> {
+        within_limit(&self.dir, self.end + (HEADER + msg.encoded_len()) as u64)?;
+        let frame = append(&mut self.file, self.end, kind, seq, seq, msg).map_err(internal)?;
         self.end += (HEADER + frame.len as usize) as u64;
         self.frames.push(frame);
         Ok(())
@@ -366,6 +392,8 @@ struct Copy {
     pending: Mutex<HashMap<u64, oneshot::Sender<SealedReply>>>,
     /// Asks for the copy key sent down it, waiting for their answers, by ID.
     keys: Mutex<HashMap<u64, oneshot::Sender<CopyKeyReply>>>,
+    /// Bytes sent to readers since the copy began (`served`).
+    served: AtomicU64,
 }
 
 impl Copy {
@@ -462,6 +490,12 @@ impl Relay {
             calls: Mutex::default(),
             pending: Mutex::default(),
             keys: Mutex::default(),
+            served: AtomicU64::new(
+                std::fs::read_to_string(dir.join("served"))
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0),
+            ),
         });
         copies.insert(name.to_owned(), Arc::clone(&copy));
         Ok(copy)
@@ -602,7 +636,7 @@ async fn push(
                     msg: Some(push_request::Msg::Image(batch)),
                 };
                 let writing = image.as_mut().expect("begun above");
-                writing.push(Kind::Image, 0, &msg).map_err(internal)?;
+                writing.push(Kind::Image, 0, &msg)?;
                 None
             }
             Some(push_request::Msg::ImageEnd(end)) => {
@@ -620,7 +654,7 @@ async fn push(
                 let msg = PushRequest {
                     msg: Some(push_request::Msg::ImageEnd(end)),
                 };
-                writing.push(Kind::End, seq, &msg).map_err(internal)?;
+                writing.push(Kind::End, seq, &msg)?;
                 copy.replace(writing).map_err(internal)?;
                 tracing::info!(copy = %copy.name, at = seq, "the copy begins anew");
                 Some(seq)
@@ -999,6 +1033,7 @@ async fn follow(
                 let msg = frames(Arc::clone(&file), vec![*frame]).await?;
                 match msg.into_iter().next().and_then(|m| m.msg) {
                     Some(push_request::Msg::Image(batch)) => {
+                        copy.served.fetch_add(batch.encoded_len() as u64, SeqCst);
                         tell(out, follow_response::Msg::Image(batch)).await?;
                     }
                     Some(push_request::Msg::ImageEnd(end)) => {
@@ -1041,6 +1076,7 @@ async fn follow(
                     };
                     sent = last.seq;
                     batch.head = copy.writer_head().unwrap_or(head).max(sent);
+                    copy.served.fetch_add(batch.encoded_len() as u64, SeqCst);
                     tell(out, follow_response::Msg::Records(batch)).await?;
                 }
             }
@@ -1192,10 +1228,35 @@ pub async fn run(config: RelayConfig) -> Result<(), BoxError> {
         )?;
     }
     tracing::info!(%listen, dir = %config.dir.display(), "relay starting");
-    let api = Api(Arc::new(Relay {
+    let relay = Arc::new(Relay {
         config,
         copies: Mutex::default(),
-    }));
+    });
+    // What each copy served, for whoever operates the relay, every ten seconds.
+    let counting = Arc::clone(&relay);
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            every.tick().await;
+            let copies: Vec<Arc<Copy>> = counting
+                .copies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect();
+            for copy in copies {
+                let dir = copy.log().dir.clone();
+                let served = copy.served.load(SeqCst);
+                let written = std::fs::write(dir.join("served.new"), format!("{served}\n"))
+                    .and_then(|()| std::fs::rename(dir.join("served.new"), dir.join("served")));
+                if let Err(e) = written {
+                    tracing::warn!(copy = %copy.name, error = %e, "writing what the copy served failed");
+                }
+            }
+        }
+    });
+    let api = Api(relay);
     let router = builder
         .add_service(
             RelayServiceServer::new(api.clone())
@@ -1292,6 +1353,7 @@ mod tests {
                 calls: Mutex::default(),
                 pending: Mutex::default(),
                 keys: Mutex::default(),
+                served: AtomicU64::new(0),
             }
         };
         copy.log().add(batch(1, 4)).unwrap();
@@ -1325,6 +1387,22 @@ mod tests {
         let log = Log::open(&d).unwrap();
         assert_eq!((log.base.seq, log.head.seq), (10, 12));
         assert_eq!(log.hash_at(10).unwrap(), Some(vec![10; 32]));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_copy_takes_no_more_than_its_limit() {
+        let d = dir("limit");
+        let mut log = Log::open(&d).unwrap();
+        log.add(batch(1, 2)).unwrap();
+        let size = log.end;
+        std::fs::write(d.join("max-bytes"), format!("{}\n", size + 10)).unwrap();
+        let full = log.add(batch(3, 4)).unwrap_err();
+        assert_eq!(full.code(), tonic::Code::ResourceExhausted, "{full:?}");
+        assert_eq!((log.end, log.head.seq), (size, 2), "nothing written");
+        // The limit rises: it follows on.
+        std::fs::write(d.join("max-bytes"), "1000000\n").unwrap();
+        assert_eq!(log.add(batch(3, 4)).unwrap(), 4);
         let _ = std::fs::remove_dir_all(d);
     }
 
