@@ -745,7 +745,7 @@ pub(crate) struct Inbound {
     stream: Streaming<FollowResponse>,
     key: Option<Arc<crate::seal::CopyKey>>,
     /// The batches of the image under way.
-    images: u64,
+    images: crate::seal::Images,
 }
 
 impl Inbound {
@@ -783,7 +783,7 @@ pub(crate) async fn open_stream(
     let mut inbound = Inbound {
         stream: client.follow(request).await?.into_inner(),
         key: copy_key,
-        images: 0,
+        images: Default::default(),
     };
     let Some(follow_response::Msg::Challenge(challenge)) = next(&mut inbound).await? else {
         return Err("the primary sent no challenge".into());

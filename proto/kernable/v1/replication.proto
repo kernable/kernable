@@ -308,8 +308,9 @@ message ImageBatch {
   repeated LogRecord records = 1;
   repeated VaultRow vault = 2;
   repeated DataFile files = 3;
-  // On the way through a relay, instead of the rest: this batch sealed with the copy key, bound
-  // to its place in the image (0, 1, ...).
+  // On the way through a relay, instead of the rest: the image's random ID (16 bytes), then this
+  // batch sealed with the copy key, bound to the ID and its place in the image (0, 1, ...), so a
+  // relay can neither reorder an image nor mix two.
   bytes sealed = 4;
 }
 
@@ -317,8 +318,8 @@ message ImageBatch {
 message ImageEnd {
   uint64 seq = 1;
   bytes hash = 2;
-  // On the way through a relay: how many batches the image has, sealed with the copy key and
-  // bound to `seq` and `hash`, so a relay cannot leave any out.
+  // On the way through a relay: how many batches the image has and its ID, sealed with the copy
+  // key and bound to `seq` and `hash`, so a relay cannot leave any out.
   bytes sealed = 3;
 }
 

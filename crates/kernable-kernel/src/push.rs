@@ -248,7 +248,7 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
                 hash: ZERO.to_vec(),
                 sealed: Vec::new(),
             });
-            crate::seal::seal(&pusher.copy_key, &mut empty, &mut 0);
+            crate::seal::seal(&pusher.copy_key, &mut empty, &mut Default::default());
             let follow_response::Msg::ImageEnd(empty) = empty else {
                 unreachable!("sealed in place")
             };
@@ -265,7 +265,7 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
         }
     }
     // The batches of the image under way, for sealing.
-    let mut images = 0;
+    let mut images = crate::seal::Images::default();
     loop {
         tokio::select! {
             message = from_writer.message() => match message?.and_then(|m| m.msg) {
@@ -509,6 +509,28 @@ async fn make_call(
         ..Default::default()
     }
     };
+    // Only what a reader forwards anyway: commands and the writes it passes on as they come.
+    // Anything else would open the writer's other services to whoever holds the copy key.
+    if call.path != "/kernable.v1.CommandService/Submit" && !crate::reader::forwarded(&call.path) {
+        return ForwardedReply {
+            status: 200,
+            headers: vec![
+                Header {
+                    name: "content-type".into(),
+                    value: b"application/grpc".to_vec(),
+                },
+                Header {
+                    name: "grpc-status".into(),
+                    value: b"7".to_vec(),
+                },
+                Header {
+                    name: "grpc-message".into(),
+                    value: format!("{}: not a call a relay passes on", call.path).into_bytes(),
+                },
+            ],
+            ..Default::default()
+        };
+    }
     let cached = channels
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -564,6 +586,39 @@ async fn make_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_a_readers_writes_pass_the_relay() {
+        let channels = Mutex::new(None);
+        let call = |path: &str| ForwardedCall {
+            path: path.into(),
+            ..Default::default()
+        };
+        let reply = make_call(
+            "unix:/nonexistent",
+            &channels,
+            call("/kernable.v1.ReplicationService/Promote"),
+        )
+        .await;
+        let status = reply
+            .headers
+            .iter()
+            .find(|h| h.name == "grpc-status")
+            .unwrap();
+        assert_eq!(status.value, b"7", "refused before the writer is asked");
+        let reply = make_call(
+            "unix:/nonexistent",
+            &channels,
+            call("/kernable.v1.CommandService/Submit"),
+        )
+        .await;
+        let status = reply
+            .headers
+            .iter()
+            .find(|h| h.name == "grpc-status")
+            .unwrap();
+        assert_eq!(status.value, b"14", "passed on (the writer is away here)");
+    }
 
     #[test]
     fn a_call_is_made_once_and_only_while_it_is_new() {

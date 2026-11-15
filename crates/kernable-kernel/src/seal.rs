@@ -9,9 +9,11 @@
 //! - a record: `kernable.v1.sealed.record`, its seq (8 bytes, big-endian) and hash;
 //! - a record batch's vault values and files: `kernable.v1.sealed.attachments`, the batch's last
 //!   record's seq and hash (a relay may send a reader only the end of a batch: the last stays);
-//! - an image batch: `kernable.v1.sealed.image` and its place in the image (8 bytes);
+//! - an image batch: `kernable.v1.sealed.image`, its place in the image (8 bytes) and the image's
+//!   random ID (16 bytes, also in front of the sealed value);
 //! - an image's end: `kernable.v1.sealed.image-end`, its seq and hash; the plaintext is the
-//!   number of batches (8 bytes), so a reader notices a batch left out;
+//!   number of batches (8 bytes) and the image's ID, so a reader notices a batch left out or
+//!   one of another image;
 //! - a write a reader sends through the relay: `kernable.v1.sealed.call`, the call's ID, the
 //!   copy's name and when it was sent (8 bytes), so the pusher can refuse it late or twice; the
 //!   writer's answer: `kernable.v1.sealed.reply`, the call's ID and the copy's name, so an
@@ -177,21 +179,41 @@ pub(crate) fn open_reply(
     Ok(ForwardedReply::decode(plain.as_slice())?)
 }
 
-/// Seals what the writer sent a pusher, for the relay. `images` counts the batches of the image
-/// under way.
-pub(crate) fn seal(key: &CopyKey, msg: &mut follow_response::Msg, images: &mut u64) {
+/// The image under way: its batches so far, and its random ID, which every batch and the end
+/// carry, so a relay cannot mix batches of two images.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Images {
+    count: u64,
+    id: Option<[u8; 16]>,
+}
+
+impl Images {
+    fn id(&mut self) -> [u8; 16] {
+        *self.id.get_or_insert_with(|| {
+            let mut id = [0u8; 16];
+            getrandom::fill(&mut id).expect("randomness");
+            id
+        })
+    }
+}
+
+/// Seals what the writer sent a pusher, for the relay.
+pub(crate) fn seal(key: &CopyKey, msg: &mut follow_response::Msg, images: &mut Images) {
     match msg {
         follow_response::Msg::Image(batch) => {
             let plain = std::mem::take(batch).encode_to_vec();
-            batch.sealed = key.seal(&label("image", *images, &[]), &plain);
-            *images += 1;
+            let id = images.id();
+            let mut sealed = id.to_vec();
+            sealed.extend(key.seal(&label("image", images.count, &id), &plain));
+            batch.sealed = sealed;
+            images.count += 1;
         }
         follow_response::Msg::ImageEnd(end) => {
-            end.sealed = key.seal(
-                &label("image-end", end.seq, &end.hash),
-                &images.to_be_bytes(),
-            );
-            *images = 0;
+            let id = images.id();
+            let mut plain = images.count.to_be_bytes().to_vec();
+            plain.extend_from_slice(&id);
+            end.sealed = key.seal(&label("image-end", end.seq, &end.hash), &plain);
+            *images = Images::default();
         }
         follow_response::Msg::Records(batch) => {
             for r in &mut batch.records {
@@ -214,34 +236,42 @@ pub(crate) fn seal(key: &CopyKey, msg: &mut follow_response::Msg, images: &mut u
     }
 }
 
-/// Opens what a reader got from a relay, in place. `images` counts the batches of the image
-/// under way.
+/// Opens what a reader got from a relay, in place.
 pub(crate) fn open(
     key: &CopyKey,
     msg: &mut follow_response::Msg,
-    images: &mut u64,
+    images: &mut Images,
 ) -> Result<(), BoxError> {
     match msg {
         follow_response::Msg::Image(batch) => {
-            let plain = key.open(&label("image", *images, &[]), &batch.sealed)?;
+            if batch.sealed.len() < 16 {
+                return Err("an image batch is cut off".into());
+            }
+            let id: [u8; 16] = batch.sealed[..16].try_into().expect("16 bytes");
+            if images.id.is_some_and(|ours| ours != id) {
+                return Err("a batch of another image".into());
+            }
+            images.id = Some(id);
+            let plain = key.open(&label("image", images.count, &id), &batch.sealed[16..])?;
             *batch = ImageBatch::decode(plain.as_slice())?;
-            *images += 1;
+            images.count += 1;
         }
         follow_response::Msg::ImageEnd(ImageEnd { seq, hash, sealed }) => {
             let plain = key.open(&label("image-end", *seq, hash), sealed)?;
-            let count = u64::from_be_bytes(
-                plain
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "an image's end holds no count")?,
-            );
-            if count != *images {
-                return Err(
-                    format!("the image has {count} batches, the relay sent {images}").into(),
-                );
+            if plain.len() != 24 {
+                return Err("an image's end holds no count".into());
+            }
+            let count = u64::from_be_bytes(plain[..8].try_into().expect("8 bytes"));
+            let id: [u8; 16] = plain[8..].try_into().expect("16 bytes");
+            if count != images.count || images.id.is_some_and(|ours| ours != id) {
+                return Err(format!(
+                    "the image has {count} batches, the relay sent {} (or of another image)",
+                    images.count
+                )
+                .into());
             }
             sealed.clear();
-            *images = 0;
+            *images = Images::default();
         }
         follow_response::Msg::Records(batch) => open_records(key, batch)?,
         _ => {}
@@ -393,7 +423,7 @@ mod tests {
     fn what_is_sealed_opens_with_the_key_only_and_only_where_it_belongs() {
         let key = CopyKey::new(&[7; 32]);
         let mut msg = follow_response::Msg::Records(batch());
-        seal(&key, &mut msg, &mut 0);
+        seal(&key, &mut msg, &mut Images::default());
         let follow_response::Msg::Records(sealed) = &msg else {
             unreachable!()
         };
@@ -403,7 +433,7 @@ mod tests {
         // Another key does not open it.
         let mut copy = msg.clone();
         let other = CopyKey::new(&[8; 32]);
-        assert!(open(&other, &mut copy, &mut 0).is_err());
+        assert!(open(&other, &mut copy, &mut Images::default()).is_err());
 
         // A record moved to another place does not open.
         let mut moved = msg.clone();
@@ -411,16 +441,16 @@ mod tests {
             b.records.swap(0, 1);
             (b.records[0].seq, b.records[1].seq) = (1, 2);
         }
-        assert!(open(&key, &mut moved, &mut 0).is_err());
+        assert!(open(&key, &mut moved, &mut Images::default()).is_err());
 
         // Only its end, as a relay sends a reader that holds the first record.
         let mut end = msg.clone();
         if let follow_response::Msg::Records(b) = &mut end {
             b.records.remove(0);
         }
-        open(&key, &mut end, &mut 0).unwrap();
+        open(&key, &mut end, &mut Images::default()).unwrap();
 
-        open(&key, &mut msg, &mut 0).unwrap();
+        open(&key, &mut msg, &mut Images::default()).unwrap();
         assert_eq!(msg, follow_response::Msg::Records(batch()));
     }
 
@@ -458,7 +488,7 @@ mod tests {
     #[test]
     fn an_image_with_a_batch_left_out_does_not_open() {
         let key = CopyKey::new(&[7; 32]);
-        let mut images = 0;
+        let mut images = Images::default();
         let mut sealed: Vec<_> = (0..3)
             .map(|_| {
                 let mut m = follow_response::Msg::Image(ImageBatch::default());
@@ -474,14 +504,27 @@ mod tests {
         seal(&key, &mut end, &mut images);
 
         // Batch 1 left out: batch 2 does not open in its place.
-        let mut opened = 0;
+        let mut opened = Images::default();
         open(&key, &mut sealed[0].clone(), &mut opened).unwrap();
         assert!(open(&key, &mut sealed[2].clone(), &mut opened).is_err());
         // The end after two of the three.
-        let mut opened = 2;
+        let mut opened = Images::default();
+        for m in &sealed[..2] {
+            open(&key, &mut m.clone(), &mut opened).unwrap();
+        }
         assert!(open(&key, &mut end.clone(), &mut opened).is_err());
+        // A batch of another image, in its place.
+        let mut other = Images::default();
+        let mut foreign = follow_response::Msg::Image(ImageBatch::default());
+        seal(&key, &mut foreign, &mut other);
+        let mut opened = Images::default();
+        open(&key, &mut sealed[0].clone(), &mut opened).unwrap();
+        assert!(
+            open(&key, &mut foreign, &mut opened).is_err(),
+            "mixed images"
+        );
         // All of them, then the end.
-        let mut opened = 0;
+        let mut opened = Images::default();
         for m in &mut sealed {
             open(&key, m, &mut opened).unwrap();
         }
