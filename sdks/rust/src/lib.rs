@@ -1828,9 +1828,14 @@ impl StoredEvent {
 /// its stores over, a proxy that closed): unknown whether it ran.
 fn dropped(status: &tonic::Status) -> bool {
     use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, UnexpectedEof};
+    // tonic says Cancelled for a stream the connection's end reset under way (h2), with
+    // the connection's error in the message; a call the caller cancelled names none.
     if !matches!(
         status.code(),
-        tonic::Code::Unknown | tonic::Code::Unavailable | tonic::Code::Internal
+        tonic::Code::Unknown
+            | tonic::Code::Unavailable
+            | tonic::Code::Internal
+            | tonic::Code::Cancelled
     ) {
         return false;
     }
@@ -1916,6 +1921,11 @@ mod dropped_tests {
         assert!(dropped(&tonic::Status::unavailable(
             "h2 protocol error: error reading a body from connection"
         )));
+        // As a kernel killed under a call left it (soak, a primary's kernel killed).
+        assert!(dropped(&tonic::Status::cancelled(
+            "h2 protocol error: error reading a body from connection"
+        )));
+        assert!(!dropped(&tonic::Status::cancelled("Timeout expired")));
         assert!(!dropped(&tonic::Status::unknown("a worker's error")));
         assert!(!dropped(&tonic::Status::invalid_argument(
             "transport error"
