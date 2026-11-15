@@ -804,6 +804,11 @@ async fn follow_once(
         rewind_points,
         witness_generation: standby.link.as_ref().and_then(|l| l.generations.newest()),
         reader: standby.reader,
+        copy: if standby.reader {
+            follow.copy.clone()
+        } else {
+            String::new()
+        },
     };
     let Opened {
         tx,

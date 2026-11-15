@@ -73,6 +73,8 @@ pub(crate) struct Reader {
     grant: String,
     /// The writer's kernel keys: its checkpoints are signed with one of them.
     kernel_keys: Vec<String>,
+    /// `--reader-copy`: the addresses are relays, and it follows this copy there.
+    copy: String,
     /// The newest record applied.
     applied: AtomicU64,
     /// How far the writer said it may follow, last.
@@ -115,6 +117,7 @@ impl Reader {
             key,
             grant,
             kernel_keys: follow.primary_kernel_keys.clone(),
+            copy: follow.copy.clone(),
             applied: AtomicU64::new(applied),
             head: AtomicU64::new(applied),
             connected: AtomicBool::new(false),
@@ -220,6 +223,12 @@ impl Reader {
 
     /// A channel to the writer it follows now, for what it forwards.
     async fn channel(&self) -> Result<(String, Channel), Status> {
+        if !self.copy.is_empty() {
+            return Err(Status::unavailable(format!(
+                "this reader follows the copy {} at a relay, which takes no writes: send them to the writer",
+                self.copy
+            )));
+        }
         let writer = self.writer();
         let cached = self
             .channels
@@ -356,6 +365,7 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
         rewind_points: Vec::new(),
         witness_generation: None,
         reader: true,
+        copy: reader.copy.clone(),
     };
     let writer = reader.writer();
     let standby::Opened {

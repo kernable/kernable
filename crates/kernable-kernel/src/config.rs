@@ -120,6 +120,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Run as a reader, a read-only copy of the writer at these addresses (comma-separated: both kernels of a pair; it follows whichever is the primary). It applies the writer's records as a standby does, answers queries, subscriptions and live listeners from its own copy, forwards commands and every other write to the writer, and is never promoted. Reactors and workers that connect to it wait (`reader_of`); scheduled commands and business processes run on the writer. Needs `--follow-key` (granted `read`, not `replicate`: a reader's key never follows as a standby) and `--primary-kernel-key`; the writer needs `--readers on`. Not with `--follow`, `--witness`, `--replication sync`, `--backup on` or `--readers on`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
     ),
     (
+        "--reader-copy",
+        "KERNABLE_READER_COPY",
+        "",
+        "With `--reader`: its addresses are relays (`kernable relay`), not the writer, and the reader follows this copy of the writer's records there. It checks every record against the writer's checkpoints as it does from the writer, so a relay can hold records back but never change one. Commands and other writes are refused for now (`unavailable`): send them to the writer.",
+    ),
+    (
         "--from-backup",
         "KERNABLE_FROM_BACKUP",
         "",
@@ -484,6 +490,8 @@ pub struct Follow {
     pub key: PathBuf,
     /// Key IDs of the primary's kernel keys.
     pub primary_kernel_keys: Vec<String>,
+    /// `--reader-copy`: the addresses are relays, and the reader follows this copy there.
+    pub copy: String,
 }
 
 /// What the kernel takes on at most. Beyond a limit, a request is refused with
@@ -653,9 +661,13 @@ impl Config {
                 primary,
                 key: get("--follow-key").expect("has a default").into(),
                 primary_kernel_keys: kernel_keys()?,
+                copy: get("--reader-copy").unwrap_or_default(),
             }),
             (None, None) => None,
         };
+        if get("--reader-copy").is_some() && reader.is_none() {
+            return Err("--reader-copy is for a reader: give --reader <relay address> too".into());
+        }
         let from_backup = match (get("--from-backup"), &reader) {
             (None, _) => {
                 if get("--from-backup-key").is_some() || get("--from-backup-vault-key").is_some() {

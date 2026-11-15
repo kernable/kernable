@@ -565,6 +565,7 @@ async fn a_masked_copy_from_an_export_stays_a_copy() {
         primary: "127.0.0.1:1".into(),
         key: env.dir.join("vault.key"),
         primary_kernel_keys: vec![id(&key(3))],
+        copy: String::new(),
     });
     let store = kernable_store::open_read_only(&standby.store).unwrap();
     let e = Kernel::open_on(standby, store).err().unwrap().to_string();

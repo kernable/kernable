@@ -29,6 +29,51 @@ service ReplicationService {
   rpc Switchover(SwitchoverRequest) returns (SwitchoverResult);
 }
 
+// A relay (`kernable relay`, or kernable Cloud's): it keeps copies of writers' records outside
+// their networks, and readers follow a copy there. It holds the records only; it applies none. A
+// pusher beside the writer (`kernable push`) follows the writer as a reader does and sends what it
+// gets on, over a connection it opens itself, so the writer accepts none from outside. Readers
+// follow a copy as they follow a writer (ReplicationService.Follow, `reader`, `copy`), and check
+// every record against the writer's checkpoints as they always do: a relay can withhold records,
+// never change one.
+service RelayService {
+  // PushRequest.hello -> PushResponse.challenge -> PushRequest.challenge_response ->
+  // PushResponse.start (where the copy stands), then the writer's records from there: an image
+  // (image..., image_end) when the copy is empty or the writer no longer keeps its next record,
+  // then record batches. An image_end without an image empties the copy (the writer's log no
+  // longer continues it): the records from 1 follow. Record batches without records only say
+  // where the writer stands. The relay acknowledges what it wrote and synced.
+  rpc Push(stream PushRequest) returns (stream PushResponse);
+}
+
+message PushRequest {
+  oneof msg {
+    PushHello hello = 1;
+    ChallengeResponse challenge_response = 2;
+    ImageBatch image = 3;
+    ImageEnd image_end = 4;
+    RecordBatch records = 5;
+  }
+}
+
+// Who pushes, to which copy. The pusher's key must be one the relay takes pushes from.
+message PushHello {
+  string key_id = 1;
+  // The copy's name at the relay (one relay holds several).
+  string copy = 2;
+  uint32 protocol = 3;
+}
+
+message PushResponse {
+  oneof msg {
+    Challenge challenge = 1;
+    // Where the copy stands: seq 0 with the zero hash for an empty copy.
+    RecordPoint start = 2;
+    // Every record up to `seq` is written and synced.
+    FollowAck ack = 3;
+  }
+}
+
 message SwitchoverRequest {
   int64 issued_at = 1;
   Signature sig = 2;
@@ -76,6 +121,8 @@ message FollowHello {
   // (with a standby, those the standby holds), and, while nothing new comes, a RecordBatch
   // without records every second whose `head` says how far it may follow.
   bool reader = 8;
+  // A reader of a relay: the copy it follows there. A kernel ignores it.
+  string copy = 9;
 }
 
 message RecordPoint {

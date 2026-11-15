@@ -97,6 +97,7 @@ fn reader_config(dir: &Path, name: &str, seed: u8, writers: &str) -> Config {
         primary: writers.into(),
         key: key_path,
         primary_kernel_keys: vec![id(&key(3)), id(&key(8))],
+        copy: String::new(),
     });
     config.replication.reader = true;
     config
@@ -114,6 +115,7 @@ fn standby_config(dir: &Path, writer: &Config) -> Config {
         primary: writer.listen.clone(),
         key: key_path,
         primary_kernel_keys: vec![id(&key(3))],
+        copy: String::new(),
     });
     config.replication.readers = true;
     config
@@ -133,7 +135,8 @@ async fn start_reader(config: &Config) -> Arc<Kernel> {
         .await
         .expect("the reader catches up")
         .unwrap();
-    open(config).await
+    // As `kernable start` does: the stores' locks may take a moment to go.
+    open(&kernable_kernel::promoted(config.clone())).await
 }
 
 fn grant_defaults(kernel: &Kernel) {

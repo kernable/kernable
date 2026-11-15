@@ -1553,7 +1553,14 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     let mut last_read = watched.iter().map(|p| modified(p)).collect::<Vec<_>>();
     // Exclusive: when what is stopping now has ended.
     let mut ended = None;
-    apply(&dir, &mut children, first.children, first.exclusive, &mut ended).await;
+    apply(
+        &dir,
+        &mut children,
+        first.children,
+        first.exclusive,
+        &mut ended,
+    )
+    .await;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let mut hangup = signal(libc::SIGHUP)?;
     let mut terminate = signal(libc::SIGTERM)?;
@@ -1614,7 +1621,14 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
                             "[node] metrics-listen changed: it applies when the node starts again"
                         );
                     }
-                    apply(&dir, &mut children, plan.children, plan.exclusive, &mut ended).await;
+                    apply(
+                        &dir,
+                        &mut children,
+                        plan.children,
+                        plan.exclusive,
+                        &mut ended,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "the project file is invalid: the children run on as they are")
@@ -1999,7 +2013,8 @@ fn only_stopped_following(old: &Spec, new: &Spec, dir: &Path) -> bool {
             .as_ref()
             .map_or_else(|| s.args.clone(), |c| c.command.clone())
     };
-    if !command(old).iter().any(|a| a == "--follow") || command(new).iter().any(|a| a == "--follow") {
+    if !command(old).iter().any(|a| a == "--follow") || command(new).iter().any(|a| a == "--follow")
+    {
         return false;
     }
     let mut stripped = old.clone();
@@ -2760,10 +2775,24 @@ secrets = ["stripe"]
             "if [ -f a.ended ]; then echo after; else echo before; fi > b.started; sleep 30",
         );
         let (mut children, mut ended) = (Vec::new(), None);
-        apply(Path::new("."), &mut children, vec![a], exclusive, &mut ended).await;
+        apply(
+            Path::new("."),
+            &mut children,
+            vec![a],
+            exclusive,
+            &mut ended,
+        )
+        .await;
         step(&mut children[0], &dir).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        apply(Path::new("."), &mut children, vec![b], exclusive, &mut ended).await;
+        apply(
+            Path::new("."),
+            &mut children,
+            vec![b],
+            exclusive,
+            &mut ended,
+        )
+        .await;
         let started = dir.join("b.started");
         for _ in 0..100 {
             for c in &mut children {
@@ -3181,10 +3210,16 @@ env = { KERNABLE_LOG = "info" }
             assert_ne!(old, new);
             // Still following (its note is there): it starts again, as its own primary.
             std::fs::write(dir.join("k.db.following"), "a.example:443\n").unwrap();
-            assert!(!only_stopped_following(&old, &new, &dir), "contained={contained}");
+            assert!(
+                !only_stopped_following(&old, &new, &dir),
+                "contained={contained}"
+            );
             // Promoted (the note gone): it runs on.
             std::fs::remove_file(dir.join("k.db.following")).unwrap();
-            assert!(only_stopped_following(&old, &new, &dir), "contained={contained}");
+            assert!(
+                only_stopped_following(&old, &new, &dir),
+                "contained={contained}"
+            );
             // Anything else changed too: it starts again.
             let other = kernel(&own.replace("info", "debug"));
             assert!(!only_stopped_following(&old, &other, &dir));
@@ -3207,7 +3242,10 @@ env = { KERNABLE_LOG = "info" }
         std::fs::write(dir.join("kernable.db.following"), "a.example:443\n").unwrap();
         assert!(!only_stopped_following(&old, &new, &dir));
         std::fs::remove_file(dir.join("kernable.db.following")).unwrap();
-        assert!(only_stopped_following(&old, &new, &dir), "the default store");
+        assert!(
+            only_stopped_following(&old, &new, &dir),
+            "the default store"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3239,7 +3277,12 @@ build = "worker"
             .collect();
         let commands: Vec<_> = forwarders
             .iter()
-            .map(|f| (f.name.as_str(), f.container.as_ref().unwrap().command.clone()))
+            .map(|f| {
+                (
+                    f.name.as_str(),
+                    f.container.as_ref().unwrap().command.clone(),
+                )
+            })
             .collect();
         assert_eq!(
             commands,
@@ -3269,7 +3312,8 @@ build = "worker"
                 .all(|f| f.args.join(" ").contains("--pod kernable-shop"))
         );
         // A service added: the forwarders there were stay as they were (not restarted).
-        let more = format!("{text}\n[[service]]\nname = \"admin\"\nbuild = \"admin\"\nexpose = 9090\n");
+        let more =
+            format!("{text}\n[[service]]\nname = \"admin\"\nbuild = \"admin\"\nexpose = 9090\n");
         let after = plan_on(&more, dir, this, true).unwrap();
         for f in &forwarders {
             let same = after.children.iter().find(|c| c.name == f.name).unwrap();

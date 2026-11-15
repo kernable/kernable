@@ -560,6 +560,7 @@ async fn follow_once(
         backup: true,
         rewind_points: Vec::new(),
         witness_generation: None,
+        copy: String::new(),
     })))
     .await?;
     let mut request = Request::new(ReceiverStream::new(rx));

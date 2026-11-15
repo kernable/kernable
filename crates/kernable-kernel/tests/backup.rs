@@ -1101,6 +1101,7 @@ async fn a_reader_restores_from_a_backup_through_the_signer() {
             primary: env.addr.clone(),
             key: path("reader.key"),
             primary_kernel_keys: vec![id(&key(3))],
+            copy: String::new(),
         }),
         reader: true,
         from_backup: Some(FromBackup {

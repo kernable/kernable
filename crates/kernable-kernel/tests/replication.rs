@@ -85,6 +85,7 @@ fn standby_config(dir: &Path, primary: &Config) -> Config {
         primary: primary.listen.clone(),
         key: key_path,
         primary_kernel_keys: vec![id(&key(3))],
+        copy: String::new(),
     });
     config
 }
@@ -1039,9 +1040,7 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
     let refused = submit(&primary_config.listen, place(99)).await.unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
     // Beside its socket, a note for a proxy in front: do not wait for this kernel.
-    let note = kernable_kernel::handed_over_note(
-        primary_config.listen.trim_start_matches("unix:"),
-    );
+    let note = kernable_kernel::handed_over_note(primary_config.listen.trim_start_matches("unix:"));
     assert!(Path::new(&note).exists(), "{note}");
     let err = kernable_kernel::refuse_if_handed_over(&primary_config).unwrap_err();
     assert!(
@@ -1073,10 +1072,10 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
         primary: standby_config.listen.clone(),
         key: dir.0.join("standby.key"),
         primary_kernel_keys: vec![id(&key(3)), id(&key(8))],
+        copy: String::new(),
     });
     // A note left from before on its socket goes once it serves there again.
-    let back_note =
-        kernable_kernel::handed_over_note(back.listen.trim_start_matches("unix:"));
+    let back_note = kernable_kernel::handed_over_note(back.listen.trim_start_matches("unix:"));
     std::fs::write(&back_note, "handed over\n").unwrap();
     let rejoined = tokio::spawn(standby::run(back.clone()));
     until("the old primary follows the new one", || {

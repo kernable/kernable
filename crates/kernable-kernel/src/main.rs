@@ -26,7 +26,7 @@ use kernable_core::{
 };
 use kernable_kernel::{
     BoxError, Config, GRANT_HEADER, Kernel, MAX_MESSAGE_BYTES, backup, config, export, grants,
-    node, now_ms, partitions::partition_of, serve, standby, witness,
+    node, now_ms, partitions::partition_of, push, relay, serve, standby, witness,
 };
 use prost::Message;
 use tracing_subscriber::EnvFilter;
@@ -115,6 +115,26 @@ Keys and trust:
                                           kernels (--witness-generation); a witness that replaces
                                           a lost one gets a higher one, and kernels that have seen
                                           it ignore older witnesses.
+  kernable relay --dir <dir> --root <root.pub> --allow-push <key.pub>[,<key.pub>] [--listen <addr>] [--tls-...]
+                                          Runs a relay: it keeps copies of writers' records in
+                                          <dir> (one directory per copy), taken from pushers whose
+                                          keys --allow-push names (kernable push), and serves each
+                                          to readers (kernable start --reader <relay> --reader-copy
+                                          <copy>) whose grants a --root signed with read. It applies
+                                          and checks nothing: readers check every record against
+                                          the writer's checkpoints. Listens on 127.0.0.1:7400 by
+                                          default, elsewhere only with mutual TLS (--tls-cert,
+                                          --tls-key, --tls-client-ca).
+  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name>
+                                          Follows the writer at <addr> (started with --readers on;
+                                          both kernels of a pair, comma-separated) as a reader and
+                                          sends every record to the copy <name> at the relay <relay>
+                                          over a connection it opens itself, until stopped. <key>
+                                          needs a grant for read on * (the grant file next to it is
+                                          sent along, read again on every connection) and must be
+                                          one the relay takes (--allow-push). The writer keeps its
+                                          records until the copy holds them. Connections use
+                                          KERNABLE_TLS_*, as the SDKs do.
   kernable partitions apply <addr> <key> <map.json>
                                           Applies a partition map on the control partition at
                                           <addr>: {'epoch': 2, 'partitions': {'p1': ['host:7233'],
@@ -581,6 +601,8 @@ async fn main() -> ExitCode {
             witness_generation(root, generation, address)
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
+        ["relay", flags @ ..] => return run_relay(flags).await,
+        ["push", flags @ ..] => return run_push(flags).await,
         ["node", project] => return run_node(project).await,
         ["expose", pairs @ ..] if !pairs.is_empty() => return expose(pairs).await,
         ["backup", "key", file] => backup_key(file),
@@ -1513,6 +1535,131 @@ fn backup_list(to: &str, flags: &[&str]) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// `kernable relay --dir <dir> --root <root.pub>... --allow-push <key.pub>,...`: serves copies
+/// until stopped.
+async fn run_relay(flags: &[&str]) -> ExitCode {
+    let parsed = (|| -> Result<relay::RelayConfig> {
+        let values = flag_values(
+            flags,
+            &[
+                "--listen",
+                "--dir",
+                "--root",
+                "--allow-push",
+                "--tls-cert",
+                "--tls-key",
+                "--tls-client-ca",
+            ],
+        )?;
+        let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
+        let roots = values
+            .get("--root")
+            .ok_or("no root key: pass --root <key ID or .pub file>")?
+            .iter()
+            .map(|r| key_id_of("--root", r))
+            .collect::<Result<Vec<_>>>()?;
+        let mut pushers = Vec::new();
+        for path in one("--allow-push")
+            .ok_or("no pusher: pass --allow-push <key.pub>[,<key.pub>]")?
+            .split(',')
+            .filter(|p| !p.is_empty())
+        {
+            pushers.push(key_id_of("--allow-push", path)?);
+        }
+        let tls = match (one("--tls-cert"), one("--tls-key"), one("--tls-client-ca")) {
+            (Some(cert), Some(key), Some(client_ca)) => Some(config::Tls {
+                cert: cert.into(),
+                key: key.into(),
+                client_ca: client_ca.into(),
+            }),
+            (None, None, None) => None,
+            _ => return Err("TLS needs --tls-cert, --tls-key and --tls-client-ca".into()),
+        };
+        Ok(relay::RelayConfig {
+            listen: one("--listen").unwrap_or("127.0.0.1:7400").to_owned(),
+            dir: one("--dir").ok_or("--dir is missing")?.into(),
+            roots,
+            pushers,
+            tls,
+        })
+    })();
+    let config = match parsed {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+    tokio::select! {
+        result = relay::run(config) => match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "the relay stopped");
+                ExitCode::FAILURE
+            }
+        },
+        _ = shutdown_signal() => ExitCode::SUCCESS,
+    }
+}
+
+/// `kernable push --follow <addr> --key <key> --to <relay> --copy <name>`: pushes until stopped.
+async fn run_push(flags: &[&str]) -> ExitCode {
+    let parsed = (|| -> Result<push::Pusher> {
+        let values = flag_values(flags, &["--follow", "--key", "--to", "--copy"])?;
+        let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
+        let need = |flag: &str| one(flag).ok_or_else(|| format!("{flag} is missing"));
+        let key_path = need("--key")?;
+        let key =
+            signing::read_signing_key(key_path).map_err(|e| format!("--key {key_path}: {e}"))?;
+        let follow: Vec<String> = need("--follow")?
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if follow.is_empty() {
+            return Err("--follow needs an address".into());
+        }
+        let grant_file = Path::new(key_path).with_extension("grant");
+        fs::metadata(&grant_file)
+            .map_err(|e| format!("the pusher's grant {}: {e}", grant_file.display()))?;
+        Ok(push::Pusher {
+            follow,
+            key,
+            grant_file,
+            relay: need("--to")?.to_owned(),
+            copy: need("--copy")?.to_owned(),
+        })
+    })();
+    let pusher = match parsed {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+    tokio::select! {
+        result = push::run(pusher) => match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "the pusher stopped");
+                ExitCode::FAILURE
+            }
+        },
+        _ = shutdown_signal() => ExitCode::SUCCESS,
+    }
 }
 
 /// `kernable backup --follow ...`: runs the backup follower until stopped.

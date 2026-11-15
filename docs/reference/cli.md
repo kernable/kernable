@@ -75,6 +75,22 @@ kernable witness generation <root.key> <generation> <witness-address>
 
 Writes witness.generation: the generation of the witness the kernels of a pair reach at `<witness-address>` (as they name it in `--witness`), signed by the root key. A new pair starts with 1, for its witness and both kernels (`--witness-generation`); a witness that replaces a lost one gets a higher one, and kernels that have seen it ignore older witnesses.
 
+### `kernable relay`
+
+```text
+kernable relay --dir <dir> --root <root.pub> --allow-push <key.pub>[,<key.pub>] [--listen <addr>] [--tls-...]
+```
+
+Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per copy), taken from pushers whose keys `--allow-push` names (kernable push), and serves each to readers (kernable start `--reader <relay>` `--reader-copy <copy>`) whose grants a `--root` signed with read. It applies and checks nothing: readers check every record against the writer's checkpoints. Listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).
+
+### `kernable push`
+
+```text
+kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name>
+```
+
+Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Connections use `KERNABLE_TLS_*`, as the SDKs do.
+
 ### `kernable partitions apply`
 
 ```text

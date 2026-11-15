@@ -29,6 +29,8 @@ infrastructure, wherever you like. What the cloud adds is looking after them fro
   other.
 - **The UI** that shows a kernel.
 - **The reference backup signer** and the formats of backups, exports and images.
+- **The pusher and the reference relay** (`kernable push`, `kernable relay`): a writer's records
+  sent out of its network to a copy that readers elsewhere follow ([relays](/how-to/relays)).
 
 ## kernable Cloud: not open
 
