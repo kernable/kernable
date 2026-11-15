@@ -70,6 +70,11 @@ pub struct RelayConfig {
 /// How often a reader hears where the copy stands while nothing new comes, as from a writer.
 const BEAT: Duration = Duration::from_secs(1);
 
+/// How long the copy counts as following its writer after the pusher last sent anything (the
+/// writer's beats come every second). Silent longer, the relay stops beating its readers, and
+/// they count their writer as away, as when they lose the writer itself.
+const PUSHER_SILENT: Duration = Duration::from_secs(3);
+
 /// A frame's header: length (4), kind (1), first and last record (8 each), checksum (8).
 const HEADER: usize = 29;
 
@@ -350,6 +355,8 @@ struct Copy {
     name: String,
     log: Mutex<Log>,
     pushing: AtomicBool,
+    /// How far the writer said readers may follow, and when the pusher last sent anything.
+    writer: Mutex<Option<(u64, std::time::Instant)>>,
     /// (generation, head): readers wake when it changes.
     changed: watch::Sender<(u64, u64)>,
     /// The pusher's stream for calls, while it is connected.
@@ -361,6 +368,22 @@ struct Copy {
 impl Copy {
     fn log(&self) -> std::sync::MutexGuard<'_, Log> {
         self.log.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The pusher sent something: the writer's head with a record batch, or nothing new.
+    fn heard(&self, head: Option<u64>) {
+        let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let head = head.or(writer.map(|(h, _)| h)).unwrap_or(0);
+        *writer = Some((head, std::time::Instant::now()));
+    }
+
+    /// The writer's head as last heard, while the pusher is heard from.
+    fn writer_head(&self) -> Option<u64> {
+        self.writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .filter(|(_, at)| at.elapsed() < PUSHER_SILENT)
+            .map(|(head, _)| head)
     }
 
     fn tell(&self, log: &Log) {
@@ -431,6 +454,7 @@ impl Relay {
             name: name.to_owned(),
             log: Mutex::new(log),
             pushing: AtomicBool::new(false),
+            writer: Mutex::default(),
             changed,
             calls: Mutex::default(),
             pending: Mutex::default(),
@@ -547,6 +571,10 @@ async fn push(
     let mut image: Option<Image> = None;
     let dir = copy.log().dir.clone();
     while let Some(message) = inbound.message().await? {
+        copy.heard(match &message.msg {
+            Some(push_request::Msg::Records(batch)) => Some(batch.head),
+            _ => None,
+        });
         // It keeps only what is sealed: a pusher that sends plain values is misconfigured.
         if !sealed(&message) {
             return Err(Status::invalid_argument(
@@ -919,23 +947,27 @@ async fn follow(
                         continue;
                     };
                     sent = last.seq;
-                    batch.head = head.max(sent);
+                    batch.head = copy.writer_head().unwrap_or(head).max(sent);
                     tell(out, follow_response::Msg::Records(batch)).await?;
                 }
             }
             beat = tokio::time::Instant::now();
             continue;
         }
+        // Beats only while the pusher is heard from: a reader whose copy no longer follows the
+        // writer counts the writer as away, as it would without a relay.
         if beat.elapsed() >= BEAT {
             beat = tokio::time::Instant::now();
-            tell(
-                out,
-                follow_response::Msg::Records(RecordBatch {
-                    head,
-                    ..Default::default()
-                }),
-            )
-            .await?;
+            if let Some(writer) = copy.writer_head() {
+                tell(
+                    out,
+                    follow_response::Msg::Records(RecordBatch {
+                        head: writer.max(sent),
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+            }
         }
         tokio::select! {
             message = inbound.message() => match message?.and_then(|m| m.msg) {
@@ -1153,6 +1185,7 @@ mod tests {
                 name: "c".into(),
                 log: Mutex::new(log),
                 pushing: AtomicBool::new(false),
+                writer: Mutex::default(),
                 changed,
                 calls: Mutex::default(),
                 pending: Mutex::default(),

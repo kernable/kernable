@@ -31,7 +31,10 @@ the pusher empties the copy and it fills again from the writer's first record. A
 copy no longer continues the relay's starts anew, as from a writer.
 
 The writer keeps its records until the copy holds them, as for a slow reader, a million records
-at most. A reader that holds more than the copy (it followed the writer directly before) waits
+at most. A reader of a relay knows how far the writer is (the pusher passes it on), so its lag
+is its lag behind the writer, not behind the copy. When the pusher has been silent for 3 s, the
+relay stops telling its readers anything, and after their usual 5 s they count the writer as
+away (`/ready` answers 503) until the pusher is back. A reader that holds more than the copy (it followed the writer directly before) waits
 until the copy catches up.
 
 Commands and every other write sent to a reader of a relay go the same way back, sealed: the

@@ -453,3 +453,32 @@ async fn a_reader_ahead_of_the_copy_waits_for_it() {
     let at = held(&writer);
     until_async("the reader holds everything", async || held(&reader) >= at).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readers_of_a_copy_whose_pusher_is_gone_count_the_writer_as_away() {
+    let dir = Dir::new("relays-silent");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    let relay = start_relay(&dir.0).await;
+    let pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    let reader_config = reader_config(&dir.0, "reader", 21, &relay, "shop");
+    let reader = start_reader(&reader_config).await;
+    until_async("the reader is ready", async || reader.readiness().is_ok()).await;
+
+    // The pusher is gone: the copy no longer follows the writer, and its reader says so.
+    pusher.abort();
+    // The relay waits 3 s for the pusher, the reader 5 s for the relay's beat.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while reader.readiness().is_ok() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the reader counts the writer as away");
+    assert_eq!(reader.role()["state"], "away", "{}", reader.role());
+
+    // Back again: the reader is ready again.
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    until_async("the reader is ready again", async || reader.readiness().is_ok()).await;
+}
