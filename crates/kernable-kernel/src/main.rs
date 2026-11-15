@@ -139,7 +139,9 @@ Keys and trust:
                                           needs a grant for read on * (the grant file next to it is
                                           sent along, read again on every connection) and must be
                                           one the relay takes (--allow-push). The writer keeps its
-                                          records until the copy holds them. Connections use
+                                          records until the copy holds them. Beside the push it
+                                          takes the writes the copy's readers send through the
+                                          relay and makes them on the writer. Connections use
                                           KERNABLE_TLS_*, as the SDKs do.
   kernable partitions apply <addr> <key> <map.json>
                                           Applies a partition map on the control partition at

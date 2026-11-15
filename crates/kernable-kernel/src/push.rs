@@ -10,14 +10,19 @@
 //! and the writer's records go there from the first. The relay's acknowledgements go on to the
 //! writer, which keeps its records until the copy holds them, as it does for a slow reader.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, FollowAck, FollowHello, FollowMode, FollowRequest, ImageEnd, PushHello,
-        PushRequest, follow_request, follow_response, push_request, push_response,
-        relay_service_client::RelayServiceClient,
+        CallsRequest, ChallengeResponse, FollowAck, FollowHello, FollowMode, FollowRequest,
+        ForwardedCall, ForwardedReply, Header, ImageEnd, PushHello, PushRequest, SealedReply,
+        calls_request, calls_response, follow_request, follow_response, push_request,
+        push_response, relay_service_client::RelayServiceClient,
     },
     signing,
 };
@@ -51,10 +56,16 @@ const PING: Duration = Duration::from_secs(2);
 
 /// Pushes until stopped; reconnects after every failure, to the writer's next address.
 pub async fn run(pusher: Pusher) -> Result<(), BoxError> {
+    let pusher = Arc::new(pusher);
+    let current = Arc::new(Mutex::new(pusher.follow[0].clone()));
+    // Beside the push: the writes the copy's readers send through the relay.
+    let calls = tokio::spawn(take_calls(Arc::clone(&pusher), Arc::clone(&current)));
+    let _calls = AbortOnDrop(calls);
     let mut at = 0;
     let mut delay = Duration::from_millis(200);
     loop {
         let writer = &pusher.follow[at % pusher.follow.len()];
+        *current.lock().unwrap_or_else(PoisonError::into_inner) = writer.clone();
         match push_once(&pusher, writer).await {
             Ok(()) => delay = Duration::from_millis(200),
             Err(e) => {
@@ -183,5 +194,191 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
                 None => return Err("the relay ended the push".into()),
             },
         }
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Takes the copy's readers' writes from the relay and makes them on the writer, until stopped.
+async fn take_calls(pusher: Arc<Pusher>, current: Arc<Mutex<String>>) {
+    let mut delay = Duration::from_millis(200);
+    loop {
+        match calls_once(&pusher, &current).await {
+            Ok(()) => delay = Duration::from_millis(200),
+            Err(e) => {
+                tracing::warn!(relay = %pusher.relay, error = %e, "taking calls failed; trying again in {delay:?}");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(MAX_DELAY);
+            }
+        }
+    }
+}
+
+async fn calls_once(pusher: &Arc<Pusher>, current: &Arc<Mutex<String>>) -> Result<(), BoxError> {
+    let mut relay = RelayServiceClient::new(standby::connect(&pusher.relay).await?)
+        .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
+    let (tx, rx) = mpsc::channel(64);
+    let say = |msg| CallsRequest { msg: Some(msg) };
+    tx.send(say(calls_request::Msg::Hello(PushHello {
+        key_id: signing::key_id(&pusher.key.verifying_key()),
+        copy: pusher.copy.clone(),
+        protocol: kernable_core::PROTOCOL,
+    })))
+    .await?;
+    let mut inbound = relay.calls(ReceiverStream::new(rx)).await?.into_inner();
+    let Some(calls_response::Msg::Challenge(challenge)) =
+        inbound.message().await?.and_then(|m| m.msg)
+    else {
+        return Err("the relay sent no challenge".into());
+    };
+    let proof = signing::sign(&pusher.key, &signing::challenge_message(&challenge.nonce));
+    tx.send(say(calls_request::Msg::ChallengeResponse(
+        ChallengeResponse { sig: proof.sig },
+    )))
+    .await?;
+    tracing::info!(relay = %pusher.relay, copy = %pusher.copy, "taking the copy's readers' writes");
+    let channels: Arc<Mutex<Option<(String, tonic::transport::Channel)>>> = Arc::default();
+    while let Some(message) = inbound.message().await? {
+        let Some(calls_response::Msg::Call(call)) = message.msg else {
+            continue;
+        };
+        let (pusher, tx) = (Arc::clone(pusher), tx.clone());
+        let writer = current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let channels = Arc::clone(&channels);
+        tokio::spawn(async move {
+            let reply = match crate::seal::open_call(
+                &pusher.copy_key,
+                &pusher.copy,
+                call.id,
+                &call.sealed,
+            ) {
+                Ok(forwarded) => make_call(&writer, &channels, forwarded).await,
+                Err(e) => {
+                    tracing::warn!(error = %e, "a call through the relay does not open: dropped");
+                    return;
+                }
+            };
+            let sealed = crate::seal::seal_reply(&pusher.copy_key, &pusher.copy, call.id, &reply);
+            let _ = tx
+                .send(CallsRequest {
+                    msg: Some(calls_request::Msg::Reply(SealedReply {
+                        id: call.id,
+                        sealed,
+                    })),
+                })
+                .await;
+        });
+    }
+    Ok(())
+}
+
+/// Hop-by-hop headers and those the transport sets again.
+fn passes(name: &str) -> bool {
+    !matches!(
+        name,
+        "host" | "connection" | "content-length" | "transfer-encoding" | "keep-alive" | "upgrade"
+    )
+}
+
+pub(crate) fn headers(map: &tonic::codegen::http::HeaderMap) -> Vec<Header> {
+    map.iter()
+        .filter(|(name, _)| passes(name.as_str()))
+        .map(|(name, value)| Header {
+            name: name.as_str().to_owned(),
+            value: value.as_bytes().to_vec(),
+        })
+        .collect()
+}
+
+/// The call made on the writer at `writer`, and its answer as it came; an unreachable writer
+/// answers UNAVAILABLE, as to a reader that cannot reach it.
+async fn make_call(
+    writer: &str,
+    channels: &Mutex<Option<(String, tonic::transport::Channel)>>,
+    call: ForwardedCall,
+) -> ForwardedReply {
+    use http_body_util::BodyExt;
+    use tonic::codegen::http;
+    let unavailable = |e: &dyn std::fmt::Display| {
+        ForwardedReply {
+        status: 200,
+        headers: vec![
+            Header {
+                name: "content-type".into(),
+                value: b"application/grpc".to_vec(),
+            },
+            Header {
+                name: "grpc-status".into(),
+                value: b"14".to_vec(),
+            },
+            Header {
+                name: "grpc-message".into(),
+                value: format!("writer_away: the relay's pusher cannot reach the writer {writer} ({e}); try again")
+                    .replace(|c: char| !c.is_ascii() || c.is_ascii_control(), " ")
+                    .into_bytes(),
+            },
+        ],
+        ..Default::default()
+    }
+    };
+    let cached = channels
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .filter(|(at, _)| at == writer);
+    let channel = match cached {
+        Some((_, channel)) => channel,
+        None => match standby::connect(writer).await {
+            Ok(channel) => {
+                *channels.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some((writer.to_owned(), channel.clone()));
+                channel
+            }
+            Err(e) => return unavailable(&e),
+        },
+    };
+    let mut request = http::Request::builder().method("POST").uri(&call.path);
+    for h in &call.headers {
+        if passes(&h.name) {
+            request = request.header(h.name.as_str(), h.value.as_slice());
+        }
+    }
+    let request = match request.body(tonic::body::Body::new(http_body_util::Full::new(
+        tonic::codegen::Bytes::from(call.body),
+    ))) {
+        Ok(r) => r,
+        Err(e) => return unavailable(&e),
+    };
+    let response = match tower::ServiceExt::oneshot(channel, request).await {
+        Ok(r) => r,
+        Err(e) => {
+            channels
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            return unavailable(&e);
+        }
+    };
+    let (parts, body) = response.into_parts();
+    let collected = match body.collect().await {
+        Ok(c) => c,
+        Err(e) => return unavailable(&e),
+    };
+    let trailers = collected.trailers().map(headers).unwrap_or_default();
+    ForwardedReply {
+        status: u32::from(parts.status.as_u16()),
+        headers: headers(&parts.headers),
+        body: collected.to_bytes().to_vec(),
+        trailers,
     }
 }

@@ -26,6 +26,9 @@ toml.workspace = true
 libc = "0.2"
 tokio-stream.workspace = true
 tower.workspace = true
+# A reader of a relay sends its writes through it, whole: bodies collected and rebuilt.
+http-body = "1"
+http-body-util = "0.1"
 prost.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -218,10 +218,33 @@ async fn a_reader_follows_the_writer_through_a_copy_at_a_relay() {
     let refused = tokio::time::timeout(Duration::from_secs(2), standby::run(wrong)).await;
     assert!(refused.is_err(), "it never catches up: {refused:?}");
 
-    // A relay takes no writes: the reader says so.
-    let refused = submit(&first.listen, place(99)).await.unwrap_err();
-    assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
-    assert!(refused.message().contains("relay"), "{refused:?}");
+    // A command sent to the reader goes through the relay, sealed, to the pusher, which makes
+    // it on the writer; the reader answers once its own copy holds the events.
+    let result = submit(&first.listen, place(99)).await.unwrap();
+    let at = match &result.outcome {
+        Some(kernable_core::proto::command_result::Outcome::Committed(c)) => c.position,
+        other => panic!("not committed: {other:?}"),
+    };
+    assert!(held(&reader) >= at && held(&writer) >= at);
+    // Sent again, it gets the stored outcome.
+    let again = submit(&first.listen, place(99)).await.unwrap();
+    assert_eq!(again.outcome, result.outcome);
+    // Any other write goes the same way, and what the writer refuses comes back as it refused
+    // it: an unsigned cancel.
+    let channel = kernable_core::transport::connect(&first.listen)
+        .await
+        .unwrap();
+    let refused = kernable_core::proto::command_service_client::CommandServiceClient::new(channel)
+        .cancel(kernable_core::proto::CancelRequest {
+            command_id: "c1".into(),
+            tenant_id: "t1".into(),
+            protocol: kernable_core::PROTOCOL,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::Unauthenticated, "{refused:?}");
+    assert!(refused.message().contains("not signed"), "{refused:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

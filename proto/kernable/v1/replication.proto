@@ -52,6 +52,65 @@ service RelayService {
   // longer continues it): the records from 1 follow. Record batches without records only say
   // where the writer stands. The relay acknowledges what it wrote and synced.
   rpc Push(stream PushRequest) returns (stream PushResponse);
+  // Opened by the pusher beside its push (hello and challenge as for Push): the writes readers of
+  // the copy sent the relay come down it, and the writer's answers go back up, sealed both ways.
+  rpc Calls(stream CallsRequest) returns (stream CallsResponse);
+  // A reader of a copy: a write for the writer (a command, a file, a cache value, ...), sealed,
+  // answered with the writer's answer, sealed. The relay passes it to the copy's pusher, which
+  // makes the call on the writer; UNAVAILABLE while no pusher is connected.
+  rpc Call(SealedCall) returns (SealedReply);
+}
+
+// A write a reader sends through a relay: a ForwardedCall sealed with the copy key, bound to
+// the copy and `id` (random, the reader's). Signed by the reader's key, whose grant (presented as
+// for Follow) allows `read`, over kernable.v1.relay-call, valid 60 s around issued_at.
+message SealedCall {
+  string copy = 1;
+  uint64 id = 2;
+  bytes sealed = 3;
+  int64 issued_at = 4;
+  Signature sig = 5;
+}
+
+// The writer's answer: a ForwardedReply sealed with the copy key, bound to the copy and `id`.
+message SealedReply {
+  uint64 id = 1;
+  bytes sealed = 2;
+}
+
+message CallsRequest {
+  oneof msg {
+    PushHello hello = 1;
+    ChallengeResponse challenge_response = 2;
+    SealedReply reply = 3;
+  }
+}
+
+message CallsResponse {
+  oneof msg {
+    Challenge challenge = 1;
+    SealedCall call = 2;
+  }
+}
+
+// A gRPC call as the reader got it: its path, headers and body (whole messages, as framed).
+message ForwardedCall {
+  string path = 1;
+  repeated Header headers = 2;
+  bytes body = 3;
+}
+
+// The writer's answer as the pusher got it.
+message ForwardedReply {
+  uint32 status = 1;
+  repeated Header headers = 2;
+  bytes body = 3;
+  repeated Header trailers = 4;
+}
+
+message Header {
+  string name = 1;
+  bytes value = 2;
 }
 
 message PushRequest {

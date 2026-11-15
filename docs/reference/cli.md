@@ -97,7 +97,7 @@ Writes a new copy key (hex, mode 600): the pusher seals what it sends a relay wi
 kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file>
 ```
 
-Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record, sealed with the copy key, to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Connections use `KERNABLE_TLS_*`, as the SDKs do.
+Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record, sealed with the copy key, to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Beside the push it takes the writes the copy's readers send through the relay and makes them on the writer. Connections use `KERNABLE_TLS_*`, as the SDKs do.
 
 ### `kernable partitions apply`
 

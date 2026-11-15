@@ -598,6 +598,18 @@ pub fn promote_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.promote").i64(issued_at).0
 }
 
+/// What a reader of a relay's copy signs to send a write through the relay: the copy, the
+/// call's ID, the SHA-256 of the sealed call and when.
+pub fn relay_call_message(copy: &str, id: u64, sealed: &[u8], issued_at: i64) -> Vec<u8> {
+    use sha2::Digest;
+    Msg::new("kernable.v1.relay-call")
+        .str(copy)
+        .u64(id)
+        .bytes(&sha2::Sha256::digest(sealed))
+        .i64(issued_at)
+        .0
+}
+
 /// What an operator's key signs to hand a pair's primary role over (`kernable switchover`).
 pub fn switchover_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.switchover").i64(issued_at).0

@@ -225,13 +225,23 @@ impl Reader {
     }
 
     /// A channel to the writer it follows now, for what it forwards.
-    async fn channel(&self) -> Result<(String, Channel), Status> {
-        if !self.copy.is_empty() {
-            return Err(Status::unavailable(format!(
-                "this reader follows the copy {} at a relay, which takes no writes: send them to the writer",
-                self.copy
-            )));
-        }
+    async fn channel(&self) -> Result<(String, Route), Status> {
+        let (writer, channel) = self.connect().await?;
+        let route = match &self.copy_key {
+            None => Route::Direct(channel),
+            // Through the relay, sealed, to the copy's pusher, which makes the call on the writer.
+            Some(key) => Route::Relay(Arc::new(RelayRoute {
+                channel,
+                copy: self.copy.clone(),
+                key: Arc::clone(key),
+                signer: self.key.clone(),
+                grant: self.grant.clone(),
+            })),
+        };
+        Ok((writer, route))
+    }
+
+    async fn connect(&self) -> Result<(String, Channel), Status> {
         let writer = self.writer();
         let cached = self
             .channels
@@ -775,10 +785,134 @@ where
                 Ok(response) => Ok(response),
                 Err(e) => {
                     reader.forget(&writer);
-                    Ok(away(&writer, &e).into_http())
+                    Ok(away(&writer, &*e).into_http())
                 }
             }
         })
+    }
+}
+
+/// Where a reader's writes go: to the writer, or through a relay to the copy's pusher.
+#[derive(Clone)]
+pub(crate) enum Route {
+    Direct(Channel),
+    Relay(Arc<RelayRoute>),
+}
+
+/// A relay's address, the copy, and what seals and signs a call through it.
+pub(crate) struct RelayRoute {
+    channel: Channel,
+    copy: String,
+    key: Arc<crate::seal::CopyKey>,
+    signer: SigningKey,
+    grant: String,
+}
+
+/// The largest call a reader sends through a relay, and the largest answer.
+const MAX_CALL_BYTES: usize = 64 << 20;
+
+impl tower::Service<http::Request<tonic::body::Body>> for Route {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = BoxError;
+    type Future = Answer<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self {
+            Route::Direct(channel) => {
+                tower::Service::<http::Request<tonic::body::Body>>::poll_ready(channel, cx)
+                    .map_err(Into::into)
+            }
+            Route::Relay(_) => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        match self {
+            Route::Direct(channel) => {
+                let answer = tower::Service::call(channel, request);
+                Box::pin(async move { answer.await.map_err(Into::into) })
+            }
+            Route::Relay(relay) => Box::pin(Arc::clone(relay).call(request)),
+        }
+    }
+}
+
+impl RelayRoute {
+    async fn call(
+        self: Arc<Self>,
+        request: http::Request<tonic::body::Body>,
+    ) -> Result<http::Response<tonic::body::Body>, BoxError> {
+        use http_body_util::BodyExt;
+        let (parts, body) = request.into_parts();
+        let body = match http_body_util::Limited::new(body, MAX_CALL_BYTES)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => {
+                return Ok(Status::resource_exhausted(format!(
+                    "the request is larger than a relay passes on ({} MiB): send it to the writer",
+                    MAX_CALL_BYTES >> 20
+                ))
+                .into_http());
+            }
+        };
+        let call = kernable_core::proto::ForwardedCall {
+            path: parts.uri.path().to_owned(),
+            headers: crate::push::headers(&parts.headers),
+            body: body.to_vec(),
+        };
+        let mut id = [0u8; 8];
+        getrandom::fill(&mut id).map_err(|_| "no randomness")?;
+        let id = u64::from_le_bytes(id);
+        let sealed = crate::seal::seal_call(&self.key, &self.copy, id, &call);
+        let issued_at = now_ms();
+        let sig = signing::sign(
+            &self.signer,
+            &signing::relay_call_message(&self.copy, id, &sealed, issued_at),
+        );
+        let mut outgoing = Request::new(kernable_core::proto::SealedCall {
+            copy: self.copy.clone(),
+            id,
+            sealed,
+            issued_at,
+            sig: Some(sig),
+        });
+        outgoing
+            .metadata_mut()
+            .insert(GRANT_HEADER, self.grant.parse()?);
+        let reply = match kernable_core::proto::relay_service_client::RelayServiceClient::new(
+            self.channel.clone(),
+        )
+        .max_decoding_message_size(MAX_CALL_BYTES + 4096)
+        .max_encoding_message_size(MAX_CALL_BYTES + 4096)
+        .call(outgoing)
+        .await
+        {
+            Ok(reply) => reply.into_inner(),
+            Err(status) => return Ok(status.into_http()),
+        };
+        let reply = crate::seal::open_reply(&self.key, &self.copy, id, &reply.sealed)
+            .map_err(|e| format!("the relay's answer: {e}"))?;
+        let mut response = http::Response::builder().status(u16::try_from(reply.status)?);
+        for h in &reply.headers {
+            response = response.header(h.name.as_str(), h.value.as_slice());
+        }
+        let mut trailers = http::HeaderMap::new();
+        for h in &reply.trailers {
+            trailers.append(
+                http::HeaderName::from_bytes(h.name.as_bytes())?,
+                http::HeaderValue::from_bytes(&h.value)?,
+            );
+        }
+        let mut frames = vec![Ok::<_, std::convert::Infallible>(http_body::Frame::data(
+            Bytes::from(reply.body),
+        ))];
+        if !trailers.is_empty() {
+            frames.push(Ok(http_body::Frame::trailers(trailers)));
+        }
+        let body = http_body_util::StreamBody::new(tokio_stream::iter(frames));
+        Ok(response.body(tonic::body::Body::new(body))?)
     }
 }
 

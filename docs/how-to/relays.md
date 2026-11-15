@@ -9,7 +9,8 @@ inward), a **relay** holds a copy of the writer's records for them:
   connection from outside its network;
 - the **relay** (`kernable relay`) writes the records to the copy's log and serves them to
   readers as a writer would;
-- **readers** follow the copy at the relay (`--reader <relay> --reader-copy <copy>`).
+- **readers** follow the copy at the relay (`--reader <relay> --reader-copy <copy>`), and send
+  their writes back through it.
 
 What reaches the relay is **sealed** with a copy key that the pusher and the copy's readers hold
 and the relay does not: every record, every vault value and file, every part of an image. The
@@ -33,9 +34,15 @@ The writer keeps its records until the copy holds them, as for a slow reader, a 
 at most. A reader that holds more than the copy (it followed the writer directly before) waits
 until the copy catches up.
 
+Commands and every other write sent to a reader of a relay go the same way back, sealed: the
+reader sends them to the relay, the relay passes them to the copy's pusher over a second
+connection the pusher opened, and the pusher makes the call on the writer. The answer returns
+the same way, and a command's answer comes once the reader's own copy holds its events, as from
+a writer. While no pusher is connected, the reader answers `writer_away` and the SDKs try again.
+A request or answer larger than 64 MiB does not pass a relay.
+
 A reader of a relay holds what any reader holds, vault values included: keep its keys as a
-reader's. Commands and other writes sent to a reader of a relay are refused (`unavailable`) for
-now: send them to the writer.
+reader's.
 
 ## 1. Keys
 

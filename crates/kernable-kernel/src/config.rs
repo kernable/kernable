@@ -123,7 +123,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--reader-copy",
         "KERNABLE_READER_COPY",
         "",
-        "With `--reader`: its addresses are relays (`kernable relay`), not the writer, and the reader follows this copy of the writer's records there. It checks every record against the writer's checkpoints as it does from the writer, so a relay can hold records back but never change one. Commands and other writes are refused for now (`unavailable`): send them to the writer. Needs `--reader-copy-key`.",
+        "With `--reader`: its addresses are relays (`kernable relay`), not the writer, and the reader follows this copy of the writer's records there. It checks every record against the writer's checkpoints as it does from the writer, so a relay can hold records back but never change one. Commands and every other write go back through the relay, sealed, to the copy's pusher, which makes them on the writer (`writer_away` while no pusher is connected). Needs `--reader-copy-key`.",
     ),
     (
         "--reader-copy-key",

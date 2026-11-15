@@ -11,7 +11,10 @@
 //!   record's seq and hash (a relay may send a reader only the end of a batch: the last stays);
 //! - an image batch: `kernable.v1.sealed.image` and its place in the image (8 bytes);
 //! - an image's end: `kernable.v1.sealed.image-end`, its seq and hash; the plaintext is the
-//!   number of batches (8 bytes), so a reader notices a batch left out.
+//!   number of batches (8 bytes), so a reader notices a batch left out;
+//! - a write a reader sends through the relay, and the writer's answer:
+//!   `kernable.v1.sealed.call` and `kernable.v1.sealed.reply`, the call's ID and the copy's
+//!   name, so an answer cannot go to another call.
 
 use std::{path::Path, sync::Arc};
 
@@ -20,7 +23,8 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use kernable_core::proto::{
-    ImageBatch, ImageEnd, LogRecord, RecordBatch, SealedAttachments, follow_response,
+    ForwardedCall, ForwardedReply, ImageBatch, ImageEnd, LogRecord, RecordBatch, SealedAttachments,
+    follow_response,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -118,6 +122,38 @@ fn label(what: &str, seq: u64, hash: &[u8]) -> Vec<u8> {
     aad.extend_from_slice(&seq.to_be_bytes());
     aad.extend_from_slice(hash);
     aad
+}
+
+/// A write for the writer, sealed by a reader of `copy`.
+pub(crate) fn seal_call(key: &CopyKey, copy: &str, id: u64, call: &ForwardedCall) -> Vec<u8> {
+    key.seal(&label("call", id, copy.as_bytes()), &call.encode_to_vec())
+}
+
+/// Opened by the pusher.
+pub(crate) fn open_call(
+    key: &CopyKey,
+    copy: &str,
+    id: u64,
+    sealed: &[u8],
+) -> Result<ForwardedCall, BoxError> {
+    let plain = key.open(&label("call", id, copy.as_bytes()), sealed)?;
+    Ok(ForwardedCall::decode(plain.as_slice())?)
+}
+
+/// The writer's answer to call `id`, sealed by the pusher.
+pub(crate) fn seal_reply(key: &CopyKey, copy: &str, id: u64, reply: &ForwardedReply) -> Vec<u8> {
+    key.seal(&label("reply", id, copy.as_bytes()), &reply.encode_to_vec())
+}
+
+/// Opened by the reader that sent call `id`.
+pub(crate) fn open_reply(
+    key: &CopyKey,
+    copy: &str,
+    id: u64,
+    sealed: &[u8],
+) -> Result<ForwardedReply, BoxError> {
+    let plain = key.open(&label("reply", id, copy.as_bytes()), sealed)?;
+    Ok(ForwardedReply::decode(plain.as_slice())?)
 }
 
 /// Seals what the writer sent a pusher, for the relay. `images` counts the batches of the image
@@ -272,6 +308,24 @@ mod tests {
 
         open(&key, &mut msg, &mut 0).unwrap();
         assert_eq!(msg, follow_response::Msg::Records(batch()));
+    }
+
+    #[test]
+    fn an_answer_opens_only_for_its_call() {
+        let key = CopyKey::new(&[7; 32]);
+        let reply = ForwardedReply {
+            status: 200,
+            body: b"answer".to_vec(),
+            ..Default::default()
+        };
+        let sealed = seal_reply(&key, "shop", 1, &reply);
+        assert_eq!(open_reply(&key, "shop", 1, &sealed).unwrap(), reply);
+        assert!(open_reply(&key, "shop", 2, &sealed).is_err());
+        assert!(open_reply(&key, "other", 1, &sealed).is_err());
+        assert!(
+            open_call(&key, "shop", 1, &sealed).is_err(),
+            "nor as a call"
+        );
     }
 
     #[test]

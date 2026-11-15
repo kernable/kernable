@@ -30,9 +30,10 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Challenge, FollowMode, FollowRequest, FollowResponse, FollowStart, Grant, PromoteRequest,
-        PromoteResult, PushRequest, PushResponse, RecordBatch, RecordPoint, SwitchoverRequest,
-        SwitchoverResult, follow_request, follow_response, push_request, push_response,
+        CallsRequest, CallsResponse, Challenge, FollowMode, FollowRequest, FollowResponse,
+        FollowStart, Grant, PromoteRequest, PromoteResult, PushRequest, PushResponse, RecordBatch,
+        RecordPoint, SealedCall, SealedReply, SwitchoverRequest, SwitchoverResult, calls_request,
+        calls_response, follow_request, follow_response, push_request, push_response,
         relay_service_server::{RelayService, RelayServiceServer},
         replication_service_server::{ReplicationService, ReplicationServiceServer},
     },
@@ -41,14 +42,16 @@ use kernable_core::{
 use kernable_store::replication::ZERO;
 use prost::Message;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Request, Response, Status, Streaming,
     transport::{Certificate, Identity, Server, ServerTlsConfig},
 };
 
-use crate::{BoxError, GRANT_HEADER, Permissions, config, protocol, replication};
+use crate::{
+    BoxError, GRANT_HEADER, MAX_REQUEST_AGE_MS, Permissions, config, now_ms, protocol, replication,
+};
 
 /// How a relay runs.
 #[derive(Debug, Clone)]
@@ -349,6 +352,10 @@ struct Copy {
     pushing: AtomicBool,
     /// (generation, head): readers wake when it changes.
     changed: watch::Sender<(u64, u64)>,
+    /// The pusher's stream for calls, while it is connected.
+    calls: Mutex<Option<mpsc::Sender<Result<CallsResponse, Status>>>>,
+    /// Calls sent down it, waiting for their answers, by ID.
+    pending: Mutex<HashMap<u64, oneshot::Sender<SealedReply>>>,
 }
 
 impl Copy {
@@ -425,13 +432,15 @@ impl Relay {
             log: Mutex::new(log),
             pushing: AtomicBool::new(false),
             changed,
+            calls: Mutex::default(),
+            pending: Mutex::default(),
         });
         copies.insert(name.to_owned(), Arc::clone(&copy));
         Ok(copy)
     }
 
-    /// A reader's grant, presented with its stream: signed by a root (or delegated from one)
-    /// and allowing `read`.
+    /// A reader's grant, presented with its stream or call: signed by a root (or delegated from
+    /// one) and allowing `read`.
     fn reader_may(&self, metadata: &tonic::metadata::MetadataMap, key: &str) -> Result<(), Status> {
         let grant = metadata
             .get(GRANT_HEADER)
@@ -622,6 +631,132 @@ fn sealed(message: &PushRequest) -> bool {
                 && (b.records.is_empty() || !b.sealed.is_empty())
         }
         _ => true,
+    }
+}
+
+/// How long a reader's call waits for the writer's answer.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The pusher's stream for calls: readers' writes go down it, the writer's answers come up.
+async fn calls(
+    relay: Arc<Relay>,
+    inbound: &mut Streaming<CallsRequest>,
+    out: &mpsc::Sender<Result<CallsResponse, Status>>,
+) -> Result<(), Status> {
+    let Some(calls_request::Msg::Hello(hello)) = inbound.message().await?.and_then(|m| m.msg)
+    else {
+        return Err(Status::invalid_argument("expected PushHello"));
+    };
+    protocol(hello.protocol)?;
+    if !relay.config.pushers.contains(&hello.key_id) {
+        return Err(Status::permission_denied(
+            "this relay takes no pushes from the key (--allow-push)",
+        ));
+    }
+    challenge(
+        inbound,
+        &hello.key_id,
+        async |nonce| {
+            out.send(Ok(CallsResponse {
+                msg: Some(calls_response::Msg::Challenge(Challenge { nonce })),
+            }))
+            .await
+            .map_err(|_| Status::cancelled("the pusher left"))
+        },
+        |m: CallsRequest| match m.msg {
+            Some(calls_request::Msg::ChallengeResponse(r)) => Some(r.sig),
+            _ => None,
+        },
+    )
+    .await?;
+    let copy = relay.copy(&hello.copy, true)?;
+    // The newest pusher's stream takes the calls.
+    *copy.calls.lock().unwrap_or_else(PoisonError::into_inner) = Some(out.clone());
+    tracing::info!(copy = %copy.name, key = %hello.key_id, "a pusher takes calls");
+    while let Some(message) = inbound.message().await? {
+        if let Some(calls_request::Msg::Reply(reply)) = message.msg {
+            let waiting = copy
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&reply.id);
+            if let Some(waiting) = waiting {
+                let _ = waiting.send(reply);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A reader's write, passed to the copy's pusher; the writer's answer, as the pusher sent it.
+async fn call(
+    relay: Arc<Relay>,
+    metadata: &tonic::metadata::MetadataMap,
+    call: SealedCall,
+) -> Result<SealedReply, Status> {
+    let sig = call
+        .sig
+        .as_ref()
+        .ok_or_else(|| Status::unauthenticated("the call is not signed"))?;
+    relay.reader_may(metadata, &sig.key_id)?;
+    let msg = signing::relay_call_message(&call.copy, call.id, &call.sealed, call.issued_at);
+    if signing::verify(sig, &msg).is_err() {
+        return Err(Status::unauthenticated("invalid signature"));
+    }
+    if (now_ms() - call.issued_at).abs() > MAX_REQUEST_AGE_MS {
+        return Err(Status::unauthenticated("the call expired; check the clock"));
+    }
+    let copy = relay.copy(&call.copy, false)?;
+    let out = copy
+        .calls
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .filter(|o| !o.is_closed())
+        .ok_or_else(|| {
+            Status::unavailable(format!(
+                "writer_away: no pusher of the copy {} is connected to this relay; try again",
+                copy.name
+            ))
+        })?;
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut pending = copy.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.contains_key(&call.id) {
+            return Err(Status::already_exists("a call with this ID waits already"));
+        }
+        pending.insert(call.id, tx);
+    }
+    let id = call.id;
+    let forget = || {
+        copy.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+    };
+    if out
+        .send(Ok(CallsResponse {
+            msg: Some(calls_response::Msg::Call(call)),
+        }))
+        .await
+        .is_err()
+    {
+        forget();
+        return Err(Status::unavailable(
+            "writer_away: the copy's pusher left; try again",
+        ));
+    }
+    match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(_)) => Err(Status::unavailable(
+            "writer_away: the copy's pusher left before it answered; try again",
+        )),
+        Err(_) => {
+            forget();
+            Err(Status::deadline_exceeded(
+                "the writer did not answer through the relay in time",
+            ))
+        }
     }
 }
 
@@ -834,6 +969,31 @@ impl RelayService for Api {
         });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+
+    type CallsStream = ReceiverStream<Result<CallsResponse, Status>>;
+
+    async fn calls(
+        &self,
+        request: Request<Streaming<CallsRequest>>,
+    ) -> Result<Response<Self::CallsStream>, Status> {
+        let (tx, rx) = mpsc::channel(64);
+        let relay = Arc::clone(&self.0);
+        let mut inbound = request.into_inner();
+        tokio::spawn(async move {
+            if let Err(status) = calls(relay, &mut inbound, &tx).await {
+                tracing::warn!(error = %status.message(), "a pusher's calls ended");
+                let _ = tx.send(Err(status)).await;
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn call(&self, request: Request<SealedCall>) -> Result<Response<SealedReply>, Status> {
+        let metadata = request.metadata().clone();
+        call(Arc::clone(&self.0), &metadata, request.into_inner())
+            .await
+            .map(Response::new)
+    }
 }
 
 #[tonic::async_trait]
@@ -994,6 +1154,8 @@ mod tests {
                 log: Mutex::new(log),
                 pushing: AtomicBool::new(false),
                 changed,
+                calls: Mutex::default(),
+                pending: Mutex::default(),
             }
         };
         copy.log().add(batch(1, 4)).unwrap();
