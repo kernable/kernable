@@ -35,6 +35,10 @@ pub struct Link {
     pub node: String,
     pub key: PathBuf,
     pub settings_key: String,
+    /// A control point with a certificate of its own CA (one the node does not trust otherwise):
+    /// that CA's PEM file (made absolute at the join).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<PathBuf>,
 }
 
 /// What a control point may set, and nothing else.
@@ -97,17 +101,34 @@ fn now_s() -> i64 {
     crate::now_ms() / 1000
 }
 
-fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+/// An HTTP client; with `ca`, trusting that CA only.
+fn agent(ca: Option<&Path>) -> Result<ureq::Agent, BoxError> {
+    let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into()
+        .timeout_global(Some(Duration::from_secs(30)));
+    if let Some(ca) = ca {
+        let pem = std::fs::read(ca).map_err(|e| format!("{}: {e}", ca.display()))?;
+        let certs = ureq::tls::parse_pem(&pem)
+            .filter_map(|item| match item {
+                Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if certs.is_empty() {
+            return Err(format!("{}: no certificate", ca.display()).into());
+        }
+        config = config.tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::Specific(std::sync::Arc::new(certs)))
+                .build(),
+        );
+    }
+    Ok(config.build().into())
 }
 
 /// `kernable node join <url> <token>`: the node's key in `dir` (a new one unless there is
 /// one), joined, `managed.toml` written. Returns the node's ID.
-pub fn join(url: &str, token: &str, dir: &Path) -> Result<String, BoxError> {
+pub fn join(url: &str, token: &str, dir: &Path, ca: Option<&Path>) -> Result<String, BoxError> {
     let key_path = dir.join("node.key");
     let key = if key_path.exists() {
         kernable_core::signing::read_signing_key(&key_path)?
@@ -128,7 +149,10 @@ pub fn join(url: &str, token: &str, dir: &Path) -> Result<String, BoxError> {
         "key": hex::encode(key.verifying_key().as_bytes()),
     })
     .to_string();
-    let mut response = agent()
+    let ca = ca
+        .map(|c| std::fs::canonicalize(c).map_err(|e| format!("{}: {e}", c.display())))
+        .transpose()?;
+    let mut response = agent(ca.as_deref())?
         .post(&format!("{url}/v1/nodes/join"))
         .header("content-type", "application/json")
         .send(body.as_bytes())
@@ -149,6 +173,7 @@ pub fn join(url: &str, token: &str, dir: &Path) -> Result<String, BoxError> {
         node: joined.node.clone(),
         key: PathBuf::from("node.key"),
         settings_key: joined.settings_key,
+        ca,
     };
     std::fs::write(dir.join(LINK), toml::to_string(&link)?)?;
     Ok(joined.node)
@@ -215,7 +240,9 @@ fn call(
         .header("x-kernable-signature", sig)
         .header("content-type", "application/json")
         .body(body.to_vec())?;
-    let mut response = agent().run(request).map_err(|e| format!("{url}: {e}"))?;
+    let mut response = agent(link.ca.as_deref())?
+        .run(request)
+        .map_err(|e| format!("{url}: {e}"))?;
     let text = response.body_mut().read_to_string().unwrap_or_default();
     Ok((response.status().as_u16(), text))
 }

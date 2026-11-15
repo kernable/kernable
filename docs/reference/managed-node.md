@@ -8,8 +8,11 @@ machine beyond the fixed list below.
 ## Joining
 
 ```sh
-kernable node join https://control.example.net <token> [<dir>]
+kernable node join https://control.example.net <token> [<dir>] [--ca <ca.pem>]
 ```
+
+`--ca`: a control point whose certificate a CA of your own signed; the node trusts that CA alone
+for it, and keeps the path (`ca`) in `managed.toml`.
 
 The node makes its key `node.key` (unless there is one), and sends, unsigned:
 
