@@ -349,6 +349,7 @@ async fn keep_lease(
                         // following and claims at once.
                         primary.set_lease(Instant::now());
                         primary.hand_over();
+                        crate::note_handed_over(&kernel.config().listen);
                         tracing::warn!(standby = %reported, record = head, "handed the primary role over");
                         let _ = reply.send(Ok(kernable_core::proto::SwitchoverResult {
                             seq: head,

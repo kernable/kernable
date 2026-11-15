@@ -458,6 +458,7 @@ async fn hand_over_when_asked(
         match tokio::time::timeout(TAKE_OVER_TIMEOUT, primary.took_over()).await {
             Ok(seq) => {
                 primary.hand_over();
+                crate::note_handed_over(&kernel.config().listen);
                 tracing::warn!(%standby, record = seq, "handed the primary role over");
                 let _ = reply.send(Ok(SwitchoverResult {
                     seq,

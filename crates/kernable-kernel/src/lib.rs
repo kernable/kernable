@@ -1522,6 +1522,26 @@ impl Kernel {
 /// A kernel's socket: its owner and group may connect, others only through an ACL that grants
 /// them (the default mode would let others read it but not connect, and leave an ACL's write
 /// masked off).
+/// The note beside a kernel's local socket that the kernel there handed its role over: a proxy
+/// in front of the socket (an ingress) need not wait for it to start again, as for a restart,
+/// and sends its clients elsewhere at once. A kernel (or standby) binding the socket again
+/// removes it.
+pub fn handed_over_note(socket: &str) -> String {
+    format!("{socket}.handed-over")
+}
+
+/// Leaves [`handed_over_note`] beside the local socket `listen` names, if it names one.
+pub(crate) fn note_handed_over(listen: &str) {
+    if let Some(path) = transport::unix_path(listen) {
+        let _ = std::fs::write(handed_over_note(path), b"handed over\n");
+    }
+}
+
+/// Takes [`handed_over_note`] away before serving on `path` again.
+pub(crate) fn clear_handed_over(path: &str) {
+    let _ = std::fs::remove_file(handed_over_note(path));
+}
+
 pub fn socket_mode(path: &str) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
@@ -1719,6 +1739,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 }
                 let listener = tokio::net::UnixListener::bind(path)?;
                 socket_mode(path)?;
+                clear_handed_over(path);
                 let incoming = connections::limited(Arc::clone(&kernel), listener);
                 router.serve_with_incoming(incoming).await?;
             }

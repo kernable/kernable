@@ -1038,6 +1038,11 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
     // The old primary takes nothing more, and does not start as the primary again.
     let refused = submit(&primary_config.listen, place(99)).await.unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
+    // Beside its socket, a note for a proxy in front: do not wait for this kernel.
+    let note = kernable_kernel::handed_over_note(
+        primary_config.listen.trim_start_matches("unix:"),
+    );
+    assert!(Path::new(&note).exists(), "{note}");
     let err = kernable_kernel::refuse_if_handed_over(&primary_config).unwrap_err();
     assert!(
         err.to_string().contains("handed the primary role over"),
@@ -1069,6 +1074,10 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
         key: dir.0.join("standby.key"),
         primary_kernel_keys: vec![id(&key(3)), id(&key(8))],
     });
+    // A note left from before on its socket goes once it serves there again.
+    let back_note =
+        kernable_kernel::handed_over_note(back.listen.trim_start_matches("unix:"));
+    std::fs::write(&back_note, "handed over\n").unwrap();
     let rejoined = tokio::spawn(standby::run(back.clone()));
     until("the old primary follows the new one", || {
         if rejoined.is_finished() {
@@ -1081,6 +1090,7 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
         kernable_kernel::refuse_if_handed_over(&primary_config).is_ok(),
         "following, it no longer counts as handed over"
     );
+    assert!(!Path::new(&back_note).exists(), "{back_note}");
     drop(new);
 }
 

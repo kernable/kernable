@@ -1557,6 +1557,7 @@ async fn serve(standby: Arc<Standby>, stop: oneshot::Receiver<()>) -> Result<(),
             }
             let listener = tokio::net::UnixListener::bind(path)?;
             crate::socket_mode(path)?;
+            crate::clear_handed_over(path);
             let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
             router
                 .serve_with_incoming_shutdown(incoming, stopped)
