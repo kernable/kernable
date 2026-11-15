@@ -24,6 +24,13 @@
 //! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
 //! segment-seconds = 5                        # optional, as base-hours and keep
 //! check-hours = 24                           # optional: reads the backup through that often
+//!
+//! [push]                                     # optional: a copy at a relay (docs/how-to/relays.md)
+//! to = "relay.example.net:7400"
+//! copy = "shop"
+//! key = "pusher.key"
+//! copy-key = "copy.key"
+//! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
 //! ```
 //!
 //! The customer's services are built and run with Podman, one `[[service]]` each:
@@ -72,7 +79,7 @@
 //! follower and the services both kernels' addresses.
 //!
 //! The kernel's flags are those of `kernable start`, without their dashes; a `[backup]`
-//! section adds `--backup on`. Paths are relative to the file's directory, where the children
+//! section adds `--backup on`, a `[push]` section `--readers on`. Paths are relative to the file's directory, where the children
 //! run.
 
 use std::{
@@ -195,6 +202,7 @@ const BASE_IMAGE: &str = "docker.io/library/debian:trixie-slim@sha256:a72b4433de
 struct Project {
     kernel: KernelSection,
     backup: Option<BackupSection>,
+    push: Option<PushSection>,
     pair: Option<PairSection>,
     node: Option<NodeSection>,
     #[serde(default)]
@@ -363,6 +371,21 @@ struct BackupSection {
     env: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct PushSection {
+    /// The relay's address.
+    to: String,
+    copy: String,
+    key: String,
+    copy_key: String,
+    follow: Option<String>,
+    cpus: Option<String>,
+    memory: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
 /// What `text` (a `project.toml` in `dir`) asks for; `this` is the running binary. On Linux
 /// every part runs in Podman; elsewhere the kernel and the backup follower are plain
 /// processes.
@@ -399,6 +422,12 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             .backup
             .as_ref()
             .map(|b| ("[backup]", &b.cpus, &b.memory)),
+    )
+    .chain(
+        project
+            .push
+            .as_ref()
+            .map(|p| ("[push]", &p.cpus, &p.memory)),
     )
     .find(|(_, cpus, memory)| cpus.is_some() || memory.is_some());
     if let (false, Some((section, _, _))) = (contained, limited) {
@@ -631,6 +660,16 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
     if project.backup.is_some() && !k.flags.contains_key("backup") {
         args.extend(["--backup".into(), "on".into()]);
     }
+    if project.push.is_some() && !k.flags.contains_key("readers") {
+        args.extend(["--readers".into(), "on".into()]);
+    }
+    // Where a follower beside the kernel finds it: both kernels of a pair.
+    let followed = match &peer {
+        // In the pod's own network, this kernel on its socket.
+        Some((_, other)) if sockets.is_some() => format!("{listen},{other}"),
+        Some((this, other)) => format!("{this},{other}"),
+        None => listen.clone(),
+    };
     let mut specs = vec![kernable("kernel", args, k.env.clone(), &k.cpus, &k.memory)];
     if let Some(b) = project.backup {
         for (what, value) in [
@@ -643,12 +682,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         let mut args = vec![
             "backup".to_owned(),
             "--follow".into(),
-            b.follow.unwrap_or_else(|| match &peer {
-                // In the pod's own network, this kernel on its socket.
-                Some((_, other)) if sockets.is_some() => format!("{listen},{other}"),
-                Some((this, other)) => format!("{this},{other}"),
-                None => listen.clone(),
-            }),
+            b.follow.unwrap_or_else(|| followed.clone()),
             "--key".into(),
             b.key,
             "--to".into(),
@@ -673,6 +707,25 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             }
         }
         specs.push(kernable("backup", args, b.env, &b.cpus, &b.memory));
+    }
+    if let Some(p) = project.push {
+        for (what, value) in [("[push] key", &p.key), ("[push] copy-key", &p.copy_key)] {
+            inside(what, value)?;
+        }
+        let args = vec![
+            "push".to_owned(),
+            "--follow".into(),
+            p.follow.unwrap_or_else(|| followed.clone()),
+            "--key".into(),
+            p.key,
+            "--to".into(),
+            p.to,
+            "--copy".into(),
+            p.copy,
+            "--copy-key".into(),
+            p.copy_key,
+        ];
+        specs.push(kernable("push", args, p.env, &p.cpus, &p.memory));
     }
     let metrics_listen = node.metrics_listen.clone();
     let instance = match node.instance {
@@ -726,11 +779,11 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
     let mut exposed: Vec<(String, String)> = Vec::new();
     for svc in project.service {
         if !valid_name(&svc.name)
-            || matches!(svc.name.as_str(), "kernel" | "backup" | "expose")
+            || matches!(svc.name.as_str(), "kernel" | "backup" | "push" | "expose")
             || svc.name.starts_with("expose-")
         {
             return Err(format!(
-                "[[service]] {}: a name has 1 to 63 lowercase letters, digits and -, is not kernel, backup or expose and does not start with expose-",
+                "[[service]] {}: a name has 1 to 63 lowercase letters, digits and -, is not kernel, backup, push or expose and does not start with expose-",
                 svc.name
             )
             .into());
@@ -2345,6 +2398,43 @@ key = "backup.key"
 backup-key = "backup-encryption.key"
 segment-seconds = 2
 "#;
+
+    #[test]
+    fn a_push_section_runs_the_pusher_and_lets_the_kernel_keep_readers() {
+        let text = format!(
+            "{PROJECT}\n[push]\nto = \"relay.example.net:7400\"\ncopy = \"shop\"\nkey = \"pusher.key\"\ncopy-key = \"copy.key\"\n"
+        );
+        let specs = specs(&text, Path::new("/srv/shop"), Path::new("/bin/kernable")).unwrap();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["kernel", "backup", "push"]);
+        assert!(specs[0].args.ends_with(&["--readers".into(), "on".into()]));
+        assert_eq!(
+            specs[2].args,
+            [
+                "push",
+                "--follow",
+                "0.0.0.0:7233",
+                "--key",
+                "pusher.key",
+                "--to",
+                "relay.example.net:7400",
+                "--copy",
+                "shop",
+                "--copy-key",
+                "copy.key"
+            ]
+        );
+        // A service may not take its name.
+        let named = format!("{text}\n[[service]]\nname = \"push\"\nimage = \"x\"\n");
+        assert!(specs_err(&named).contains("push"));
+    }
+
+    fn specs_err(text: &str) -> String {
+        match specs(text, Path::new("/srv/shop"), Path::new("/bin/kernable")) {
+            Ok(_) => panic!("accepted: {text}"),
+            Err(e) => e.to_string(),
+        }
+    }
 
     #[test]
     fn the_file_names_the_kernel_and_its_backup_follower() {

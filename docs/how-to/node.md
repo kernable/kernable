@@ -32,6 +32,13 @@ check-hours = 24                           # optional: reads the backup through 
 env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 # signer = "https://signer.example.com/backup"   # instead of credentials: a backup signer presigns each request
 
+[push]                                     # optional: a copy at a relay, for readers elsewhere
+to = "relay.example.net:7400"
+copy = "shop"
+key = "pusher.key"
+copy-key = "copy.key"
+follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's listen
+
 [pair]                                     # optional: one node of a pair
 witness = "10.0.0.9:7300"
 node-key = "node-a.key"
@@ -72,7 +79,7 @@ name = "stripe"
 file = "secrets/stripe.key"                # or: command = ["vault", "kv", "get", "-field=key", "shop/stripe"]
 ```
 
-`flags` are the flags of `kernable start` ([Configuration](../reference/configuration)) without their dashes; `dev = true` stands for `--dev`. With a `[backup]` section the kernel gets `--backup on`; it takes `cpus` and `memory` too, and `signer`, the URL of a [backup signer](./backup#without-credentials-on-the-server-a-signer), so that the follower needs no storage credentials in its `env`. Paths are relative to the file's directory, where the children run; on Linux every path the kernel and the backup follower use lies inside it, since that directory is all their container sees. Unknown keys are refused, so a typo does not go unnoticed: at start the node exits with 2, later it logs the error and the children run on as they are.
+`flags` are the flags of `kernable start` ([Configuration](../reference/configuration)) without their dashes; `dev = true` stands for `--dev`. With a `[push]` section the node runs the pusher of a [relay](./relays) beside the kernel, which gets `--readers on`. With a `[backup]` section the kernel gets `--backup on`; it takes `cpus` and `memory` too, and `signer`, the URL of a [backup signer](./backup#without-credentials-on-the-server-a-signer), so that the follower needs no storage credentials in its `env`. Paths are relative to the file's directory, where the children run; on Linux every path the kernel and the backup follower use lies inside it, since that directory is all their container sees. Unknown keys are refused, so a typo does not go unnoticed: at start the node exits with 2, later it logs the error and the children run on as they are.
 
 ```sh
 kernable node project.toml
@@ -99,7 +106,7 @@ Install Podman on the machine first (rootless is fine). Services run on Linux; o
 On Linux every part of the instance runs in Podman, in one pod named `kernable-<project>`:
 
 - **The kernel and the backup follower** run in a small base image with the node's kernable binary mounted read-only, so an update is still a new binary. The project directory is mounted at its own path. Name your own base image in `[kernel] image`, for one with your KMS's client for `--key-command`, say. Podman pulls it on the first start.
-- **Each part** takes `cpus` and `memory`: `[kernel]`, `[backup]`, every `[[service]]`.
+- **Each part** takes `cpus` and `memory`: `[kernel]`, `[backup]`, `[push]`, every `[[service]]`.
 - **The instance as a whole** takes them in `[node]`: the kernel and every service together never use more, so instances side by side on one machine cannot starve each other. A change to these restarts every part in a new pod.
 - **Variables** in `env` reach the containers from Podman's own environment, so their values never show in a process list.
 

@@ -369,7 +369,8 @@ Previews:
 
 Run a node:
   kernable node <project.toml>            Runs one node of a project: the kernel and, with a
-                                          [backup] section, the backup follower, as child processes
+                                          [backup] section, the backup follower, with a [push]
+                                          section the pusher to a relay, as child processes
                                           it restarts when they exit. It reads the file again when
                                           it changed (it looks twice a second) or on SIGHUP, and
                                           restarts a child whose command changed or whose binary
@@ -379,7 +380,8 @@ Run a node:
                                           the flags of kernable start without their dashes, env,
                                           binary, image, cpus, memory, stop-seconds), [backup] (to,
                                           key, backup-key, follow, segment-seconds, base-hours,
-                                          keep, check-hours, signer, cpus, memory, env), [pair] (witness,
+                                          keep, check-hours, signer, cpus, memory, env), [push] (to,
+                                          copy, key, copy-key, follow, cpus, memory, env), [pair] (witness,
                                           node-key, advertise, peer, kernel-keys,
                                           standby-timeout-ms, witness-generation: this node's
                                           kernel of a pair), [node]
