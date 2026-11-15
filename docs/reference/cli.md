@@ -78,10 +78,10 @@ Writes witness.generation: the generation of the witness the kernels of a pair r
 ### `kernable relay`
 
 ```text
-kernable relay --dir <dir> --root <root.pub> --allow-push <key.pub>[,<key.pub>] [--listen <addr>] [--tls-...]
+kernable relay --dir <dir> (--root <root.pub> --allow-push <key.pub>[,<key.pub>] | --access <file>) [--listen <addr>] [--tls-...]
 ```
 
-Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per copy), taken from pushers whose keys `--allow-push` names (kernable push), and serves each to readers (kernable start `--reader <relay>` `--reader-copy <copy>`) whose grants a `--root` signed with read. It applies and checks nothing: readers check every record against the writer's checkpoints. Listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).
+Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per copy), taken from pushers whose keys `--allow-push` names (kernable push), and serves each to readers (kernable start `--reader <relay>` `--reader-copy <copy>`) whose grants a `--root` signed with read. It applies and checks nothing: readers check every record against the writer's checkpoints. A relay several customers share takes `--access <file>` instead: per copy the pushers and roots it takes (`[copies.<copy>]` pushers = [...], roots = [...], key IDs), read at every check; a copy it does not name is refused. Listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).
 
 ### `kernable relay key`
 

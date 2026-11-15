@@ -283,6 +283,20 @@ pub fn pull(dir: &Path) -> Result<bool, BoxError> {
 
 /// Settings that make sense together.
 fn check(s: &Settings) -> Result<(), BoxError> {
+    // A version names a directory under versions/, nothing outside it.
+    if !s.kernel_version.is_empty()
+        && (s.kernel_version.starts_with('.')
+            || !s
+                .kernel_version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c)))
+    {
+        return Err(format!(
+            "kernel version {:?}: letters, digits, '.', '-' and '+' only",
+            s.kernel_version
+        )
+        .into());
+    }
     match s.role.as_str() {
         "writer" if s.follow.is_empty() && s.copy.is_empty() => Ok(()),
         "writer" => Err("a writer follows nobody".into()),
@@ -357,7 +371,12 @@ pub(crate) fn apply(settings: &Settings, dir: &Path, o: Overlay<'_>) -> Vec<Stri
             )),
         }
     }
-    if !settings.kernel_version.is_empty() {
+    if !settings.kernel_version.is_empty() && check(settings).is_err() {
+        problems.push(format!(
+            "kernel version {:?}: not a version",
+            settings.kernel_version
+        ));
+    } else if !settings.kernel_version.is_empty() {
         let binary = PathBuf::from("versions")
             .join(&settings.kernel_version)
             .join("kernable");
@@ -479,6 +498,19 @@ mod tests {
             open(more, &signed(&key, more), &pinned, "n-1").is_err(),
             "beyond the list"
         );
+    }
+
+    #[test]
+    fn a_kernel_version_names_nothing_outside_versions() {
+        let s = |v: &str| Settings {
+            role: "writer".into(),
+            kernel_version: v.into(),
+            ..Default::default()
+        };
+        assert!(check(&s("1.2.0-rc.1+build")).is_ok());
+        for bad in ["../../usr/bin", "..", "a/b", ".hidden"] {
+            assert!(check(&s(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

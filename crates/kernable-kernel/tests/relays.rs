@@ -118,6 +118,7 @@ async fn start_relay(dir: &Path) -> String {
         dir: dir.join("copies"),
         roots: vec![id(&root())],
         pushers: vec![id(&key(90))],
+        access: None,
         tls: None,
     };
     tokio::spawn(async move { relay::run(config).await.unwrap() });
@@ -620,4 +621,57 @@ async fn a_new_reader_gets_the_copy_key_on_the_word_of_the_customers_enrol_key()
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("revoked"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_relay_keeps_each_customers_copy_to_its_own_pushers_and_readers() {
+    let dir = Dir::new("relays-access");
+    // Two customers: shop (root 200, pusher 90) and other (root 201, pusher 91).
+    let other_root = key(201);
+    std::fs::write(
+        dir.0.join("access.toml"),
+        format!(
+            "[copies.\"shop.eu\"]\npushers = [\"{}\"]\nroots = [\"{}\"]\n\n[copies.\"other.eu\"]\npushers = [\"{}\"]\nroots = [\"{}\"]\n",
+            id(&key(90)),
+            id(&root()),
+            id(&key(91)),
+            id(&other_root)
+        ),
+    )
+    .unwrap();
+    let listen = format!("unix:{}", dir.0.join("relay.sock").display());
+    let config = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        roots: Vec::new(),
+        pushers: Vec::new(),
+        access: Some(dir.0.join("access.toml")),
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(config).await.unwrap() });
+    wait_for(&listen).await;
+
+    let writer_config = config_with_writer(&dir.0).await;
+    // Shop's pusher fills shop's copy; pushing to the other customer's it is refused.
+    let _ours = start_pusher(&dir.0, &writer_config.listen, &listen, "shop.eu");
+    let theirs = start_pusher(&dir.0, &writer_config.listen, &listen, "other.eu");
+    let copies = dir.0.join("copies");
+    until_async("shop's copy fills", async || {
+        std::fs::metadata(copies.join("shop.eu").join("log")).is_ok_and(|m| m.len() > 0)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !copies.join("other.eu").exists(),
+        "no push to another's copy"
+    );
+    theirs.abort();
+
+    // Shop's reader follows shop's copy; at the other's, its grant counts for nothing.
+    let ours = reader_config(&dir.0, "ours", 21, &listen, "shop.eu");
+    let _reader = start_reader(&ours).await;
+    let mut stray = reader_config(&dir.0, "stray", 22, &listen, "other.eu");
+    stray.replication.follow.as_mut().unwrap().copy_key = Some(copy_key(&dir.0));
+    let refused = tokio::time::timeout(Duration::from_secs(2), standby::run(stray)).await;
+    assert!(refused.is_err(), "it never follows another customer's copy");
 }

@@ -70,7 +70,38 @@ pub struct RelayConfig {
     pub roots: Vec<String>,
     /// Key IDs of the pushers it takes copies from.
     pub pushers: Vec<String>,
+    /// `--access`: per copy, the pushers and roots it takes, for a relay several customers
+    /// share. With it, a copy it does not name is refused, and `roots` and `pushers` count for
+    /// none of the copies it names.
+    pub access: Option<PathBuf>,
     pub tls: Option<config::Tls>,
+}
+
+/// `--access`: who may push to and read each copy.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Access {
+    #[serde(default)]
+    pub copies: HashMap<String, CopyAccess>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyAccess {
+    /// Key IDs of the pushers that may push to it.
+    #[serde(default)]
+    pub pushers: Vec<String>,
+    /// Key IDs of the roots whose grants (or whose delegates' grants) let readers follow it.
+    #[serde(default)]
+    pub roots: Vec<String>,
+}
+
+impl Access {
+    /// Read at every check, so a change applies at once without a restart.
+    pub fn read(path: &Path) -> Result<Access, BoxError> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?)
+    }
 }
 
 /// How often a reader hears where the copy stands while nothing new comes, as from a writer.
@@ -501,9 +532,41 @@ impl Relay {
         Ok(copy)
     }
 
-    /// A reader's grant, presented with its stream or call: signed by a root (or delegated from
-    /// one) and allowing `read`.
-    fn reader_may(&self, metadata: &tonic::metadata::MetadataMap, key: &str) -> Result<(), Status> {
+    /// The roots and pushers `copy` takes: from `--access`, else the relay's own.
+    fn access(&self, copy: &str) -> Result<(Vec<String>, Vec<String>), Status> {
+        let Some(path) = &self.config.access else {
+            return Ok((self.config.roots.clone(), self.config.pushers.clone()));
+        };
+        let file = Access::read(path).map_err(|e| {
+            tracing::error!(error = %e, "the access file does not read: every copy refused");
+            Status::unavailable("the relay cannot read its access file")
+        })?;
+        let entry = file.copies.get(copy).ok_or_else(|| {
+            Status::permission_denied(format!("this relay holds no copy {copy} for anyone"))
+        })?;
+        Ok((entry.roots.clone(), entry.pushers.clone()))
+    }
+
+    /// Whether `key` may push to (and take calls for) `copy`.
+    fn pusher_may(&self, key: &str, copy: &str) -> Result<(), Status> {
+        let (_, pushers) = self.access(copy)?;
+        if pushers.iter().any(|p| p == key) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(format!(
+                "this relay takes no pushes to {copy} from the key (--allow-push, --access)"
+            )))
+        }
+    }
+
+    /// A reader's grant, presented with its stream or call: signed by a root `copy` takes (or
+    /// delegated from one) and allowing `read`.
+    fn reader_may(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+        key: &str,
+        copy: &str,
+    ) -> Result<(), Status> {
         let grant = metadata
             .get(GRANT_HEADER)
             .and_then(|v| v.to_str().ok())
@@ -512,7 +575,8 @@ impl Relay {
             .ok_or_else(|| {
                 Status::permission_denied("present the reader's grant, signed by a trusted root")
             })?;
-        grant_reads(&grant, &self.config.roots, key).map_err(Status::permission_denied)
+        let (roots, _) = self.access(copy)?;
+        grant_reads(&grant, &roots, key).map_err(Status::permission_denied)
     }
 }
 
@@ -580,11 +644,7 @@ async fn push(
         return Err(Status::invalid_argument("expected PushHello"));
     };
     protocol(hello.protocol)?;
-    if !relay.config.pushers.contains(&hello.key_id) {
-        return Err(Status::permission_denied(
-            "this relay takes no pushes from the key (--allow-push)",
-        ));
-    }
+    relay.pusher_may(&hello.key_id, &hello.copy)?;
     challenge(
         inbound,
         &hello.key_id,
@@ -721,11 +781,7 @@ async fn calls(
         return Err(Status::invalid_argument("expected PushHello"));
     };
     protocol(hello.protocol)?;
-    if !relay.config.pushers.contains(&hello.key_id) {
-        return Err(Status::permission_denied(
-            "this relay takes no pushes from the key (--allow-push)",
-        ));
-    }
+    relay.pusher_may(&hello.key_id, &hello.copy)?;
     challenge(
         inbound,
         &hello.key_id,
@@ -784,7 +840,7 @@ async fn call(
         .sig
         .as_ref()
         .ok_or_else(|| Status::unauthenticated("the call is not signed"))?;
-    relay.reader_may(metadata, &sig.key_id)?;
+    relay.reader_may(metadata, &sig.key_id, &call.copy)?;
     let msg = signing::relay_call_message(&call.copy, call.id, &call.sealed, call.issued_at);
     if signing::verify(sig, &msg).is_err() {
         return Err(Status::unauthenticated("invalid signature"));
@@ -864,7 +920,8 @@ async fn copy_key(relay: Arc<Relay>, ask: CopyKeyRequest) -> Result<CopyKeyReply
         .grant
         .as_ref()
         .ok_or_else(|| Status::permission_denied("present the reader's grant"))?;
-    grant_reads(grant, &relay.config.roots, &ask.key_id).map_err(Status::permission_denied)?;
+    let (roots, _) = relay.access(&ask.copy)?;
+    grant_reads(grant, &roots, &ask.key_id).map_err(Status::permission_denied)?;
     let copy = relay.copy(&ask.copy, false)?;
     let out = copy
         .calls
@@ -957,7 +1014,7 @@ async fn follow(
             "name the copy to follow at this relay (--reader-copy)",
         ));
     }
-    relay.reader_may(metadata, &hello.key_id)?;
+    relay.reader_may(metadata, &hello.key_id, &hello.copy)?;
     challenge(
         inbound,
         &hello.key_id,

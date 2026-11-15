@@ -76,6 +76,19 @@ kernable relay --dir /srv/relay --root root.pub --allow-push pusher.pub \
 It listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS. A reader presents its
 grant, which must come from a `--root` and allow `read`. It refuses a push that is not sealed.
 
+### A relay several customers share
+
+`--root` and `--allow-push` count for every copy: fine for your own relay. A relay that holds
+copies of several customers takes `--access <file>` instead, naming for each copy the pushers that
+may push to it and the roots whose grants let readers follow it; a copy it does not name is
+refused, and the file is read at every check, so a change applies at once:
+
+```toml
+[copies."shop.eu"]
+pushers = ["<pusher's key ID>"]
+roots = ["<the customer's root key ID>"]
+```
+
 ### Limits and what a copy served
 
 Each copy lives in its own directory under `--dir`, the log in `log`. To cap a copy, write the

@@ -115,14 +115,18 @@ Keys and trust:
                                           kernels (--witness-generation); a witness that replaces
                                           a lost one gets a higher one, and kernels that have seen
                                           it ignore older witnesses.
-  kernable relay --dir <dir> --root <root.pub> --allow-push <key.pub>[,<key.pub>] [--listen <addr>] [--tls-...]
+  kernable relay --dir <dir> (--root <root.pub> --allow-push <key.pub>[,<key.pub>] | --access <file>) [--listen <addr>] [--tls-...]
                                           Runs a relay: it keeps copies of writers' records in
                                           <dir> (one directory per copy), taken from pushers whose
                                           keys --allow-push names (kernable push), and serves each
                                           to readers (kernable start --reader <relay> --reader-copy
                                           <copy>) whose grants a --root signed with read. It applies
                                           and checks nothing: readers check every record against
-                                          the writer's checkpoints. Listens on 127.0.0.1:7400 by
+                                          the writer's checkpoints. A relay several customers share
+                                          takes --access <file> instead: per copy the pushers and
+                                          roots it takes ([copies.<copy>] pushers = [...],
+                                          roots = [...], key IDs), read at every check; a copy it
+                                          does not name is refused. Listens on 127.0.0.1:7400 by
                                           default, elsewhere only with mutual TLS (--tls-cert,
                                           --tls-key, --tls-client-ca).
   kernable relay key <file>               Writes a new copy key (hex, mode 600): the pusher seals
@@ -1592,25 +1596,40 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
                 "--dir",
                 "--root",
                 "--allow-push",
+                "--access",
                 "--tls-cert",
                 "--tls-key",
                 "--tls-client-ca",
             ],
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
-        let roots = values
-            .get("--root")
-            .ok_or("no root key: pass --root <key ID or .pub file>")?
-            .iter()
-            .map(|r| key_id_of("--root", r))
-            .collect::<Result<Vec<_>>>()?;
+        let access = one("--access").map(std::path::PathBuf::from);
+        if let Some(a) = &access {
+            relay::Access::read(a).map_err(boxed)?;
+        }
+        let roots = match values.get("--root") {
+            Some(r) => r
+                .iter()
+                .map(|r| key_id_of("--root", r))
+                .collect::<Result<Vec<_>>>()?,
+            None if access.is_some() => Vec::new(),
+            None => {
+                return Err("no root key: pass --root <key ID or .pub file> (or --access)".into());
+            }
+        };
         let mut pushers = Vec::new();
-        for path in one("--allow-push")
-            .ok_or("no pusher: pass --allow-push <key.pub>[,<key.pub>]")?
-            .split(',')
-            .filter(|p| !p.is_empty())
-        {
-            pushers.push(key_id_of("--allow-push", path)?);
+        match one("--allow-push") {
+            Some(list) => {
+                for path in list.split(',').filter(|p| !p.is_empty()) {
+                    pushers.push(key_id_of("--allow-push", path)?);
+                }
+            }
+            None if access.is_some() => {}
+            None => {
+                return Err(
+                    "no pusher: pass --allow-push <key.pub>[,<key.pub>] (or --access)".into(),
+                );
+            }
         }
         let tls = match (one("--tls-cert"), one("--tls-key"), one("--tls-client-ca")) {
             (Some(cert), Some(key), Some(client_ca)) => Some(config::Tls {
@@ -1626,6 +1645,7 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
             dir: one("--dir").ok_or("--dir is missing")?.into(),
             roots,
             pushers,
+            access,
             tls,
         })
     })();
