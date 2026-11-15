@@ -13,5 +13,6 @@ Look things up here; the [concepts](../concepts/) explain why they are so. Most 
 | [Signatures](./signing) | Signed byte layouts, the hash chain, vault references, test vectors |
 | [Errors](./errors) | Rejection codes and gRPC statuses, and what a client should do about each |
 | [Metrics and health](./metrics) | Prometheus metrics, `/health` and `/ready` |
+| [Managed nodes](./managed-node) | How `kernable node` joins a control point, pulls signed settings (a fixed list) and reports |
 
 The kernel's UI in a browser (`--ui-listen`) has no reference page: [Monitor kernable](../how-to/monitor#the-ui) describes it.

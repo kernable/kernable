@@ -373,6 +373,19 @@ Previews:
                                           Then checks the copy like verify.
 
 Run a node:
+  kernable node join <url> <token> [<dir>]
+                                          Links the node in <dir> (default .) to a control point
+                                          with a one-time join token: makes node.key (unless
+                                          there is one) and writes managed.toml. kernable node
+                                          then pulls signed settings every 5 s and reports every
+                                          30 s. Settings set only a fixed list: the role and whom
+                                          it follows (writer, standby, reader of a writer or of a
+                                          copy), the relay and copy a writer pushes to, the kernel
+                                          version (versions/<v>/kernable), a reader's maximum lag
+                                          and a pair's witness; never keys, grants, secrets or
+                                          services. Settings with anything else, not signed by the
+                                          settings key pinned at the join, for another node or
+                                          older than those held are refused.
   kernable node <project.toml>            Runs one node of a project: the kernel and, with a
                                           [backup] section, the backup follower, with a [push]
                                           section the pusher to a relay, as child processes
@@ -619,6 +632,8 @@ async fn main() -> ExitCode {
         ["relay", "key", file] => relay_key(file),
         ["relay", flags @ ..] => return run_relay(flags).await,
         ["push", flags @ ..] => return run_push(flags).await,
+        ["node", "join", url, token] => node_join(url, token, "."),
+        ["node", "join", url, token, dir] => node_join(url, token, dir),
         ["node", project] => return run_node(project).await,
         ["expose", pairs @ ..] if !pairs.is_empty() => return expose(pairs).await,
         ["backup", "key", file] => backup_key(file),
@@ -1417,6 +1432,15 @@ async fn expose(pairs: &[&str]) -> ExitCode {
     eprintln!("exposing {}", pairs.join(" "));
     std::future::pending::<()>().await;
     ExitCode::SUCCESS
+}
+
+/// `kernable node join <url> <token> [<dir>]`: links the node in `dir` to a control point.
+fn node_join(url: &str, token: &str, dir: &str) -> Result<bool> {
+    let node = kernable_kernel::managed::join(url, token, Path::new(dir)).map_err(boxed)?;
+    println!(
+        "joined as {node}: {dir}/managed.toml written; kernable node takes its settings from {url} from now on"
+    );
+    Ok(true)
 }
 
 /// `kernable node <project.toml>`: runs one node of a project until stopped.

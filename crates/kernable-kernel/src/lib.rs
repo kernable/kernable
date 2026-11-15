@@ -35,6 +35,7 @@ pub mod grants;
 mod http;
 mod index;
 mod listeners;
+pub mod managed;
 mod memberships;
 mod metrics;
 pub mod moves;

@@ -361,6 +361,14 @@ Makes a masked copy (a preview) of a store on this machine, read in one consiste
 
 ## Run a node
 
+### `kernable node join`
+
+```text
+kernable node join <url> <token> [<dir>]
+```
+
+Links the node in `<dir>` (default .) to a control point with a one-time join token: makes `node.key` (unless there is one) and writes managed.toml. kernable node then pulls signed settings every 5 s and reports every 30 s. Settings set only a fixed list: the role and whom it follows (writer, standby, reader of a writer or of a copy), the relay and copy a writer pushes to, the kernel version (`versions/<v>/kernable`), a reader's maximum lag and a pair's witness; never keys, grants, secrets or services. Settings with anything else, not signed by the settings key pinned at the join, for another node or older than those held are refused.
+
 ### `kernable node`
 
 ```text

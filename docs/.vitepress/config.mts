@@ -108,6 +108,7 @@ const SIDEBAR = [
       { text: "Signatures", link: "/reference/signing" },
       { text: "Errors", link: "/reference/errors" },
       { text: "Metrics and health", link: "/reference/metrics" },
+      { text: "Managed nodes", link: "/reference/managed-node" },
     ],
   },
 ];

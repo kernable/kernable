@@ -277,6 +277,10 @@ pub struct Plan {
     pub podman: PathBuf,
     /// `[node] exclusive`.
     pub exclusive: bool,
+    /// The kernel's local socket.
+    pub admin: PathBuf,
+    /// A managed node: what its settings asked that it could not apply.
+    pub managed_problems: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,7 +403,36 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
 
 /// [`plan`], with every part in Podman or not.
 fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan, BoxError> {
-    let project: Project = toml::from_str(text)?;
+    let mut project: Project = toml::from_str(text)?;
+    // A managed node: the control point's settings over the file's, for the fixed list only.
+    let mut managed_problems = Vec::new();
+    if let Some(settings) = crate::managed::held(dir)? {
+        let mut new_push = None;
+        managed_problems = crate::managed::apply(
+            &settings,
+            dir,
+            crate::managed::Overlay {
+                flags: &mut project.kernel.flags,
+                binary: &mut project.kernel.binary,
+                push: project.push.as_mut().map(|p| (&mut p.to, &mut p.copy)),
+                new_push: &mut new_push,
+                witness: project.pair.as_mut().map(|p| &mut p.witness),
+            },
+        );
+        if let Some((to, copy)) = new_push {
+            project.push = Some(PushSection {
+                to,
+                copy,
+                key: "pusher.key".into(),
+                copy_key: "copy.key".into(),
+                follow: None,
+                root: Vec::new(),
+                cpus: None,
+                memory: None,
+                env: BTreeMap::new(),
+            });
+        }
+    }
     let node = project.node.unwrap_or_default();
     let name = match node.project {
         Some(p) => p,
@@ -977,6 +1010,8 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         pod,
         podman,
         exclusive: node.exclusive,
+        admin,
+        managed_problems,
     })
 }
 
@@ -1099,6 +1134,10 @@ fn limits(args: &mut Vec<String>, cpus: &Option<String>, memory: &Option<String>
 /// The project file and every file a secret is read from.
 fn watched_files(project: &Path, secrets: &[Secret]) -> Vec<PathBuf> {
     let mut files = vec![project.to_owned()];
+    // A managed node's settings, taken from the control point.
+    if let Some(dir) = project.parent() {
+        files.push(dir.join("managed-settings.json"));
+    }
     for secret in secrets {
         if let SecretSource::File(path) = &secret.source {
             files.push(path.clone());
@@ -1593,6 +1632,22 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         _watchdog = pod_watchdog(&podman, p);
     }
     let board: Board = Arc::default();
+    // A managed node: its settings pulled, how it stands reported, while it runs.
+    let (problems, problems_rx) = tokio::sync::watch::channel(first.managed_problems.clone());
+    let _managed = match crate::managed::link(&dir)? {
+        Some(link) => {
+            tracing::info!(control = %link.url, node = %link.node, "[node] managed");
+            for p in &first.managed_problems {
+                tracing::warn!("[node] settings not applied: {p}");
+            }
+            Some(AbortOnDrop(tokio::spawn(crate::managed::run(
+                dir.clone(),
+                first.admin.clone(),
+                problems_rx,
+            ))))
+        }
+        None => None,
+    };
     let _metrics = match &first.metrics_listen {
         Some(addr) => {
             let listener = tokio::net::TcpListener::bind(addr)
@@ -1655,6 +1710,10 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
                         tracing::error!(error = %e, "the services keep the values they have");
                     }
                     secrets.stamp(&mut plan.children);
+                    for p in &plan.managed_problems {
+                        tracing::warn!("[node] settings not applied: {p}");
+                    }
+                    problems.send_replace(plan.managed_problems.clone());
                     watched = watched_files(&path, &plan.secrets);
                     last_read = watched.iter().map(|p| modified(p)).collect();
                     if plan.pod != pod {
@@ -2380,6 +2439,15 @@ async fn serve_metrics(listener: tokio::net::TcpListener, board: Board) {
     }
 }
 
+/// A task that ends with its owner.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2405,6 +2473,69 @@ key = "backup.key"
 backup-key = "backup-encryption.key"
 segment-seconds = 2
 "#;
+
+    #[test]
+    fn a_managed_nodes_settings_set_its_role_and_push_and_nothing_else() {
+        use ed25519_dalek::Signer as _;
+        let dir = std::env::temp_dir().join(format!("kn-managed-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings_key = kernable_core::signing::generate_key();
+        std::fs::write(
+            dir.join("managed.toml"),
+            format!(
+                "url = \"http://cp\"\nnode = \"n-1\"\nkey = \"node.key\"\nsettings-key = \"{}\"\n",
+                hex::encode(settings_key.verifying_key().as_bytes())
+            ),
+        )
+        .unwrap();
+        let hold = |json: &str| {
+            let mut m = b"kernable.v1.node-settings\n".to_vec();
+            m.extend_from_slice(json.as_bytes());
+            let sig = hex::encode(settings_key.sign(&m).to_bytes());
+            std::fs::write(
+                dir.join("managed-settings.json"),
+                serde_json::json!({ "settings": json, "sig": sig }).to_string(),
+            )
+            .unwrap();
+        };
+        hold(
+            r#"{"node":"n-1","version":1,"issued_at":1,"role":"writer","push":{"to":"relay:7400","copy":"shop.eu"}}"#,
+        );
+        let first = plan(PROJECT, &dir, Path::new("/bin/kernable")).unwrap();
+        let push = first.children.iter().find(|c| c.name == "push").unwrap();
+        assert!(push.args.windows(2).any(|w| w == ["--to", "relay:7400"]));
+        assert!(push.args.windows(2).any(|w| w == ["--copy", "shop.eu"]));
+        assert!(
+            first.children[0]
+                .args
+                .windows(2)
+                .any(|w| w == ["--readers", "on"])
+        );
+
+        hold(
+            r#"{"node":"n-1","version":2,"issued_at":1,"role":"reader","follow":"relay:7400","copy":"shop.eu","max_lag_ms":5000}"#,
+        );
+        let second = plan(PROJECT, &dir, Path::new("/bin/kernable")).unwrap();
+        let kernel = &second.children[0].args;
+        assert!(kernel.windows(2).any(|w| w == ["--reader", "relay:7400"]));
+        assert!(kernel.windows(2).any(|w| w == ["--reader-copy", "shop.eu"]));
+        assert!(
+            kernel
+                .windows(2)
+                .any(|w| w == ["--reader-max-lag-ms", "5000"])
+        );
+
+        // Settings the pinned key did not sign count for nothing: the plan fails, nothing runs
+        // on them.
+        std::fs::write(
+            dir.join("managed-settings.json"),
+            serde_json::json!({ "settings": r#"{"node":"n-1","version":3,"issued_at":1,"role":"writer"}"#, "sig": "00" }).to_string(),
+        )
+        .unwrap();
+        assert!(plan(PROJECT, &dir, Path::new("/bin/kernable")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn a_push_section_runs_the_pusher_and_lets_the_kernel_keep_readers() {
