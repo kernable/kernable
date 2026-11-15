@@ -400,3 +400,56 @@ async fn a_copy_begins_from_an_image_when_the_writer_no_longer_keeps_its_first_r
     .await;
     assert!(dir.0.join("copies/shop/log").exists() && !dir.0.join("copies/shop/log.new").exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_ahead_of_the_copy_waits_for_it() {
+    let dir = Dir::new("relays-ahead");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..5 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let relay = start_relay(&dir.0).await;
+    let pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    let copied = held(&writer);
+    let log = dir.0.join("copies/shop/log");
+    until_async("the copy holds the first records", async || {
+        std::fs::metadata(&log).is_ok_and(|m| m.len() > 0)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    pusher.abort();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for i in 5..10 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+
+    // A reader follows the writer directly first, and gets further than the copy.
+    let mut direct = reader_config(&dir.0, "reader", 21, &relay, "shop");
+    if let Some(f) = direct.replication.follow.as_mut() {
+        f.primary = writer_config.listen.clone();
+        (f.copy, f.copy_key) = (String::new(), None);
+    }
+    tokio::time::timeout(Duration::from_secs(30), standby::run(direct))
+        .await
+        .expect("it catches up from the writer")
+        .unwrap();
+    assert!(held(&writer) > copied);
+
+    // Then it follows the relay: it waits until the copy holds what it holds, and goes on.
+    let via_relay = reader_config(&dir.0, "reader", 21, &relay, "shop");
+    let catching_up = tokio::spawn(standby::run(kernable_kernel::promoted(via_relay.clone())));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!catching_up.is_finished(), "it waits for the copy");
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    tokio::time::timeout(Duration::from_secs(30), catching_up)
+        .await
+        .expect("it catches up once the copy does")
+        .unwrap()
+        .unwrap();
+    let reader = open(&kernable_kernel::promoted(via_relay)).await;
+    let at = held(&writer);
+    until_async("the reader holds everything", async || held(&reader) >= at).await;
+}
