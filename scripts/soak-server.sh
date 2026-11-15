@@ -74,6 +74,8 @@ setup)
   # B: LazyFS over a plain directory, for power loss (lazyfs::clear-cache drops unsynced writes).
   if [ ! -x /opt/lazyfs/lazyfs/build/lazyfs ]; then
     [ -d /opt/lazyfs/.git ] || git clone -q https://github.com/dsrhaslab/lazyfs.git /opt/lazyfs
+    # CMake 4 refuses LazyFS's dependencies' old minimum versions without this.
+    export CMAKE_POLICY_VERSION_MINIMUM=3.5
     (cd /opt/lazyfs/libs/libpcache && ./build.sh >/dev/null)
     (cd /opt/lazyfs/lazyfs && ./build.sh >/dev/null)
   fi
