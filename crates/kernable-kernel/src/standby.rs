@@ -1027,15 +1027,16 @@ async fn ask_copy_key(follow: &Follow, key: &SigningKey, grant: &str) -> Result<
             grant: Some(grant.clone()),
             id,
         };
-        let answer = async {
+        let answer = tokio::time::timeout(Duration::from_secs(30), async {
             kernable_core::proto::relay_service_client::RelayServiceClient::new(
                 connect(relay).await?,
             )
             .copy_key(ask)
             .await
             .map_err(BoxError::from)
-        }
-        .await;
+        })
+        .await
+        .unwrap_or_else(|_| Err("no answer within 30 s".into()));
         match answer {
             Ok(reply) => {
                 let copy_key =
@@ -1051,7 +1052,7 @@ async fn ask_copy_key(follow: &Follow, key: &SigningKey, grant: &str) -> Result<
                 {
                     return Err(format!("the copy key: {}", status.message()).into());
                 }
-                tracing::warn!(%relay, error = %e, "asking for the copy key failed; asking again in {delay:?}");
+                tracing::warn!(%relay, error = %with_causes(&*e), "asking for the copy key failed; asking again in {delay:?}");
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(5));
             }

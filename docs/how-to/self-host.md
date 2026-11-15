@@ -102,6 +102,18 @@ curl -s 127.0.0.1:9233/ready                     # ready, or what the kernel wai
 
 Open what clients on other machines use, nothing else: SSH, and the kernel's TLS port if it listens on one. The metrics address stays on the loopback address; scrape it from the machine, or through an SSH tunnel.
 
+### Docker on the same machine
+
+Docker sets the kernel's forward policy to drop, which also drops what Podman's pods send out:
+the node's kernel and services then reach nothing beyond the machine (a reader its relay, a
+pusher its relay, a service the internet), while the machine itself does. Let Podman's bridge
+through Docker's own chain, and keep the rules with the machine's firewall setup:
+
+```sh
+iptables -I DOCKER-USER -i podman0 -j ACCEPT
+iptables -I DOCKER-USER -o podman0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+```
+
 ## 7. Then
 
 - **Updates** are a new binary: install it, point `[kernel] binary` at it or replace the file, and the node hands the kernel's stores over to it without stopping ([Run a node from one file](./node)).
