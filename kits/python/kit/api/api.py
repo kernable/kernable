@@ -33,6 +33,7 @@ from ..invitation.commands import AcceptInvitation, CreateInvitationLink, JoinWi
 from ..invitation.domain import InvitedGroup, link_token, parse_link_token
 from ..invitation.queries import PeekInvitation, PeekInvitationLink
 from ..shared.constants import CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT
+from ..tenancy.queries import GetSignUpPolicy
 from ..shared.secrets import (trim_space, check_password, email_domain, equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret,
                               valid_password)
 from .tokens import Claims, SigningKeys, check_access_token, issue_access_token
@@ -510,6 +511,16 @@ class KitApi:
             # A new person: registered (verified if the provider says so), the login linked.
             if not email:
                 return {"ok": False, "reason": "no_email"}
+            # A social login registers only where anyone may: with sign-up by invitation, the person
+            # accepts an invitation first and links the login after. A tenant's SSO speaks for its own
+            # verified domains, so it registers either way.
+            if not sso:
+                try:
+                    accounts = self._ask(GetSignUpPolicy())["accounts"]
+                except Rejected:
+                    accounts = None
+                if accounts != "open":
+                    return {"ok": False, "reason": "sign_up_closed"}
             account_id = str(uuid.uuid4())
             registered = self._submit(RegisterAccount(email=email, name=email.partition("@")[0], verified=email_verified), account_id,
                                       context=self.service_context)

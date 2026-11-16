@@ -21,6 +21,7 @@ import {
 } from "../invitation/index.ts";
 import { CreateApiKey, FindApiKey, FindIdentityByAccount, apiKey, parseApiKey } from "../identity/index.ts";
 import { CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT } from "../shared/constants.ts";
+import { GetSignUpPolicy } from "../tenancy/index.ts";
 import { checkPassword, emailDomain, equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret, validPassword, chars, trimSpace } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
 
@@ -489,6 +490,15 @@ export class KitApi {
     if (!accountId) {
       // A new person: registered (verified if the provider says so), the login linked.
       if (!email) return { ok: false, reason: "no_email" };
+      // A social login registers only where anyone may: with sign-up by invitation, the person
+      // accepts an invitation first and links the login after. A tenant's SSO speaks for its own
+      // verified domains, so it registers either way.
+      if (!sso) {
+        const policy = await this.kernable
+          .query(GetSignUpPolicy.new(), { tenant: PLATFORM_TENANT, context: this.serviceContext })
+          .catch(() => null);
+        if (policy?.accounts !== "open") return { ok: false, reason: "sign_up_closed" };
+      }
       accountId = randomUUID();
       const registered = await this.kernable.submit(RegisterAccount.new({ email, name: email.split("@")[0], verified: emailVerified }), {
         aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext,

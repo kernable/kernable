@@ -23,7 +23,7 @@ import { totpCode } from "../src/shared/secrets.ts";
 import { Authenticator } from "./authenticator.ts";
 import { OidcProvider } from "./oidc-provider.ts";
 import { exampleServer } from "../example/server.ts";
-import { CreateTenant, DeleteTenant, GetTenant, ReactivateTenant, RequireMfa, SuspendTenant } from "../src/tenancy/index.ts";
+import { ChangeSignUpPolicy, CreateTenant, DeleteTenant, GetTenant, ReactivateTenant, RequireMfa, SuspendTenant } from "../src/tenancy/index.ts";
 
 // --- A small app: orders that belong to whoever placed them --------------------------------------
 
@@ -523,6 +523,18 @@ test("OAuth and SSO: a social login registers or signs in, links on request; a t
     assert.deepEqual(await sso.oidcFinish(social.login(await start({ provider: "social" }, kate.claims), kateSocial)), { ok: true, linked: true });
     const kateIn = await sso.oidcFinish(social.login(await start({ provider: "social" }), kateSocial));
     assert.ok(kateIn.ok && "accountId" in kateIn && kateIn.accountId === kate.accountId);
+
+    // With sign-up by invitation, a social login registers nobody; one already linked signs in.
+    const policy = (accounts: "off" | "open") =>
+      kit.submit(ChangeSignUpPolicy.new({ tenants: "active", accounts }), {
+        aggregateId: PLATFORM_TENANT, tenant: PLATFORM_TENANT, context: { bypassAuthorization: true },
+      });
+    assert.ok((await policy("off")).committed);
+    const nora = { sub: "s-nora", email: "nora@example.com", email_verified: true };
+    assert.deepEqual(await sso.oidcFinish(social.login(await start({ provider: "social" }), nora)), { ok: false, reason: "sign_up_closed" });
+    const again = await sso.oidcFinish(social.login(await start({ provider: "social" }), jack));
+    assert.ok(again.ok && "accountId" in again && again.accountId === first.accountId);
+    assert.ok((await policy("open")).committed);
 
     // Liam's tenant sets up SSO: the domain proven by DNS, then enforced.
     const liam = await person("liam@lumen.example");

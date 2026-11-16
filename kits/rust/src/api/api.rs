@@ -38,6 +38,7 @@ use crate::shared::secrets::{
     check_password, email_domain, equal_secrets, new_id, parse_invitation_token, parse_token,
     random_bytes, random_secret, token, totp_secret, trim_space, valid_password,
 };
+use crate::tenancy::{AccountSignUp, GetSignUpPolicy};
 
 /// Why a call did not do what was asked.
 #[derive(Debug)]
@@ -1333,6 +1334,15 @@ impl KitApi {
                 // A new person: registered (verified if the provider says so), the login linked.
                 if email.is_empty() {
                     return refused("no_email");
+                }
+                // A social login registers only where anyone may: with sign-up by invitation,
+                // the person accepts an invitation first and links the login after. A tenant's
+                // SSO speaks for its own verified domains, so it registers either way.
+                if !sso {
+                    let policy = self.ask(GetSignUpPolicy {}, PLATFORM_TENANT, false).await?;
+                    if policy.map(|p| p.accounts) != Some(AccountSignUp::Open) {
+                        return refused("sign_up_closed");
+                    }
                 }
                 let account_id = new_id();
                 let name = email.split('@').next().unwrap_or_default().to_owned();

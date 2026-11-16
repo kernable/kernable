@@ -43,7 +43,7 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           before a team's first project
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
-const DEFAULT_API: &str = "https://api.kernable.com";
+const DEFAULT_API: &str = "https://api.kernable.cloud";
 const KEYCHAIN_SERVICE: &str = "kernable-cloud";
 
 /// What `cloud.json` holds: the API and, without a keychain, the session's tokens.

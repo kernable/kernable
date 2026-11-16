@@ -45,8 +45,9 @@ use kit::shared::constants::PLATFORM_TENANT as PLATFORM;
 use kit::shared::mail::{MemoryMailer, Purpose, use_mailer};
 use kit::shared::secrets::{new_id, totp_code};
 use kit::tenancy::{
-    AccountSignUp, CreateTenant, DeleteTenant, GetTenant, Owner, ReactivateTenant, RequireMfa,
-    SignUpPolicy, SuspendTenant, SuspensionReason, TenantSignUp, TenantStatus,
+    AccountSignUp, ChangeSignUpPolicy, CreateTenant, DeleteTenant, GetTenant, Owner,
+    ReactivateTenant, RequireMfa, SignUpPolicy, SuspendTenant, SuspensionReason, TenantSignUp,
+    TenantStatus,
 };
 use serde_json::{Value, json};
 
@@ -1264,6 +1265,43 @@ async fn oauth_and_sso(w: &World) {
         .unwrap()
         .unwrap();
     assert_eq!(kate_in.account_id, kate_id);
+
+    // With sign-up by invitation, a social login registers nobody; one already linked signs in.
+    let policy = |accounts| {
+        Submit::command(
+            ChangeSignUpPolicy {
+                tenants: TenantSignUp::Active,
+                accounts,
+            },
+            PLATFORM,
+        )
+        .id(new_id())
+        .tenant(PLATFORM)
+        .context(RequestContext {
+            bypass_authorization: true,
+            ..RequestContext::default()
+        })
+    };
+    committed(&w.kit.submit(policy(AccountSignUp::Off)).await.unwrap());
+    let nora = json!({ "sub": "s-nora", "email": "nora@example.com", "email_verified": true });
+    refused(
+        sso.oidc_finish(
+            &social.login(&start(Some("social"), None, None).await, nora),
+            None,
+        )
+        .await,
+        "sign_up_closed",
+    );
+    let again = sso
+        .oidc_finish(
+            &social.login(&start(Some("social"), None, None).await, jack.clone()),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.account_id, first.account_id);
+    committed(&w.kit.submit(policy(AccountSignUp::Open)).await.unwrap());
 
     // Liam's tenant sets up SSO: the domain proven by DNS, then enforced.
     let (liam, liam_id) = w.person("liam@lumen.example").await;

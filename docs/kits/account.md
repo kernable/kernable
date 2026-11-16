@@ -120,7 +120,8 @@ kit::use_passkeys(kit::RelyingParty {
 - **Social logins** (Google, any OpenID Connect provider, and GitHub through plain OAuth2):
   configured in `KitApi`. A
   login that is linked to an account signs in to it. A login whose email nobody has registers a
-  new person. A login whose email belongs to an account that has not linked it is refused
+  new person, but only while anyone may register: with registration by invitation it is refused
+  (`sign_up_closed`), and the person accepts an invitation first and links the login after. A login whose email belongs to an account that has not linked it is refused
   (`not_linked`): the person signs in another way and links it (`LinkProvider`), so nobody takes
   over an account through a provider.
 - **Single sign-on per tenant** (`account.sso`): a tenant's owners configure their identity

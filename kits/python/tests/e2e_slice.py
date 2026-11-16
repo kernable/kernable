@@ -37,7 +37,8 @@ from kit.invitation.commands import CreateInvitation, EraseInvitation, RevokeInv
 from kit.invitation.queries import ListInvitations  # noqa: E402
 from kit.shared.mail import MemoryMailer, use_mailer  # noqa: E402
 from kit.shared.secrets import totp_code  # noqa: E402
-from kit.tenancy.commands import CreateTenant, DeleteTenant, ReactivateTenant, RequireMfa, SuspendTenant  # noqa: E402
+from kit.shared.constants import PLATFORM_TENANT  # noqa: E402
+from kit.tenancy.commands import ChangeSignUpPolicy, CreateTenant, DeleteTenant, ReactivateTenant, RequireMfa, SuspendTenant  # noqa: E402
 from kit.tenancy.queries import GetTenant  # noqa: E402
 from oidc_provider import OidcProvider  # noqa: E402
 
@@ -597,6 +598,16 @@ class SliceTest(unittest.TestCase):
             self.assertEqual(sso.oidc_finish(social.login(start(provider="social"), kate_social)), {"ok": False, "reason": "not_linked"})
             self.assertEqual(sso.oidc_finish(social.login(start(kate, provider="social"), kate_social)), {"ok": True, "linked": True})
             self.assertEqual(sso.oidc_finish(social.login(start(provider="social"), kate_social)).get("account_id"), kate_id)
+
+            # With sign-up by invitation, a social login registers nobody; one already linked signs in.
+            def policy(accounts):
+                return submit(ChangeSignUpPolicy(tenants="active", accounts=accounts), PLATFORM_TENANT, PLATFORM_TENANT,
+                              RequestContext(bypass_authorization=True))
+            self.committed(policy("off"))
+            nora = {"sub": "s-nora", "email": "nora@example.com", "email_verified": True}
+            self.assertEqual(sso.oidc_finish(social.login(start(provider="social"), nora)), {"ok": False, "reason": "sign_up_closed"})
+            self.assertEqual(sso.oidc_finish(social.login(start(provider="social"), jack)).get("account_id"), first["account_id"])
+            self.committed(policy("open"))
 
             # Liam's tenant sets up SSO: the domain proven by DNS, then enforced.
             liam, liam_id = person("liam@lumen.example")
