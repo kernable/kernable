@@ -859,27 +859,7 @@ async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
 /// (it did after about a hundred, every stream on the connection with it).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reader_catches_up_hundreds_of_batches_on_one_connection() {
-    use std::sync::Mutex;
-    #[derive(Clone)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Captured {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let log = Captured(Arc::default());
-    let writer = log.clone();
-    let _ = tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(move || writer.clone())
-            .finish(),
-    );
+    let log = captured_log();
 
     let dir = Dir::new("relays-many-batches");
     let writer_config = config(&dir.0, "writer", 3);
@@ -898,10 +878,77 @@ async fn a_reader_catches_up_hundreds_of_batches_on_one_connection() {
 
     let reader = start_reader(&reader_config(&dir.0, "reader", 21, &relay, "shop")).await;
     until_async("the reader holds all 300", async || held(&reader) >= at).await;
-    let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+    let text = log.text();
     let mine: Vec<&str> = text
         .lines()
         .filter(|l| l.contains(relay.as_str()) && l.contains("failed"))
         .collect();
     assert!(mine.is_empty(), "the reader's stream broke: {mine:#?}");
+}
+
+/// The process's warnings, kept for the tests that read them (set once per test binary).
+#[derive(Clone)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Captured {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for Captured {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn captured_log() -> Captured {
+    static LOG: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
+    LOG.get_or_init(|| {
+        let log = Captured(Arc::default());
+        let writer = log.clone();
+        let _ = tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        log
+    })
+    .clone()
+}
+
+/// A copy at its storage limit: the pusher says so, not that "the channel closed".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pusher_tells_why_the_relay_ended_its_push() {
+    let log = captured_log();
+    let dir = Dir::new("relays-full");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    std::fs::create_dir_all(dir.0.join("copies/shop")).unwrap();
+    std::fs::write(dir.0.join("copies/shop/max-bytes"), "3000").unwrap();
+    let relay = start_relay(&dir.0).await;
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    for i in 0..30 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    until_async("the pusher names the limit", async || {
+        log.text()
+            .lines()
+            .any(|l| l.contains("pushing failed") && l.contains("the copy is full"))
+    })
+    .await;
+    let text = log.text();
+    let closed: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains(relay.as_str()) && l.contains("channel closed"))
+        .collect();
+    assert!(closed.is_empty(), "{closed:#?}");
 }

@@ -886,8 +886,13 @@ async fn follow_once(
                 return Ok(());
             }
             let seq = take_image(standby, &mut inbound).await?;
-            tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
-                .await?;
+            if tx
+                .send(say(follow_request::Msg::Ack(FollowAck { seq })))
+                .await
+                .is_err()
+            {
+                return Err(ended("the primary", inbound.message()).await);
+            }
         }
         FollowMode::Rewind => {
             standby.rewind(start.rewind_to, &start.message).await?;
@@ -927,8 +932,13 @@ async fn follow_once(
                     tokio::task::spawn_blocking(move || apply(&applied_to, batch, &keys)).await??;
                 standby.applied.store(seq, SeqCst);
                 standby.applied_records(&stores, &erased);
-                tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
-                    .await?;
+                if tx
+                    .send(say(follow_request::Msg::Ack(FollowAck { seq })))
+                    .await
+                    .is_err()
+                {
+                    return Err(ended("the primary", inbound.message()).await);
+                }
                 if standby.reader && seq >= standby.primary_head.load(SeqCst) {
                     standby.caught_up();
                     return Ok(());
@@ -1447,6 +1457,24 @@ fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
     Ok(moved)
 }
 
+/// Why a stream ended, once sending on it failed ("channel closed"): the other side's status,
+/// still unread in what it sent, if it comes within 2 s ("the copy is at its storage limit", "a
+/// damaged frame", "refused"); else that `peer` ended it without one.
+pub(crate) async fn ended<T>(
+    peer: &str,
+    next: impl std::future::Future<Output = Result<Option<T>, Status>>,
+) -> BoxError {
+    match tokio::time::timeout(Duration::from_secs(2), async {
+        let mut next = std::pin::pin!(next);
+        next.as_mut().await
+    })
+    .await
+    {
+        Ok(Err(status)) => status.into(),
+        _ => format!("{peer} ended the stream without a reason").into(),
+    }
+}
+
 /// A channel to the primary, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and
 /// `KERNABLE_TLS_KEY` name the files, as for the SDKs; to a Unix socket always without (a kernel
 /// there takes none), so a pusher reaches its writer's socket and a relay over TLS.
@@ -1897,5 +1925,32 @@ mod tests {
         assert!(Path::new(&format!("{}.diverged-7", db.display())).exists());
         assert_eq!(move_aside("memory:", 7).unwrap(), Vec::<PathBuf>::new());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod ended_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_closed_stream_tells_the_other_sides_reason() {
+        let full = ended("the relay", async {
+            Err::<Option<()>, _>(Status::resource_exhausted("the copy is full"))
+        })
+        .await;
+        assert!(full.to_string().contains("the copy is full"), "{full}");
+        let quiet = ended("the relay", async { Ok::<Option<()>, Status>(None) }).await;
+        assert_eq!(
+            quiet.to_string(),
+            "the relay ended the stream without a reason"
+        );
+        // One that says nothing more within 2 s is not waited for longer.
+        let started = std::time::Instant::now();
+        let silent = ended(
+            "the writer",
+            std::future::pending::<Result<Option<()>, Status>>(),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(3), "{silent}");
     }
 }

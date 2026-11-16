@@ -485,10 +485,17 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
                 reader.applied.store(seq, SeqCst);
                 reader.current_if_caught_up();
                 applied(kernel, changes);
-                tx.send(FollowRequest {
-                    msg: Some(follow_request::Msg::Ack(FollowAck { seq })),
-                })
-                .await?;
+                if tx
+                    .send(FollowRequest {
+                        msg: Some(follow_request::Msg::Ack(FollowAck { seq })),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Err(Ended::Retry(
+                        standby::ended("the writer", inbound.message()).await,
+                    ));
+                }
             }
             // A pair's witness generation, sent to its standby: nothing for a reader.
             Some(_) => {}

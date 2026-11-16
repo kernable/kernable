@@ -290,18 +290,24 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
                         follow_response::Msg::Records(batch) => push_request::Msg::Records(batch),
                         _ => unreachable!("matched above"),
                     };
-                    to_relay.send(say(msg)).await?;
+                    if to_relay.send(say(msg)).await.is_err() {
+                        return Err(standby::ended("the relay", from_relay.message()).await);
+                    }
                 }
                 Some(_) => {}
                 None => return Ok(()),
             },
             message = from_relay.message() => match message?.and_then(|m| m.msg) {
                 Some(push_response::Msg::Ack(FollowAck { seq })) => {
-                    to_writer
+                    if to_writer
                         .send(FollowRequest {
                             msg: Some(follow_request::Msg::Ack(FollowAck { seq })),
                         })
-                        .await?;
+                        .await
+                        .is_err()
+                    {
+                        return Err(standby::ended("the writer", from_writer.message()).await);
+                    }
                 }
                 Some(_) => {}
                 None => return Err("the relay ended the push".into()),
