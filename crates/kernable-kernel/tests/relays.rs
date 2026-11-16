@@ -675,3 +675,100 @@ async fn a_shared_relay_keeps_each_customers_copy_to_its_own_pushers_and_readers
     let refused = tokio::time::timeout(Duration::from_secs(2), standby::run(stray)).await;
     assert!(refused.is_err(), "it never follows another customer's copy");
 }
+
+/// A relay on a network address with a public CA's certificate and no client CA: pushers and
+/// readers reach it as `https://host:port` with no certificate of their own (it knows them by
+/// their keys); a relay that asks for mutual TLS refuses such a client.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_over_tls_needs_no_client_certificates() {
+    let dir = Dir::new("relays-tls");
+    let certs = dir.0.join("certs");
+    kernable_core::certs::create(&certs, &[]).unwrap();
+    // Stands in for the public CAs a client trusts: the CA alone, no certificate of its own.
+    // (Set once for this process; the other tests reach their relays over Unix sockets, which
+    // never use TLS, and need all three variables for mutual TLS.)
+    unsafe { std::env::set_var("KERNABLE_TLS_CA", certs.join("ca.tls.crt")) };
+
+    let listen = free_addr();
+    let open_relay = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        roots: vec![id(&root())],
+        pushers: vec![id(&key(90))],
+        access: None,
+        tls: Some(relay::RelayTls {
+            cert: certs.join("kernel.tls.crt"),
+            key: certs.join("kernel.tls.key"),
+            client_ca: None,
+        }),
+    };
+    tokio::spawn(async move { relay::run(open_relay).await.unwrap() });
+    wait_for(&listen).await;
+    let port = listen.rsplit(':').next().unwrap();
+    let relay = format!("https://localhost:{port}");
+
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..5 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    let reader = start_reader(&reader_config(&dir.0, "reader", 21, &relay, "shop")).await;
+    let at = held(&writer);
+    until_async(
+        "the reader holds what the writer wrote, over TLS",
+        async || held(&reader) >= at,
+    )
+    .await;
+
+    // Plain text to it gets nowhere.
+    let plain = kernable_core::transport::connect(&listen).await;
+    if let Ok(channel) = plain {
+        let refused = kernable_core::proto::relay_service_client::RelayServiceClient::new(channel)
+            .calls(tokio_stream::iter(
+                Vec::<kernable_core::proto::CallsRequest>::new(),
+            ))
+            .await;
+        assert!(refused.is_err(), "plain text answered: {refused:?}");
+    }
+
+    // A relay that asks for mutual TLS refuses a client without a certificate.
+    let strict = free_addr();
+    let strict_relay = relay::RelayConfig {
+        listen: strict.clone(),
+        dir: dir.0.join("strict"),
+        roots: vec![id(&root())],
+        pushers: vec![id(&key(90))],
+        access: None,
+        tls: Some(relay::RelayTls {
+            cert: certs.join("kernel.tls.crt"),
+            key: certs.join("kernel.tls.key"),
+            client_ca: Some(certs.join("ca.tls.crt")),
+        }),
+    };
+    tokio::spawn(async move { relay::run(strict_relay).await.unwrap() });
+    wait_for(&strict).await;
+    let port = strict.rsplit(':').next().unwrap();
+    let refused = async {
+        let channel = kernable_core::transport::connect_https_pinging(
+            &format!("https://localhost:{port}"),
+            Some(&certs.join("ca.tls.crt")),
+            None,
+            None,
+        )
+        .await?;
+        kernable_core::proto::relay_service_client::RelayServiceClient::new(channel)
+            .calls(tokio_stream::iter(
+                Vec::<kernable_core::proto::CallsRequest>::new(),
+            ))
+            .await?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+    assert!(
+        refused.is_err(),
+        "mutual TLS let a client without a certificate in"
+    );
+}

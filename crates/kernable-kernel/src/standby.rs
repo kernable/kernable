@@ -1464,6 +1464,23 @@ pub(crate) async fn connect_pinging(
     if transport::unix_path(addr).is_some() {
         return Ok(transport::connect_pinging(addr, every).await?);
     }
+    // `https://`: TLS against the public CAs, no certificate of its own needed (a relay knows
+    // its pushers and readers by their keys); KERNABLE_TLS_* still apply where set.
+    if addr.starts_with("https://") {
+        let (ca, cert, key) = (
+            var("KERNABLE_TLS_CA"),
+            var("KERNABLE_TLS_CERT"),
+            var("KERNABLE_TLS_KEY"),
+        );
+        let identity = cert.as_deref().zip(key.as_deref());
+        return transport::connect_https_pinging(
+            addr,
+            ca.as_deref().map(std::path::Path::new),
+            identity.map(|(c, k)| (std::path::Path::new(c), std::path::Path::new(k))),
+            every,
+        )
+        .await;
+    }
     match (
         var("KERNABLE_TLS_CA"),
         var("KERNABLE_TLS_CERT"),

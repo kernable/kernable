@@ -74,7 +74,19 @@ pub struct RelayConfig {
     /// share. With it, a copy it does not name is refused, and `roots` and `pushers` count for
     /// none of the copies it names.
     pub access: Option<PathBuf>,
-    pub tls: Option<config::Tls>,
+    pub tls: Option<RelayTls>,
+}
+
+/// The relay's TLS: its certificate and key (a public CA's, say Let's Encrypt), and, only for
+/// mutual TLS, the CA its clients' certificates must chain to. Without one, any client may
+/// connect: pushers and readers prove their keys to the relay all the same (a pusher answers a
+/// challenge, a reader shows a grant its root signed, each call signed), and what a copy holds
+/// is sealed with a key the relay never sees.
+#[derive(Debug, Clone)]
+pub struct RelayTls {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    pub client_ca: Option<PathBuf>,
 }
 
 /// `--access`: who may push to and read each copy.
@@ -1270,19 +1282,19 @@ pub async fn run(config: RelayConfig) -> Result<(), BoxError> {
     if config.tls.is_none() && transport::unix_path(&listen).is_none() && !crate::loopback(&listen)
     {
         return Err(format!(
-            "{listen} is reachable from other machines: use mutual TLS (--tls-cert, --tls-key, --tls-client-ca)"
+            "{listen} is reachable from other machines: use TLS (--tls-cert, --tls-key; \
+             --tls-client-ca too for mutual TLS)"
         )
         .into());
     }
     let mut builder = Server::builder();
     if let Some(tls) = &config.tls {
         let identity = Identity::from_pem(std::fs::read(&tls.cert)?, std::fs::read(&tls.key)?);
-        let client_ca = Certificate::from_pem(std::fs::read(&tls.client_ca)?);
-        builder = builder.tls_config(
-            ServerTlsConfig::new()
-                .identity(identity)
-                .client_ca_root(client_ca),
-        )?;
+        let mut server = ServerTlsConfig::new().identity(identity);
+        if let Some(ca) = &tls.client_ca {
+            server = server.client_ca_root(Certificate::from_pem(std::fs::read(ca)?));
+        }
+        builder = builder.tls_config(server)?;
     }
     tracing::info!(%listen, dir = %config.dir.display(), "relay starting");
     let relay = Arc::new(Relay {

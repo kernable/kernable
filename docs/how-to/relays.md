@@ -70,11 +70,19 @@ it reads everything the writer tells a reader: keep it as carefully as a reader'
 
 ```sh
 kernable relay --dir /srv/relay --root root.pub --allow-push pusher.pub \
-  --listen 0.0.0.0:7400 --tls-cert relay.tls.crt --tls-key relay.tls.key --tls-client-ca ca.tls.crt
+  --listen 0.0.0.0:7400 --tls-cert relay.crt --tls-key relay.key
 ```
 
-It listens on `127.0.0.1:7400` by default, elsewhere only with mutual TLS. A reader presents its
-grant, which must come from a `--root` and allow `read`. It refuses a push that is not sealed.
+It listens on `127.0.0.1:7400` by default, elsewhere only with TLS. Give it a certificate from a
+public CA (Let's Encrypt, for its name): pushers and readers then reach it as
+`https://relay.example.net:7400` and need no certificate of their own, because the relay knows
+them by their keys. A pusher answers a challenge with its key, which `--allow-push` must name; a
+reader presents its grant, which must come from a `--root` and allow `read`, and signs each write
+it sends. It refuses a push that is not sealed. To admit only clients with a certificate from your
+own CA as well, add `--tls-client-ca ca.crt` (mutual TLS); its clients then set
+`KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`.
+
+The relay reads its certificate when it starts: restart it when the certificate is renewed.
 
 ### A relay several customers share
 
@@ -103,13 +111,14 @@ they come, without the copy key and without a stop.
 ## 3. The pusher, beside the writer
 
 ```sh
-KERNABLE_TLS_CA=ca.tls.crt KERNABLE_TLS_CERT=pusher.tls.crt KERNABLE_TLS_KEY=pusher.tls.key \
 kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --key pusher.key \
-  --to relay.example.net:7400 --copy shop --copy-key copy.key
+  --to https://relay.example.net:7400 --copy shop --copy-key copy.key
 ```
 
-`KERNABLE_TLS_*` are for the relay, and for the writer if it listens on TCP with mutual TLS; the
-writer's Unix socket (`--follow unix:/srv/shop/kernel.sock`) is reached without. With a pair,
+`https://` reaches the relay over TLS, its certificate checked against the public CAs (and
+`KERNABLE_TLS_CA` if set); `KERNABLE_TLS_*` are needed only for mutual TLS, to the relay or to a
+writer that listens on TCP with it. The writer's Unix socket (`--follow unix:/srv/shop/kernel.sock`)
+is reached without. With a pair,
 name both kernels: it follows whichever is the writer. It reads `pusher.grant`
 again on every connection and tries again after every failure. A [node](./node) runs it for you
 with a `[push]` section (`to`, `copy`, `key`, `copy-key`).
@@ -141,7 +150,7 @@ new copy key to shut them out).
 
 ```sh
 kernable start --root root.pub \
-  --reader relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
+  --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
   --follow-key reader-1.key \
   --primary-kernel-key kernel-a.pub --primary-kernel-key kernel-b.pub \
   --kernel-key reader-1-kernel.key --vault-key reader-1-vault.key --listen 10.1.0.5:7233

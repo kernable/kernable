@@ -127,8 +127,10 @@ Keys and trust:
                                           roots it takes ([copies.<copy>] pushers = [...],
                                           roots = [...], key IDs), read at every check; a copy it
                                           does not name is refused. Listens on 127.0.0.1:7400 by
-                                          default, elsewhere only with mutual TLS (--tls-cert,
-                                          --tls-key, --tls-client-ca).
+                                          default, elsewhere only with TLS (--tls-cert, --tls-key:
+                                          a public CA's certificate serves clients with no
+                                          certificate of their own, who reach it as
+                                          https://<host>:<port>; --tls-client-ca adds mutual TLS).
   kernable relay key <file>               Writes a new copy key (hex, mode 600): the pusher seals
                                           what it sends a relay with it (--copy-key) and the
                                           copy's readers open it (--reader-copy-key). The relay
@@ -1632,13 +1634,18 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
             }
         }
         let tls = match (one("--tls-cert"), one("--tls-key"), one("--tls-client-ca")) {
-            (Some(cert), Some(key), Some(client_ca)) => Some(config::Tls {
+            (Some(cert), Some(key), client_ca) => Some(relay::RelayTls {
                 cert: cert.into(),
                 key: key.into(),
-                client_ca: client_ca.into(),
+                client_ca: client_ca.map(Into::into),
             }),
             (None, None, None) => None,
-            _ => return Err("TLS needs --tls-cert, --tls-key and --tls-client-ca".into()),
+            _ => {
+                return Err(
+                    "TLS needs --tls-cert and --tls-key (and --tls-client-ca for mutual TLS)"
+                        .into(),
+                );
+            }
         };
         Ok(relay::RelayConfig {
             listen: one("--listen").unwrap_or("127.0.0.1:7400").to_owned(),

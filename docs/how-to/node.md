@@ -33,7 +33,7 @@ env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 # signer = "https://signer.example.com/backup"   # instead of credentials: a backup signer presigns each request
 
 [push]                                     # optional: a copy at a relay, for readers elsewhere
-to = "relay.example.net:7400"
+to = "https://relay.example.net:7400"
 copy = "shop"
 key = "pusher.key"
 copy-key = "copy.key"

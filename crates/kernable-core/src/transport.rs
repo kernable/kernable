@@ -58,6 +58,33 @@ pub async fn connect_tls_pinging(
     .await?)
 }
 
+/// Connects over TLS to `https://host:port`: the server's certificate checked against the public
+/// CAs (Mozilla's, built in) and `ca` if given, this process's certificate shown only if given.
+/// For a server that knows its clients by their keys, not by certificates (a relay).
+pub async fn connect_https_pinging(
+    addr: &str,
+    ca: Option<&std::path::Path>,
+    identity: Option<(&std::path::Path, &std::path::Path)>,
+    every: Option<std::time::Duration>,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    let mut config = ClientTlsConfig::new().with_webpki_roots();
+    if let Some(ca) = ca {
+        config = config.ca_certificate(Certificate::from_pem(std::fs::read(ca)?));
+    }
+    if let Some((cert, key)) = identity {
+        config = config.identity(Identity::from_pem(
+            std::fs::read(cert)?,
+            std::fs::read(key)?,
+        ));
+    }
+    Ok(pinging(
+        Endpoint::from_shared(format!("https://{}", tcp_addr(addr)))?.tls_config(config)?,
+        every,
+    )
+    .connect()
+    .await?)
+}
+
 pub async fn connect(addr: &str) -> Result<Channel, Error> {
     connect_pinging(addr, None).await
 }
