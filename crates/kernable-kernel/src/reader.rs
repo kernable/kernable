@@ -94,6 +94,8 @@ pub(crate) struct Reader {
     /// Reactors connected here, waiting (they act on the writer only), by name: how many
     /// connections. They count as connected for `/ready`.
     reactors: Mutex<HashMap<String, usize>>,
+    /// Why the writer (or the relay) refuses it, while it does.
+    refused: Mutex<Option<String>>,
 }
 
 impl Reader {
@@ -134,6 +136,7 @@ impl Reader {
             heard_at: AtomicI64::new(0),
             channels: Mutex::default(),
             reactors: Mutex::default(),
+            refused: Mutex::default(),
         })
     }
 
@@ -215,6 +218,14 @@ impl Reader {
                     self.lag()
                 )
             });
+        }
+        if let Some(why) = self
+            .refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            return Some(format!("a reader of {}: refused: {why}", self.writer()));
         }
         Some(match self.silent_ms() {
             Some(ms) => format!(
@@ -371,7 +382,9 @@ pub(crate) async fn follow_writer(kernel: &Arc<Kernel>) -> BoxError {
         return std::future::pending().await;
     };
     let mut delay = Duration::from_millis(100);
+    let mut last_refusal = None;
     loop {
+        let mut max = MAX_DELAY;
         match follow_once(kernel, &reader).await {
             Ok(()) => {
                 tracing::warn!(writer = %reader.writer(), "the writer ended the stream; connecting again");
@@ -385,13 +398,27 @@ pub(crate) async fn follow_writer(kernel: &Arc<Kernel>) -> BoxError {
                 .into();
             }
             Err(Ended::Retry(e)) => {
-                tracing::warn!(writer = %reader.writer(), error = %e, "following the writer failed; trying the next address in {delay:?}");
+                let why = standby::refusal(&*e);
+                *reader
+                    .refused
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = why.clone();
+                match why {
+                    Some(why) => {
+                        standby::refused_once(&mut last_refusal, why, &reader.writer());
+                        max = standby::REFUSED_MAX_DELAY;
+                    }
+                    None => {
+                        last_refusal = None;
+                        tracing::warn!(writer = %reader.writer(), error = %e, "following the writer failed; trying the next address in {delay:?}");
+                    }
+                }
                 reader.next_address();
-                delay = (delay * 2).min(MAX_DELAY);
             }
         }
         reader.connected.store(false, SeqCst);
         tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(max);
     }
 }
 
@@ -431,6 +458,10 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
         )));
     }
     reader.connected.store(true, SeqCst);
+    *reader
+        .refused
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = None;
     reader.heard();
     tracing::info!(%writer, from = head.seq, "the reader follows the writer");
     loop {

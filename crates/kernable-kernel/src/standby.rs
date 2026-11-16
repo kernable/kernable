@@ -611,6 +611,7 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         // The first try again comes soon: a primary whose binary was replaced serves again
         // within a moment, and a pair's writes wait for its standby meanwhile.
         let mut delay = Duration::from_millis(100);
+        let mut last_refusal = None;
         loop {
             let followed = follow_once(&standby, &key, &grant, &mut tried_backup).await;
             // A reader that caught up is done here: its kernel opens the stores next.
@@ -623,11 +624,21 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
             {
                 return std::future::pending().await;
             }
+            let mut refused = false;
             match followed {
-                Ok(()) => tracing::warn!("the primary ended the stream; connecting again"),
+                Ok(()) => {
+                    last_refusal = None;
+                    tracing::warn!("the primary ended the stream; connecting again");
+                }
                 Err(e) => {
-                    let why = with_causes(&*e);
-                    tracing::warn!(error = %why, primary = %standby.current(), "following the primary failed; connecting again in {delay:?}");
+                    if let Some(why) = refusal(&*e) {
+                        refused = true;
+                        refused_once(&mut last_refusal, why, &standby.current());
+                    } else {
+                        last_refusal = None;
+                        let why = with_causes(&*e);
+                        tracing::warn!(error = %why, primary = %standby.current(), "following the primary failed; connecting again in {delay:?}");
+                    }
                     if standby.reader {
                         standby.next_address();
                     }
@@ -644,7 +655,11 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
                 delay = delay.min(link.lease() / 3);
             }
             tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(30));
+            delay = (delay * 2).min(if refused {
+                REFUSED_MAX_DELAY
+            } else {
+                Duration::from_secs(30)
+            });
         }
     };
     tokio::select! {
@@ -1019,6 +1034,7 @@ async fn ask_copy_key(follow: &Follow, key: &SigningKey, grant: &str) -> Result<
     let grant = kernable_core::proto::Grant::decode(hex::decode(grant)?.as_slice())?;
     let relays = crate::reader::addresses(&follow.primary);
     let mut delay = Duration::from_millis(200);
+    let mut last_refusal = None;
     for attempt in 0usize.. {
         let relay = &relays[attempt % relays.len()];
         let mut id = [0u8; 8];
@@ -1056,15 +1072,20 @@ async fn ask_copy_key(follow: &Follow, key: &SigningKey, grant: &str) -> Result<
                 return Ok(());
             }
             Err(e) => {
-                // A refusal is final: the grant does not allow it.
-                if let Some(status) = e.downcast_ref::<Status>()
-                    && status.code() == tonic::Code::PermissionDenied
-                {
-                    return Err(format!("the copy key: {}", status.message()).into());
-                }
-                tracing::warn!(%relay, error = %with_causes(&*e), "asking for the copy key failed; asking again in {delay:?}");
+                // A refusal lasts until the grant or the relay's access list allows it: asked
+                // again, loudly, rarely.
+                let max = match refusal(&*e) {
+                    Some(why) => {
+                        refused_once(&mut last_refusal, format!("the copy key: {why}"), relay);
+                        REFUSED_MAX_DELAY
+                    }
+                    None => {
+                        tracing::warn!(%relay, error = %with_causes(&*e), "asking for the copy key failed; asking again in {delay:?}");
+                        Duration::from_secs(5)
+                    }
+                };
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(5));
+                delay = (delay * 2).min(max);
             }
         }
     }
@@ -1455,6 +1476,37 @@ fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
         }
     }
     Ok(moved)
+}
+
+/// The longest wait between asks while the other side refuses this key (its grant, or a
+/// relay's access list): it may be allowed later, by whoever runs it, without a restart here.
+pub(crate) const REFUSED_MAX_DELAY: Duration = Duration::from_secs(60);
+
+/// Why the other side refused, if it did (`PERMISSION_DENIED`, `UNAUTHENTICATED`), from the
+/// error or one of its causes.
+pub(crate) fn refusal(e: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut next = Some(e);
+    while let Some(e) = next {
+        if let Some(status) = e.downcast_ref::<Status>()
+            && matches!(
+                status.code(),
+                tonic::Code::PermissionDenied | tonic::Code::Unauthenticated
+            )
+        {
+            return Some(status.message().to_owned());
+        }
+        next = e.source();
+    }
+    None
+}
+
+/// Logs a refusal as an error once per reason (`last`, the one logged before): a refused key
+/// is the operator's to fix, and it says so without repeating itself every minute.
+pub(crate) fn refused_once(last: &mut Option<String>, why: String, peer: &str) {
+    if last.as_deref() != Some(why.as_str()) {
+        tracing::error!(error = %why, %peer, "refused: asking again, at most every 60 s, until it is allowed");
+        *last = Some(why);
+    }
 }
 
 /// Why a stream ended, once sending on it failed ("channel closed"): the other side's status,

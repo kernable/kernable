@@ -603,11 +603,21 @@ async fn a_new_reader_gets_the_copy_key_on_the_word_of_the_customers_enrol_key()
         &stranger_root,
         &kernable_core::signing::grant_message(&foreign),
     ));
-    let refused = standby::run(new_reader(&dir.0, "foreign", 33, &relay, foreign))
-        .await
-        .unwrap_err();
-    assert!(refused.to_string().contains("copy key"), "{refused}");
+    // It keeps asking (a refusal may be lifted), and says why, as an error.
+    let log = captured_log();
+    let asking = tokio::time::timeout(
+        Duration::from_secs(3),
+        standby::run(new_reader(&dir.0, "foreign", 33, &relay, foreign)),
+    )
+    .await;
+    assert!(asking.is_err(), "it keeps asking: {asking:?}");
     assert!(!dir.0.join("foreign-copy.key").exists());
+    let said = |what: &str| {
+        log.text()
+            .lines()
+            .any(|l| l.contains("ERROR") && l.contains("the copy key") && l.contains(what))
+    };
+    assert!(said("root"), "{}", log.text());
 
     // The writer revokes the enrol key: the pusher sees it pass and refuses what it granted.
     writer.revoke(&id(&enrol), 0).unwrap();
@@ -617,10 +627,14 @@ async fn a_new_reader_gets_the_copy_key_on_the_word_of_the_customers_enrol_key()
         std::fs::read_to_string(&revoked_file).is_ok_and(|f| f.contains(&id(&enrol)))
     })
     .await;
-    let refused = standby::run(new_reader(&dir.0, "late", 34, &relay, by_enrol(&key(84))))
-        .await
-        .unwrap_err();
-    assert!(refused.to_string().contains("revoked"), "{refused}");
+    let asking = tokio::time::timeout(
+        Duration::from_secs(3),
+        standby::run(new_reader(&dir.0, "late", 34, &relay, by_enrol(&key(84)))),
+    )
+    .await;
+    assert!(asking.is_err(), "it keeps asking: {asking:?}");
+    assert!(!dir.0.join("late-copy.key").exists());
+    assert!(said("revoked"), "{}", log.text());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -951,4 +965,62 @@ async fn a_pusher_tells_why_the_relay_ended_its_push() {
         .filter(|l| l.contains(relay.as_str()) && l.contains("channel closed"))
         .collect();
     assert!(closed.is_empty(), "{closed:#?}");
+}
+
+/// A reader the relay refuses (its root not in the access list) says so once, as an error, keeps
+/// asking, and follows as soon as the operator lets it in, without a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_reader_says_so_once_and_follows_once_let_in() {
+    let log = captured_log();
+    let dir = Dir::new("relays-let-in");
+    let access = |roots: &str| {
+        std::fs::write(
+            dir.0.join("access.toml"),
+            format!(
+                "[copies.\"shop.eu\"]\npushers = [\"{}\"]\nroots = [{roots}]\n",
+                id(&key(90))
+            ),
+        )
+        .unwrap()
+    };
+    access("");
+    let listen = format!("unix:{}", dir.0.join("relay.sock").display());
+    let config = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        roots: Vec::new(),
+        pushers: Vec::new(),
+        access: Some(dir.0.join("access.toml")),
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(config).await.unwrap() });
+    wait_for(&listen).await;
+    let writer_config = config_with_writer(&dir.0).await;
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &listen, "shop.eu");
+    until_async("the copy fills", async || {
+        std::fs::metadata(dir.0.join("copies/shop.eu/log")).is_ok_and(|m| m.len() > 0)
+    })
+    .await;
+
+    // Its copy key is not there yet: it asks the relay, which refuses its root.
+    let mut reader = reader_config(&dir.0, "late", 24, &listen, "shop.eu");
+    reader.replication.follow.as_mut().unwrap().copy_key = Some(dir.0.join("late-copy.key"));
+    let following = tokio::spawn(standby::run(reader.clone()));
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let refused = log
+        .text()
+        .lines()
+        .filter(|l| l.contains("ERROR") && l.contains("refused") && l.contains(listen.as_str()))
+        .count();
+    assert_eq!(refused, 1, "once, as an error:\n{}", log.text());
+    assert!(!following.is_finished(), "it keeps asking");
+
+    // The operator lets its root in: it gets the key and catches up, still the same process.
+    access(&format!("\"{}\"", id(&root())));
+    tokio::time::timeout(Duration::from_secs(30), following)
+        .await
+        .expect("it follows once let in")
+        .unwrap()
+        .unwrap();
+    assert!(dir.0.join("late-copy.key").exists());
 }
