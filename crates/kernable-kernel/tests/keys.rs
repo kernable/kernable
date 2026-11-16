@@ -496,3 +496,42 @@ async fn a_grant_presented_by_several_requests_at_once_lets_each_of_them_in() {
         }
     }
 }
+
+/// Tens of thousands of grants: the kernel starts in seconds, not minutes (it built every
+/// permission again for each grant it loaded).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kernel_with_many_grants_starts_at_once() {
+    const N: u32 = 20_000;
+    let started = std::time::Instant::now();
+    let env = start_wrapped(
+        "keys-many-grants",
+        |_, _| {},
+        |store| {
+            for i in 0..N {
+                let mut seed = [0u8; 32];
+                seed[..4].copy_from_slice(&i.to_be_bytes());
+                seed[31] = 77;
+                let k = ed25519_dalek::SigningKey::from_bytes(&seed);
+                store.save_grant(&grant(&k, &[("query", &["*"])])).unwrap();
+            }
+            store
+        },
+    )
+    .await;
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(30), "the start took {took:?}");
+    // All of them count.
+    let mut seed = [0u8; 32];
+    seed[..4].copy_from_slice(&(N - 1).to_be_bytes());
+    seed[31] = 77;
+    let last = ed25519_dalek::SigningKey::from_bytes(&seed);
+    assert!(env.kernel.role().is_object());
+    assert!(
+        kernable_store::open_read_only(&env.store)
+            .unwrap()
+            .grants()
+            .unwrap()
+            .iter()
+            .any(|g| g.key_id == id(&last))
+    );
+}

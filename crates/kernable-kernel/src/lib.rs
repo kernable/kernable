@@ -536,15 +536,39 @@ impl Kernel {
             in_flight_keys: Default::default(),
             global_owner: Default::default(),
         });
-        // The newest grants it had, checked again: a root key may be gone or revoked since.
-        for grant in kernel.store.grants()? {
-            let key_id = grant.key_id.clone();
-            if let Err(e) = kernel
-                .check_grant(&grant)
-                .and_then(|()| kernel.keep(grant, false))
-            {
-                tracing::warn!(key = %key_id, error = %e.message(), "stored grant no longer valid");
+        // The newest grants it had, checked again: a root key may be gone or revoked since. The
+        // permissions are built once, from all of them (built per grant, a start took minutes
+        // with tens of thousands of grants). A root's grants first: a delegated grant is checked
+        // against its delegate's newest grant held.
+        {
+            let (direct, delegated): (Vec<_>, Vec<_>) = kernel
+                .store
+                .grants()?
+                .into_iter()
+                .partition(|g| g.issuer.is_none());
+            for batch in [direct, delegated] {
+                let valid: Vec<Grant> = batch
+                    .into_iter()
+                    .filter(|grant| match kernel.check_grant(grant) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(key = %grant.key_id, error = %e.message(), "stored grant no longer valid");
+                            false
+                        }
+                    })
+                    .collect();
+                let mut grants = kernel.grants.lock().unwrap_or_else(PoisonError::into_inner);
+                for grant in valid {
+                    if grants
+                        .get(&grant.key_id)
+                        .is_none_or(|held| held.issued_at < grant.issued_at)
+                    {
+                        grants.insert(grant.key_id.clone(), grant);
+                    }
+                }
             }
+            let grants = kernel.grants.lock().unwrap_or_else(PoisonError::into_inner);
+            kernel.set_permissions(&grants);
         }
         if let Some(mark) = &copy {
             tracing::warn!(
