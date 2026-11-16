@@ -516,6 +516,78 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
+/// Signs the request that opens a stream (`rpc`: push, calls, follow) to `copy` at a relay with
+/// `key`: the relay checks it before it reads any message.
+pub fn sign_stream<T>(
+    request: &mut tonic::Request<T>,
+    key: &ed25519_dalek::SigningKey,
+    rpc: &str,
+    copy: &str,
+) -> Result<(), BoxError> {
+    let key_id = signing::key_id(&key.verifying_key());
+    let at = now_ms();
+    let sig = signing::sign(key, &signing::relay_stream_message(rpc, copy, &key_id, at));
+    let headers = request.metadata_mut();
+    headers.insert(signing::RELAY_KEY_HEADER, key_id.parse()?);
+    headers.insert(signing::RELAY_COPY_HEADER, copy.parse()?);
+    headers.insert(signing::RELAY_AT_HEADER, at.to_string().parse()?);
+    headers.insert(signing::RELAY_SIG_HEADER, hex::encode(&sig.sig).parse()?);
+    Ok(())
+}
+
+/// The key and copy a stream's request names, its signature checked, fresh: before any message
+/// of it is read, so nobody without a key the relay takes gets it to buffer anything.
+fn signed_stream(
+    metadata: &tonic::metadata::MetadataMap,
+    rpc: &str,
+) -> Result<(String, String), Status> {
+    let get = |name: &str| metadata.get(name).and_then(|v| v.to_str().ok());
+    let (Some(key), Some(copy), Some(at), Some(sig)) = (
+        get(signing::RELAY_KEY_HEADER),
+        get(signing::RELAY_COPY_HEADER),
+        get(signing::RELAY_AT_HEADER),
+        get(signing::RELAY_SIG_HEADER),
+    ) else {
+        return Err(Status::unauthenticated(
+            "a stream at a relay names its key and copy, signed, in its request (kernable-relay-*): \
+             a kernable older than this relay?",
+        ));
+    };
+    if !valid_name(copy) {
+        return Err(invalid_name());
+    }
+    let at: i64 = at
+        .parse()
+        .map_err(|_| Status::unauthenticated("kernable-relay-at is no time"))?;
+    if (now_ms() - at).abs() > MAX_REQUEST_AGE_MS {
+        return Err(Status::unauthenticated(
+            "the stream's signature is too old or too new: check the clock",
+        ));
+    }
+    let proof = kernable_core::proto::Signature {
+        key_id: key.to_owned(),
+        sig: hex::decode(sig)
+            .map_err(|_| Status::unauthenticated("kernable-relay-sig is no hex"))?,
+    };
+    signing::verify(&proof, &signing::relay_stream_message(rpc, copy, key, at))
+        .map_err(|_| Status::unauthenticated("the stream's signature does not hold"))?;
+    Ok((key.to_owned(), copy.to_owned()))
+}
+
+/// The hello must name the key and copy the request was signed for.
+fn same_as_signed(
+    hello_key: &str,
+    hello_copy: &str,
+    signed: &(String, String),
+) -> Result<(), Status> {
+    if (hello_key, hello_copy) != (signed.0.as_str(), signed.1.as_str()) {
+        return Err(Status::invalid_argument(
+            "the hello names another key or copy than its request",
+        ));
+    }
+    Ok(())
+}
+
 /// A name that is no copy's, not repeated back: whatever a client sent stays out of the answer
 /// and the log.
 fn invalid_name() -> Status {
@@ -682,6 +754,7 @@ async fn say(out: &PushOut, msg: push_response::Msg) -> Result<(), Status> {
 
 async fn push(
     relay: Arc<Relay>,
+    signed: (String, String),
     inbound: &mut Streaming<PushRequest>,
     out: &PushOut,
 ) -> Result<(), Status> {
@@ -689,6 +762,7 @@ async fn push(
         return Err(Status::invalid_argument("expected PushHello"));
     };
     protocol(hello.protocol)?;
+    same_as_signed(&hello.key_id, &hello.copy, &signed)?;
     relay.pusher_may(&hello.key_id, &hello.copy)?;
     challenge(
         inbound,
@@ -818,6 +892,7 @@ const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// The pusher's stream for calls: readers' writes go down it, the writer's answers come up.
 async fn calls(
     relay: Arc<Relay>,
+    signed: (String, String),
     inbound: &mut Streaming<CallsRequest>,
     out: &mpsc::Sender<Result<CallsResponse, Status>>,
 ) -> Result<(), Status> {
@@ -825,6 +900,7 @@ async fn calls(
         return Err(Status::invalid_argument("expected PushHello"));
     };
     protocol(hello.protocol)?;
+    same_as_signed(&hello.key_id, &hello.copy, &signed)?;
     relay.pusher_may(&hello.key_id, &hello.copy)?;
     challenge(
         inbound,
@@ -1063,6 +1139,7 @@ async fn frames(file: Arc<File>, frames: Vec<Frame>) -> Result<Vec<PushRequest>,
 
 async fn follow(
     relay: Arc<Relay>,
+    signed: (String, String),
     metadata: &tonic::metadata::MetadataMap,
     inbound: &mut Streaming<FollowRequest>,
     out: &FollowOut,
@@ -1081,6 +1158,7 @@ async fn follow(
             "name the copy to follow at this relay (--reader-copy)",
         ));
     }
+    same_as_signed(&hello.key_id, &hello.copy, &signed)?;
     relay.reader_may(metadata, &hello.key_id, &hello.copy)?;
     challenge(
         inbound,
@@ -1246,11 +1324,14 @@ impl RelayService for Api {
         &self,
         request: Request<Streaming<PushRequest>>,
     ) -> Result<Response<Self::PushStream>, Status> {
+        // Known before any message is read: a stranger gets nothing buffered.
+        let signed = signed_stream(request.metadata(), "push")?;
+        self.0.pusher_may(&signed.0, &signed.1)?;
         let (tx, rx) = mpsc::channel(16);
         let relay = Arc::clone(&self.0);
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = push(relay, &mut inbound, &tx).await {
+            if let Err(status) = push(relay, signed, &mut inbound, &tx).await {
                 tracing::warn!(error = %status.message(), "a push ended");
                 let _ = tx.send(Err(status)).await;
             }
@@ -1264,11 +1345,13 @@ impl RelayService for Api {
         &self,
         request: Request<Streaming<CallsRequest>>,
     ) -> Result<Response<Self::CallsStream>, Status> {
+        let signed = signed_stream(request.metadata(), "calls")?;
+        self.0.pusher_may(&signed.0, &signed.1)?;
         let (tx, rx) = mpsc::channel(64);
         let relay = Arc::clone(&self.0);
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = calls(relay, &mut inbound, &tx).await {
+            if let Err(status) = calls(relay, signed, &mut inbound, &tx).await {
                 tracing::warn!(error = %status.message(), "a pusher's calls ended");
                 let _ = tx.send(Err(status)).await;
             }
@@ -1301,12 +1384,15 @@ impl ReplicationService for Api {
         &self,
         request: Request<Streaming<FollowRequest>>,
     ) -> Result<Response<Self::FollowStream>, Status> {
+        let signed = signed_stream(request.metadata(), "follow")?;
+        self.0
+            .reader_may(request.metadata(), &signed.0, &signed.1)?;
         let (tx, rx) = mpsc::channel(16);
         let relay = Arc::clone(&self.0);
         let metadata = request.metadata().clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = follow(relay, &metadata, &mut inbound, &tx).await {
+            if let Err(status) = follow(relay, signed, &metadata, &mut inbound, &tx).await {
                 // A damaged copy is the operator's to know; a reader leaving is not.
                 if status.code() == tonic::Code::DataLoss {
                     tracing::error!(error = %status.message(), "a reader's stream ended");

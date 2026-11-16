@@ -800,11 +800,16 @@ async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
         RelayServiceClient::new(kernable_core::transport::connect(&relay).await.unwrap())
     };
 
+    fn signed<S>(stream: S, copy: &str) -> tonic::Request<S> {
+        let mut request = tonic::Request::new(stream);
+        relay::sign_stream(&mut request, &key(90), "push", copy).unwrap();
+        request
+    }
     // No hello at all.
     let started = std::time::Instant::now();
     let mut stream = client()
         .await
-        .push(tokio_stream::pending::<PushRequest>())
+        .push(signed(tokio_stream::pending::<PushRequest>(), "shop"))
         .await
         .unwrap()
         .into_inner();
@@ -826,9 +831,12 @@ async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
     };
     let mut stream = client()
         .await
-        .push(tokio_stream::StreamExt::chain(
-            tokio_stream::iter(vec![hello]),
-            tokio_stream::pending(),
+        .push(signed(
+            tokio_stream::StreamExt::chain(
+                tokio_stream::iter(vec![hello]),
+                tokio_stream::pending(),
+            ),
+            "shop",
         ))
         .await
         .unwrap()
@@ -841,7 +849,8 @@ async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
     assert_eq!(ended.code(), Code::DeadlineExceeded, "{ended:?}");
 
     // Names that are no copy's, never echoed.
-    for name in ["../../etc/passwd", "Shop", &"a".repeat(100_000)] {
+    // (A name of megabytes never gets this far: HTTP/2 refuses headers that large.)
+    for name in ["../../etc/passwd", "Shop", &"a".repeat(64)] {
         let hello = PushRequest {
             msg: Some(push_request::Msg::Hello(PushHello {
                 key_id: id(&key(90)),
@@ -849,15 +858,30 @@ async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
                 protocol: kernable_core::PROTOCOL,
             })),
         };
-        let refused = client()
-            .await
-            .push(tokio_stream::iter(vec![hello]))
-            .await
-            .unwrap()
-            .into_inner()
-            .message()
-            .await
-            .unwrap_err();
+        // Signed for that name: refused before any message, the name not repeated.
+        let mut request = tonic::Request::new(tokio_stream::iter(vec![hello]));
+        let sig = kernable_core::signing::sign(
+            &key(90),
+            &kernable_core::signing::relay_stream_message("push", name, &id(&key(90)), now()),
+        );
+        let headers = request.metadata_mut();
+        headers.insert(
+            kernable_core::signing::RELAY_KEY_HEADER,
+            id(&key(90)).parse().unwrap(),
+        );
+        headers.insert(
+            kernable_core::signing::RELAY_COPY_HEADER,
+            tonic::metadata::MetadataValue::try_from(name).unwrap_or_else(|_| "x".parse().unwrap()),
+        );
+        headers.insert(
+            kernable_core::signing::RELAY_AT_HEADER,
+            now().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            kernable_core::signing::RELAY_SIG_HEADER,
+            hex(&sig.sig).parse().unwrap(),
+        );
+        let refused = client().await.push(request).await.unwrap_err();
         assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
         assert!(
             !refused.message().contains(&name[..4]),
@@ -1023,4 +1047,104 @@ async fn a_refused_reader_says_so_once_and_follows_once_let_in() {
         .unwrap()
         .unwrap();
     assert!(dir.0.join("late-copy.key").exists());
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// A stream at a relay is known by its request before any message: unsigned, signed by a key
+/// the relay does not take, stale, or for another copy than its hello, it is refused at once,
+/// and a big first message of a stranger is never read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_knows_a_stream_by_its_signed_request_before_reading_it() {
+    use kernable_core::proto::{
+        PushHello, PushRequest, push_request, relay_service_client::RelayServiceClient,
+    };
+    use kernable_core::signing::{
+        self, RELAY_AT_HEADER, RELAY_COPY_HEADER, RELAY_KEY_HEADER, RELAY_SIG_HEADER,
+    };
+    let dir = Dir::new("relays-signed");
+    let relay = start_relay(&dir.0).await;
+    let client = || async {
+        RelayServiceClient::new(kernable_core::transport::connect(&relay).await.unwrap())
+            .max_encoding_message_size(512 << 20)
+    };
+    let big = || PushRequest {
+        msg: Some(push_request::Msg::Hello(PushHello {
+            key_id: "x".repeat(64 << 20),
+            ..Default::default()
+        })),
+    };
+    let request = |key: &ed25519_dalek::SigningKey, copy: &str, at: i64| {
+        let mut r = tonic::Request::new(tokio_stream::iter(vec![big()]));
+        let sig = signing::sign(
+            key,
+            &signing::relay_stream_message("push", copy, &id(key), at),
+        );
+        let h = r.metadata_mut();
+        h.insert(RELAY_KEY_HEADER, id(key).parse().unwrap());
+        h.insert(RELAY_COPY_HEADER, copy.parse().unwrap());
+        h.insert(RELAY_AT_HEADER, at.to_string().parse().unwrap());
+        h.insert(RELAY_SIG_HEADER, hex(&sig.sig).parse().unwrap());
+        r
+    };
+
+    // Unsigned.
+    let started = std::time::Instant::now();
+    let e = client()
+        .await
+        .push(tokio_stream::iter(vec![big()]))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated, "{e:?}");
+    // A key the relay does not take (key 91; it takes 90's pushes).
+    let e = client()
+        .await
+        .push(request(&key(91), "shop", now()))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied, "{e:?}");
+    // Its own key, but stale.
+    let e = client()
+        .await
+        .push(request(&key(90), "shop", now() - 120_000))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated, "{e:?}");
+    // Signed for another rpc's message: the signature does not hold.
+    let mut r = request(&key(90), "shop", now());
+    r.metadata_mut()
+        .insert(RELAY_COPY_HEADER, "other".parse().unwrap());
+    let e = client().await.push(r).await.unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated, "{e:?}");
+    // None of the 64 MB first messages was read: all refused in well under the time to send one.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // Signed right, but the hello names another copy than the request.
+    let mut r = tonic::Request::new(tokio_stream::iter(vec![PushRequest {
+        msg: Some(push_request::Msg::Hello(PushHello {
+            key_id: id(&key(90)),
+            copy: "elsewhere".into(),
+            protocol: kernable_core::PROTOCOL,
+        })),
+    }]));
+    relay::sign_stream(&mut r, &key(90), "push", "shop").unwrap();
+    let e = client()
+        .await
+        .push(r)
+        .await
+        .unwrap()
+        .into_inner()
+        .message()
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::InvalidArgument, "{e:?}");
 }

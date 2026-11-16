@@ -44,6 +44,13 @@ service ReplicationService {
 // value is the key's ID (the first 8 bytes of its SHA-256), a random 24-byte nonce and the
 // XChaCha20-Poly1305 ciphertext, its associated data a label of what it is and where it belongs
 // (see the kernel's src/seal.rs), so a relay cannot move one elsewhere unnoticed.
+// Every stream at a relay (Push, Calls, and Follow of ReplicationService) names its key and copy in
+// its request, signed, so the relay refuses a stranger before it reads any message: headers
+// kernable-relay-key (key ID), kernable-relay-copy, kernable-relay-at (ms since the epoch, within
+// 60 s of the relay's clock) and kernable-relay-sig (hex, Ed25519 by that key over the message
+// "kernable.v1.relay-stream" | rpc ("push", "calls", "follow") | copy | key ID | at, laid out as
+// in SIGNING.md). The stream's hello must name the same key and copy; the challenge follows as
+// before.
 service RelayService {
   // PushRequest.hello -> PushResponse.challenge -> PushRequest.challenge_response ->
   // PushResponse.start (where the copy stands), then the writer's records from there: an image

@@ -203,7 +203,9 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
             protocol: kernable_core::PROTOCOL,
         })))
         .await?;
-    let mut from_relay = relay.push(ReceiverStream::new(rx)).await?.into_inner();
+    let mut request = tonic::Request::new(ReceiverStream::new(rx));
+    crate::relay::sign_stream(&mut request, &pusher.key, "push", &pusher.copy)?;
+    let mut from_relay = relay.push(request).await?.into_inner();
     let next = async |s: &mut tonic::Streaming<kernable_core::proto::PushResponse>| {
         Ok::<_, BoxError>(s.message().await?.and_then(|m| m.msg))
     };
@@ -351,7 +353,9 @@ async fn calls_once(pusher: &Arc<Pusher>, current: &Arc<Mutex<String>>) -> Resul
         protocol: kernable_core::PROTOCOL,
     })))
     .await?;
-    let mut inbound = relay.calls(ReceiverStream::new(rx)).await?.into_inner();
+    let mut request = tonic::Request::new(ReceiverStream::new(rx));
+    crate::relay::sign_stream(&mut request, &pusher.key, "calls", &pusher.copy)?;
+    let mut inbound = relay.calls(request).await?.into_inner();
     let Some(calls_response::Msg::Challenge(challenge)) =
         inbound.message().await?.and_then(|m| m.msg)
     else {

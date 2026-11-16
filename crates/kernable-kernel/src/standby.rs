@@ -792,9 +792,14 @@ pub(crate) async fn open_stream(
         .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
     let (tx, rx) = mpsc::channel(16);
     let say = |msg| FollowRequest { msg: Some(msg) };
+    let copy = hello.copy.clone();
     tx.send(say(follow_request::Msg::Hello(hello))).await?;
     let mut request = Request::new(ReceiverStream::new(rx));
     request.metadata_mut().insert(GRANT_HEADER, grant.parse()?);
+    if !copy.is_empty() {
+        // A relay: it knows the reader before it reads anything.
+        crate::relay::sign_stream(&mut request, key, "follow", &copy)?;
+    }
     let mut inbound = Inbound {
         stream: client.follow(request).await?.into_inner(),
         key: copy_key,

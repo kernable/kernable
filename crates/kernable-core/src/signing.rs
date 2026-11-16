@@ -610,6 +610,24 @@ pub fn relay_call_message(copy: &str, id: u64, sealed: &[u8], issued_at: i64) ->
         .0
 }
 
+/// What a pusher or a reader signs into the request that opens a stream at a relay (`push`,
+/// `calls`, `follow`), so the relay knows the key before it reads a single message.
+pub fn relay_stream_message(rpc: &str, copy: &str, key_id: &str, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.relay-stream")
+        .str(rpc)
+        .str(copy)
+        .str(key_id)
+        .i64(issued_at)
+        .0
+}
+
+/// The request headers of a stream at a relay: the key, the copy, when (ms), the signature
+/// over [`relay_stream_message`] (hex).
+pub const RELAY_KEY_HEADER: &str = "kernable-relay-key";
+pub const RELAY_COPY_HEADER: &str = "kernable-relay-copy";
+pub const RELAY_AT_HEADER: &str = "kernable-relay-at";
+pub const RELAY_SIG_HEADER: &str = "kernable-relay-sig";
+
 /// What a new reader of a relay's copy signs to ask for the copy key.
 pub fn copy_key_message(copy: &str, key_id: &str, id: u64, issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.copy-key")
