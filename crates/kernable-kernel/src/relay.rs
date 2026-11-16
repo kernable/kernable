@@ -1024,6 +1024,27 @@ async fn tell(out: &FollowOut, msg: follow_response::Msg) -> Result<(), Status> 
         .map_err(|_| Status::cancelled("the reader left"))
 }
 
+/// Takes the reader's messages that already came, without waiting; true if it left. A reader
+/// acknowledges every batch: left unread while it catches up, the small frames pile up and
+/// HTTP/2 ends the whole connection ("too_many_data_frames").
+fn took_what_came(inbound: &mut Streaming<FollowRequest>) -> Result<bool, Status> {
+    loop {
+        let next = {
+            let mut message = std::pin::pin!(inbound.message());
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            match message.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(next) => next,
+                std::task::Poll::Pending => return Ok(false),
+            }
+        };
+        match next?.and_then(|m| m.msg) {
+            Some(follow_request::Msg::Ack(_)) => {}
+            Some(follow_request::Msg::Leaving(_)) | None => return Ok(true),
+            Some(_) => return Err(Status::invalid_argument("unexpected message")),
+        }
+    }
+}
+
 /// Reads frames off the thread pool.
 async fn frames(file: Arc<File>, frames: Vec<Frame>) -> Result<Vec<PushRequest>, Status> {
     tokio::task::spawn_blocking(move || {
@@ -1180,6 +1201,9 @@ async fn follow(
                     sent = last.seq;
                     batch.head = copy.writer_head().unwrap_or(head).max(sent);
                     copy.served.fetch_add(batch.encoded_len() as u64, SeqCst);
+                    if took_what_came(inbound)? {
+                        return Ok(());
+                    }
                     tell(out, follow_response::Msg::Records(batch)).await?;
                 }
             }

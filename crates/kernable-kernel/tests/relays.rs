@@ -853,3 +853,55 @@ async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
     }
     assert!(!dir.0.join("etc").exists() && !dir.0.join("copies/Shop").exists());
 }
+
+/// A reader far behind acknowledges batch after batch while it catches up; the relay takes the
+/// acknowledgements as they come, so HTTP/2 never ends the connection for too many small frames
+/// (it did after about a hundred, every stream on the connection with it).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_catches_up_hundreds_of_batches_on_one_connection() {
+    use std::sync::Mutex;
+    #[derive(Clone)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = Captured(Arc::default());
+    let writer = log.clone();
+    let _ = tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+
+    let dir = Dir::new("relays-many-batches");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    let relay = start_relay(&dir.0).await;
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    // One commit at a time, apart: each its own batch at the relay.
+    for i in 0..300 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let at = held(&writer);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let reader = start_reader(&reader_config(&dir.0, "reader", 21, &relay, "shop")).await;
+    until_async("the reader holds all 300", async || held(&reader) >= at).await;
+    let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+    let mine: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains(relay.as_str()) && l.contains("failed"))
+        .collect();
+    assert!(mine.is_empty(), "the reader's stream broke: {mine:#?}");
+}
