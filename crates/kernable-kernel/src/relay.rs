@@ -236,10 +236,22 @@ fn scan(path: &Path) -> std::io::Result<(Vec<Frame>, u64)> {
     Ok((frames, offset))
 }
 
+/// A frame of the log, checked against its checksum: a log changed on disk since it was
+/// written is told as such, never passed on.
 fn read_frame(file: &File, frame: &Frame) -> std::io::Result<PushRequest> {
-    let mut payload = vec![0; frame.len as usize];
-    file.read_exact_at(&mut payload, frame.offset + HEADER as u64)?;
-    PushRequest::decode(payload.as_slice()).map_err(std::io::Error::other)
+    let mut buf = vec![0; HEADER + frame.len as usize];
+    file.read_exact_at(&mut buf, frame.offset)?;
+    let (header, payload) = buf.split_at(HEADER);
+    if sum(payload) != header[21..29] {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "the copy's log is damaged: the frame at byte {} does not match its checksum",
+                frame.offset
+            ),
+        ));
+    }
+    PushRequest::decode(payload).map_err(std::io::Error::other)
 }
 
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
@@ -504,13 +516,20 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
+/// A name that is no copy's, not repeated back: whatever a client sent stays out of the answer
+/// and the log.
+fn invalid_name() -> Status {
+    Status::invalid_argument(
+        "no copy name: lowercase letters, digits, '.', '_' and '-', at most 63, starting with a \
+         letter or digit",
+    )
+}
+
 impl Relay {
     /// The copy named `name`; with `create`, a new one if it has none.
     fn copy(&self, name: &str, create: bool) -> Result<Arc<Copy>, Status> {
         if !valid_name(name) {
-            return Err(Status::invalid_argument(format!(
-                "{name:?} is no copy name: lowercase letters, digits, '.', '_' and '-', at most 63"
-            )));
+            return Err(invalid_name());
         }
         let mut copies = self.copies.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(copy) = copies.get(name) {
@@ -546,6 +565,9 @@ impl Relay {
 
     /// The roots and pushers `copy` takes: from `--access`, else the relay's own.
     fn access(&self, copy: &str) -> Result<(Vec<String>, Vec<String>), Status> {
+        if !valid_name(copy) {
+            return Err(invalid_name());
+        }
         let Some(path) = &self.config.access else {
             return Ok((self.config.roots.clone(), self.config.pushers.clone()));
         };
@@ -611,6 +633,17 @@ fn internal(e: impl std::fmt::Display) -> Status {
     Status::internal(e.to_string())
 }
 
+/// How long a stream may take from its start to its hello, and from the challenge to its
+/// answer: a client that sends nothing, or never proves its key, holds nothing longer.
+pub const HANDSHAKE: Duration = Duration::from_secs(10);
+
+/// The first message of a stream, within [`HANDSHAKE`].
+async fn first<T>(inbound: &mut Streaming<T>) -> Result<Option<T>, Status> {
+    tokio::time::timeout(HANDSHAKE, inbound.message())
+        .await
+        .map_err(|_| Status::deadline_exceeded("no hello within the handshake's time"))?
+}
+
 async fn challenge<T, F>(
     inbound: &mut Streaming<T>,
     key: &str,
@@ -623,9 +656,9 @@ where
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Status::internal("no randomness"))?;
     send_nonce(nonce.to_vec()).await?;
-    let sig = inbound
-        .message()
-        .await?
+    let sig = tokio::time::timeout(HANDSHAKE, inbound.message())
+        .await
+        .map_err(|_| Status::deadline_exceeded("the challenge was not answered in time"))??
         .and_then(signature)
         .ok_or_else(|| Status::invalid_argument("expected ChallengeResponse"))?;
     let proof = kernable_core::proto::Signature {
@@ -652,7 +685,7 @@ async fn push(
     inbound: &mut Streaming<PushRequest>,
     out: &PushOut,
 ) -> Result<(), Status> {
-    let Some(push_request::Msg::Hello(hello)) = inbound.message().await?.and_then(|m| m.msg) else {
+    let Some(push_request::Msg::Hello(hello)) = first(inbound).await?.and_then(|m| m.msg) else {
         return Err(Status::invalid_argument("expected PushHello"));
     };
     protocol(hello.protocol)?;
@@ -788,8 +821,7 @@ async fn calls(
     inbound: &mut Streaming<CallsRequest>,
     out: &mpsc::Sender<Result<CallsResponse, Status>>,
 ) -> Result<(), Status> {
-    let Some(calls_request::Msg::Hello(hello)) = inbound.message().await?.and_then(|m| m.msg)
-    else {
+    let Some(calls_request::Msg::Hello(hello)) = first(inbound).await?.and_then(|m| m.msg) else {
         return Err(Status::invalid_argument("expected PushHello"));
     };
     protocol(hello.protocol)?;
@@ -1002,7 +1034,10 @@ async fn frames(file: Arc<File>, frames: Vec<Frame>) -> Result<Vec<PushRequest>,
     })
     .await
     .map_err(internal)?
-    .map_err(internal)
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::InvalidData => Status::data_loss(e.to_string()),
+        _ => internal(e),
+    })
 }
 
 async fn follow(
@@ -1011,8 +1046,7 @@ async fn follow(
     inbound: &mut Streaming<FollowRequest>,
     out: &FollowOut,
 ) -> Result<(), Status> {
-    let Some(follow_request::Msg::Hello(hello)) = inbound.message().await?.and_then(|m| m.msg)
-    else {
+    let Some(follow_request::Msg::Hello(hello)) = first(inbound).await?.and_then(|m| m.msg) else {
         return Err(Status::invalid_argument("expected FollowHello"));
     };
     protocol(hello.protocol)?;
@@ -1249,7 +1283,12 @@ impl ReplicationService for Api {
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
             if let Err(status) = follow(relay, &metadata, &mut inbound, &tx).await {
-                tracing::debug!(error = %status.message(), "a reader's stream ended");
+                // A damaged copy is the operator's to know; a reader leaving is not.
+                if status.code() == tonic::Code::DataLoss {
+                    tracing::error!(error = %status.message(), "a reader's stream ended");
+                } else {
+                    tracing::debug!(error = %status.message(), "a reader's stream ended");
+                }
                 let _ = tx.send(Err(status)).await;
             }
         });
@@ -1383,6 +1422,30 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_frame_changed_on_disk_is_told_not_passed_on() {
+        let d = dir("damaged");
+        let log = {
+            let mut log = Log::open(&d).unwrap();
+            log.add(batch(1, 3)).unwrap();
+            log.add(batch(4, 5)).unwrap();
+            log
+        };
+        assert_eq!(log.hash_at(2).unwrap(), Some(vec![2; 32]));
+        // One byte of the first frame's payload changed, as by someone with the disk.
+        let file = OpenOptions::new().write(true).open(d.join("log")).unwrap();
+        file.write_all_at(&[0xff], HEADER as u64 + 3).unwrap();
+        let e = log.hash_at(2).unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+            Some(std::io::ErrorKind::InvalidData)
+        );
+        assert!(e.to_string().contains("damaged"), "{e}");
+        // The other frame still reads.
+        assert_eq!(log.hash_at(5).unwrap(), Some(vec![5; 32]));
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]

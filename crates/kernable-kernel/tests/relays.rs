@@ -772,3 +772,84 @@ async fn a_relay_over_tls_needs_no_client_certificates() {
         "mutual TLS let a client without a certificate in"
     );
 }
+
+/// A client that never says hello, or never answers the challenge, holds its stream only for
+/// the handshake's time; a name that is no copy's is refused without being repeated back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
+    use kernable_core::proto::{
+        PushHello, PushRequest, push_request, relay_service_client::RelayServiceClient,
+    };
+    let dir = Dir::new("relays-handshake");
+    let relay = start_relay(&dir.0).await;
+    let client = || async {
+        RelayServiceClient::new(kernable_core::transport::connect(&relay).await.unwrap())
+    };
+
+    // No hello at all.
+    let started = std::time::Instant::now();
+    let mut stream = client()
+        .await
+        .push(tokio_stream::pending::<PushRequest>())
+        .await
+        .unwrap()
+        .into_inner();
+    let ended = stream.message().await.unwrap_err();
+    assert_eq!(ended.code(), Code::DeadlineExceeded, "{ended:?}");
+    let took = started.elapsed();
+    assert!(
+        took >= relay::HANDSHAKE && took < relay::HANDSHAKE + Duration::from_secs(5),
+        "{took:?}"
+    );
+
+    // A hello, then silence: the challenge goes unanswered.
+    let hello = PushRequest {
+        msg: Some(push_request::Msg::Hello(PushHello {
+            key_id: id(&key(90)),
+            copy: "shop".into(),
+            protocol: kernable_core::PROTOCOL,
+        })),
+    };
+    let mut stream = client()
+        .await
+        .push(tokio_stream::StreamExt::chain(
+            tokio_stream::iter(vec![hello]),
+            tokio_stream::pending(),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        stream.message().await.unwrap().is_some(),
+        "the challenge comes"
+    );
+    let ended = stream.message().await.unwrap_err();
+    assert_eq!(ended.code(), Code::DeadlineExceeded, "{ended:?}");
+
+    // Names that are no copy's, never echoed.
+    for name in ["../../etc/passwd", "Shop", &"a".repeat(100_000)] {
+        let hello = PushRequest {
+            msg: Some(push_request::Msg::Hello(PushHello {
+                key_id: id(&key(90)),
+                copy: name.to_owned(),
+                protocol: kernable_core::PROTOCOL,
+            })),
+        };
+        let refused = client()
+            .await
+            .push(tokio_stream::iter(vec![hello]))
+            .await
+            .unwrap()
+            .into_inner()
+            .message()
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
+        assert!(
+            !refused.message().contains(&name[..4]),
+            "{}",
+            refused.message()
+        );
+    }
+    assert!(!dir.0.join("etc").exists() && !dir.0.join("copies/Shop").exists());
+}
