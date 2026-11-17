@@ -1,0 +1,22 @@
+bench/cross-site-remote.sh, 2026-11-17: site A = this Mac (behind NAT), site B = 2.29.23.105 (Helsinki).
+Only the relay (on the server; the Mac reaches it through an SSH tunnel for its port) joins them;
+every other address in the map is valid on its own site only.
+
+      (p2 holds the map: epoch 1, default p1, control p1)  -- through its site's reader, as in T2
+FAIL  T5a a global key for a tenant of p2 (site B): no outcome within 30 s
+      p2: "reserving global keys failed error=partition p1 at 127.0.0.1:17301: transport error",
+      again every second: p2 reserves at the control partition directly, at its map address, not
+      through its --control (its site's reader). The command waits; nothing wrong is committed.
+FAIL  T5b the same key for a tenant of p1 (site A): committed
+      Not a breach: p2 never got to reserve the key, so p1 rightly took it. p2's command would be
+      refused unique_taken once it could ask.
+PASS  T5c another key for a tenant of p1 committed (p1 is the control partition: no trip needed)
+FAIL  T6a moving a tenant from p2 to p1: still copying after 81 s
+      p1: "copying a moving tenant failed; trying again tenant=t3 from=p2 ... partition p2 at
+      127.0.0.1:17302: transport error": the target asks the source directly.
+FAIL  T6b moving a tenant from p1 to p2: still copying after 81 s (the same, the other way)
+
+Together with bench/cross-site.sh: across sites joined only by a relay, copies, the map and trust
+records, and commands through a reader work; global unique keys and moves do not, because the
+partitions call each other directly at their map addresses. Both wait and retry; neither breaks
+anything. Tenant-scoped unique keys are unaffected.
