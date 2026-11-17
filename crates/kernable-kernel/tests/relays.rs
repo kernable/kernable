@@ -1148,3 +1148,56 @@ async fn a_relay_knows_a_stream_by_its_signed_request_before_reading_it() {
         .unwrap_err();
     assert_eq!(e.code(), Code::InvalidArgument, "{e:?}");
 }
+
+/// A copy's status.json (every ten seconds) names its pusher and its readers with how far each
+/// was sent, for whoever operates the relay; nothing of a record's content.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_writes_who_is_connected_to_each_copy() {
+    let dir = Dir::new("relays-status");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..5 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let relay = start_relay(&dir.0).await;
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    let reader = start_reader(&reader_config(&dir.0, "reader", 21, &relay, "shop")).await;
+    let at = held(&writer);
+    until_async("the reader holds it", async || held(&reader) >= at).await;
+
+    let path = dir.0.join("copies/shop/status.json");
+    let status = || -> serde_json::Value {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    };
+    // Written every ten seconds: up to 25 s for it.
+    let named = || {
+        let s = status();
+        s["pusher"]["key"] == id(&key(90))
+            && s["readers"].as_array().is_some_and(|r| {
+                // Record numbers, as the relay counts them: the reader was sent the whole copy.
+                r.iter().any(|r| {
+                    r["key"] == id(&key(71)) && r["position"].as_u64() == s["head"].as_u64()
+                })
+            })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    while !named() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "status.json: {}",
+            status()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(status()["head"].as_u64() > Some(0), "{}", status());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("PlaceOrder") && !text.contains("OrderPlaced"),
+        "{text}"
+    );
+}

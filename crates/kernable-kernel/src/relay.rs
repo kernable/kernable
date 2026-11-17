@@ -449,6 +449,56 @@ struct Copy {
     keys: Mutex<HashMap<u64, oneshot::Sender<CopyKeyReply>>>,
     /// Bytes sent to readers since the copy began (`served`).
     served: AtomicU64,
+    /// Who is connected now, for `status.json`.
+    who: Mutex<Who>,
+}
+
+/// A copy's pusher and readers as they are connected now (`status.json`, every ten seconds):
+/// for whoever operates the relay, never a record's content.
+#[derive(Default, serde::Serialize)]
+struct Who {
+    /// The pusher's key and since when (ms).
+    pusher: Option<(String, i64)>,
+    /// Each reader's stream: its key, the newest record sent to it, since when (ms).
+    readers: HashMap<u64, (String, u64, i64)>,
+}
+
+/// One reader's stream, counted in [`Who`] while it lasts.
+struct Following(Arc<Copy>, u64);
+
+impl Drop for Following {
+    fn drop(&mut self) {
+        self.0
+            .who
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .readers
+            .remove(&self.1);
+    }
+}
+
+impl Copy {
+    fn who(&self) -> std::sync::MutexGuard<'_, Who> {
+        self.who.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `status.json`: the head, the pusher, the readers, when it was written.
+    fn status(&self) -> serde_json::Value {
+        let head = self.log().head.seq;
+        let who = self.who();
+        let mut readers: Vec<_> = who
+            .readers
+            .values()
+            .map(|(key, at, since)| serde_json::json!({ "key": key, "position": at, "since": since }))
+            .collect();
+        readers.sort_by_key(|r| r["key"].as_str().unwrap_or_default().to_owned());
+        serde_json::json!({
+            "head": head,
+            "pusher": who.pusher.as_ref().map(|(key, since)| serde_json::json!({ "key": key, "since": since })),
+            "readers": readers,
+            "written_at": now_ms(),
+        })
+    }
 }
 
 impl Copy {
@@ -499,6 +549,7 @@ struct Pushing(Arc<Copy>);
 impl Drop for Pushing {
     fn drop(&mut self) {
         self.0.pushing.store(false, SeqCst);
+        self.0.who().pusher = None;
     }
 }
 
@@ -624,6 +675,7 @@ impl Relay {
             calls: Mutex::default(),
             pending: Mutex::default(),
             keys: Mutex::default(),
+            who: Mutex::default(),
             served: AtomicU64::new(
                 std::fs::read_to_string(dir.join("served"))
                     .ok()
@@ -782,6 +834,7 @@ async fn push(
         )));
     }
     let _pushing = Pushing(Arc::clone(&copy));
+    copy.who().pusher = Some((hello.key_id.clone(), now_ms()));
     let start = copy.log().head.clone();
     tracing::info!(copy = %copy.name, key = %hello.key_id, at = start.seq, "a pusher pushes");
     say(
@@ -1214,6 +1267,12 @@ async fn follow(
         }
     };
     tracing::info!(copy = %copy.name, reader = %hello.key_id, from = hello.seq, mode = ?mode, "a reader follows");
+    static STREAMS: AtomicU64 = AtomicU64::new(0);
+    let stream = STREAMS.fetch_add(1, SeqCst);
+    copy.who()
+        .readers
+        .insert(stream, (hello.key_id.clone(), hello.seq, now_ms()));
+    let _following = Following(Arc::clone(&copy), stream);
     tell(
         out,
         follow_response::Msg::Start(FollowStart {
@@ -1277,6 +1336,9 @@ async fn follow(
                         continue;
                     };
                     sent = last.seq;
+                    if let Some(reader) = copy.who().readers.get_mut(&stream) {
+                        reader.1 = sent;
+                    }
                     batch.head = copy.writer_head().unwrap_or(head).max(sent);
                     copy.served.fetch_add(batch.encoded_len() as u64, SeqCst);
                     if took_what_came(inbound)? {
@@ -1467,7 +1529,13 @@ pub async fn run(config: RelayConfig) -> Result<(), BoxError> {
                 let dir = copy.log().dir.clone();
                 let served = copy.served.load(SeqCst);
                 let written = std::fs::write(dir.join("served.new"), format!("{served}\n"))
-                    .and_then(|()| std::fs::rename(dir.join("served.new"), dir.join("served")));
+                    .and_then(|()| std::fs::rename(dir.join("served.new"), dir.join("served")))
+                    .and_then(|()| {
+                        std::fs::write(dir.join("status.json.new"), copy.status().to_string())
+                    })
+                    .and_then(|()| {
+                        std::fs::rename(dir.join("status.json.new"), dir.join("status.json"))
+                    });
                 if let Err(e) = written {
                     tracing::warn!(copy = %copy.name, error = %e, "writing what the copy served failed");
                 }
@@ -1596,6 +1664,7 @@ mod tests {
                 pending: Mutex::default(),
                 keys: Mutex::default(),
                 served: AtomicU64::new(0),
+                who: Mutex::default(),
             }
         };
         copy.log().add(batch(1, 4)).unwrap();

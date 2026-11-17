@@ -103,7 +103,8 @@ Each copy lives in its own directory under `--dir`, the log in `log`. To cap a c
 most it may hold, in bytes, to `max-bytes` there: a push that would grow the log beyond it is
 refused (`RESOURCE_EXHAUSTED`), the copy stops following and its readers go unready, until the
 limit rises. The relay writes the bytes it sent to the copy's readers to `served` every ten
-seconds. A copy's log is never compacted: it grows with what the writer writes.
+seconds, and beside it `status.json`: the copy's head, its pusher (key, since when) and each
+reader's stream (key, the newest record sent to it, since when). Nothing of a record's content. A copy's log is never compacted: it grows with what the writer writes.
 
 The log only ever grows at its end, sealed, so it can be backed up by copying its new bytes as
 they come, without the copy key and without a stop.
