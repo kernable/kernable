@@ -563,7 +563,7 @@ fn valid_name(name: &str) -> bool {
     chars
         .next()
         .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && name.len() <= 63
+        && name.len() <= 127
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
@@ -643,7 +643,7 @@ fn same_as_signed(
 /// and the log.
 fn invalid_name() -> Status {
     Status::invalid_argument(
-        "no copy name: lowercase letters, digits, '.', '_' and '-', at most 63, starting with a \
+        "no copy name: lowercase letters, digits, '.', '_' and '-', at most 127, starting with a \
          letter or digit",
     )
 }
@@ -1720,6 +1720,9 @@ mod tests {
     #[test]
     fn copy_names_are_plain() {
         assert!(valid_name("shop-eu.1"));
+        // <team>.<project>.<partition>, a long team's too (kernable Cloud's copies).
+        assert!(valid_name(&format!("{}.shop.eu.2", "t".repeat(63))));
+        assert!(!valid_name(&"a".repeat(128)));
         assert!(!valid_name("../x"));
         assert!(!valid_name(""));
         assert!(!valid_name("Shop"));

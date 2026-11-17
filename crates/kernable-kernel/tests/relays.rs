@@ -850,7 +850,7 @@ async fn a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names() {
 
     // Names that are no copy's, never echoed.
     // (A name of megabytes never gets this far: HTTP/2 refuses headers that large.)
-    for name in ["../../etc/passwd", "Shop", &"a".repeat(64)] {
+    for name in ["../../etc/passwd", "Shop", &"a".repeat(128)] {
         let hello = PushRequest {
             msg: Some(push_request::Msg::Hello(PushHello {
                 key_id: id(&key(90)),
