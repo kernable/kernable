@@ -89,7 +89,9 @@ The relay reads its certificate when it starts: restart it when the certificate 
 `--root` and `--allow-push` count for every copy: fine for your own relay. A relay that holds
 copies of several customers takes `--access <file>` instead, naming for each copy the pushers that
 may push to it and the roots whose grants let readers follow it; a copy it does not name is
-refused, and the file is read at every check, so a change applies at once:
+refused, and the file is read at every check, so a change applies at once. Streams already open
+are checked again every 5 seconds: a copy taken out of the file, or a key taken off it, ends its
+pusher's and readers' streams within that:
 
 ```toml
 [copies."shop.eu"]

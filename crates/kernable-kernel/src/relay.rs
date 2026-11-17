@@ -1378,6 +1378,32 @@ async fn follow(
     }
 }
 
+/// How often an open stream's access is looked at again: a copy taken out of the access file (its
+/// customer unlinked it) or a key taken off it ends the stream within this.
+const RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Runs `stream` while `may` still lets it: the refusal ends it. Only a refusal does, not an
+/// access file that does not read for a moment.
+async fn while_allowed(
+    stream: impl std::future::Future<Output = Result<(), Status>>,
+    may: impl Fn() -> Result<(), Status>,
+) -> Result<(), Status> {
+    let refused = async {
+        loop {
+            tokio::time::sleep(RECHECK).await;
+            if let Err(s) = may()
+                && s.code() == tonic::Code::PermissionDenied
+            {
+                return s;
+            }
+        }
+    };
+    tokio::select! {
+        r = stream => r,
+        s = refused => Err(s),
+    }
+}
+
 #[tonic::async_trait]
 impl RelayService for Api {
     type PushStream = ReceiverStream<Result<PushResponse, Status>>;
@@ -1393,7 +1419,10 @@ impl RelayService for Api {
         let relay = Arc::clone(&self.0);
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = push(relay, signed, &mut inbound, &tx).await {
+            let (key, copy) = signed.clone();
+            let still = Arc::clone(&relay);
+            let pushing = push(relay, signed, &mut inbound, &tx);
+            if let Err(status) = while_allowed(pushing, || still.pusher_may(&key, &copy)).await {
                 tracing::warn!(error = %status.message(), "a push ended");
                 let _ = tx.send(Err(status)).await;
             }
@@ -1413,7 +1442,10 @@ impl RelayService for Api {
         let relay = Arc::clone(&self.0);
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = calls(relay, signed, &mut inbound, &tx).await {
+            let (key, copy) = signed.clone();
+            let still = Arc::clone(&relay);
+            let taking = calls(relay, signed, &mut inbound, &tx);
+            if let Err(status) = while_allowed(taking, || still.pusher_may(&key, &copy)).await {
                 tracing::warn!(error = %status.message(), "a pusher's calls ended");
                 let _ = tx.send(Err(status)).await;
             }
@@ -1454,10 +1486,16 @@ impl ReplicationService for Api {
         let metadata = request.metadata().clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = follow(relay, signed, &metadata, &mut inbound, &tx).await {
+            let (key, copy) = signed.clone();
+            let still = Arc::clone(&relay);
+            let following = follow(relay, signed, &metadata, &mut inbound, &tx);
+            let may = || still.reader_may(&metadata, &key, &copy);
+            if let Err(status) = while_allowed(following, may).await {
                 // A damaged copy is the operator's to know; a reader leaving is not.
                 if status.code() == tonic::Code::DataLoss {
                     tracing::error!(error = %status.message(), "a reader's stream ended");
+                } else if status.code() == tonic::Code::PermissionDenied {
+                    tracing::warn!(error = %status.message(), "a reader's stream ended");
                 } else {
                     tracing::debug!(error = %status.message(), "a reader's stream ended");
                 }

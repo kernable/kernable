@@ -1201,3 +1201,62 @@ async fn a_relay_writes_who_is_connected_to_each_copy() {
         "{text}"
     );
 }
+
+/// A copy taken out of the access file (its customer unlinked it): the streams already open end
+/// within seconds, the pusher's and the reader's, without a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn streams_end_once_their_copy_leaves_the_access_file() {
+    let log = captured_log();
+    let dir = Dir::new("relays-unlinked");
+    let access = |linked: bool| {
+        let text = if linked {
+            format!(
+                "[copies.\"shop.eu\"]\npushers = [\"{}\"]\nroots = [\"{}\"]\n",
+                id(&key(90)),
+                id(&root())
+            )
+        } else {
+            String::new()
+        };
+        std::fs::write(dir.0.join("access.toml"), text).unwrap()
+    };
+    access(true);
+    let listen = format!("unix:{}", dir.0.join("relay.sock").display());
+    let relay_config = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        roots: Vec::new(),
+        pushers: Vec::new(),
+        access: Some(dir.0.join("access.toml")),
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(relay_config).await.unwrap() });
+    wait_for(&listen).await;
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..5 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &listen, "shop.eu");
+    let reader = start_reader(&reader_config(&dir.0, "reader", 21, &listen, "shop.eu")).await;
+    let at = held(&writer);
+    until_async("the reader holds it", async || held(&reader) >= at).await;
+
+    access(false);
+    let ended = |what: &str| {
+        log.text()
+            .lines()
+            .any(|l| l.contains(what) && l.contains("holds no copy shop.eu"))
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !(ended("a push ended") && ended("a reader's stream ended")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both streams end within 15 s:\n{}",
+            log.text()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
