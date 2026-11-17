@@ -200,7 +200,7 @@ pub(crate) fn process(kernel: &crate::Kernel) -> serde_json::Value {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: RUSAGE_SELF and a rusage the call fills.
     let ok = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0;
-    let ms = |t: libc::timeval| t.tv_sec as i64 * 1000 + t.tv_usec as i64 / 1000;
+    let ms = |t: libc::timeval| t.tv_sec * 1000 + i64::from(t.tv_usec) / 1000;
     let cpu_ms = ok.then(|| ms(usage.ru_utime) + ms(usage.ru_stime));
     // Linux: the resident set now, from /proc/self/statm (pages); elsewhere the peak.
     let rss = std::fs::read_to_string("/proc/self/statm")
