@@ -41,6 +41,19 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           A project is your team's record its kernels link to
                                           (kernable Cloud runs no code of yours); past the checks
                                           before a team's first project
+  kernable cloud projects [--team <team>] links <name>
+                                          Its partitions linked to your kernels, and the relay
+                                          they push to
+  kernable cloud projects [--team <team>] link <name> <partition> --pusher <pusher.pub|ID>
+                       --root <root.pub|ID>
+                                          Lets the kernel with that pusher key push the partition's
+                                          copy to the relay, and readers granted by that root follow
+                                          it (developers and up); prints the relay to push to
+  kernable cloud projects [--team <team>] unlink <name> <partition>
+                                          Nothing pushes to or reads the copy from then on; it is
+                                          kept 30 days, linking again brings it back (admins)
+  kernable cloud projects [--team <team>] node-token <name> <instance>
+                                          A one-time join token (24 h) for a managed node (admins)
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
 const DEFAULT_API: &str = "https://api.kernable.cloud";
@@ -794,6 +807,8 @@ fn tokens(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bo
 fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
     let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
     let month = flag(&mut rest, "--month")?;
+    let pusher = flag(&mut rest, "--pusher")?;
+    let root = flag(&mut rest, "--root")?;
     let t = team(&mut s, team_flag)?;
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -839,9 +854,93 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                 println!("{}", serde_json::to_string_pretty(v).unwrap_or_default())
             });
         }
+        ["links", name] => {
+            let v = s.call("GET", &format!("/v1/teams/{t}/projects/{name}/links"), None)?;
+            s.show(&v, |v| {
+                println!("relay: {}", text(v, "relay"));
+                for l in v["links"].as_array().into_iter().flatten() {
+                    let state = match l["removed_at"].as_i64() {
+                        Some(_) => "unlinked (kept 30 days)",
+                        None => "linked",
+                    };
+                    println!(
+                        "{}\t{state}\tpushers {}\troots {}",
+                        text(l, "copy"),
+                        joined(&l["pushers"]),
+                        joined(&l["roots"])
+                    );
+                }
+            });
+        }
+        ["link", name, partition] => {
+            let pusher = pusher.as_deref().ok_or("--pusher <pusher.pub|ID>")?;
+            let root = root.as_deref().ok_or("--root <root.pub|ID>")?;
+            let body = json!({ "pushers": [key_id_of(pusher)?], "roots": [key_id_of(root)?] });
+            let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}");
+            let v = s.call("PUT", &path, Some(body))?;
+            s.show(&v, |v| {
+                println!(
+                    "{}: linked; push it with: kernable push … --to {} --copy {}",
+                    text(&v["link"], "copy"),
+                    text(v, "relay"),
+                    text(&v["link"], "copy")
+                )
+            });
+        }
+        ["unlink", name, partition] => {
+            let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}");
+            let v = s.call("DELETE", &path, None)?;
+            s.show(&v, |v| {
+                println!(
+                    "{}: unlinked; kept 30 days, link it again to bring it back",
+                    text(v, "copy")
+                )
+            });
+        }
+        ["node-token", name, instance] => {
+            let path = format!("/v1/teams/{t}/projects/{name}/nodes/tokens");
+            let v = s.call("POST", &path, Some(json!({ "instance": instance })))?;
+            s.show(&v, |v| {
+                println!(
+                    "once, within 24 hours, on {instance}'s machine:\n  kernable node join https://control.kernable.cloud {}",
+                    text(v, "token")
+                )
+            });
+        }
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn joined(v: &Value) -> String {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|k| k.chars().take(8).collect::<String>() + "…")
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A key ID given as itself (64 hex digits) or as a `.pub` file holding one. Never another file:
+/// a `.key` holds 64 hex digits too, and it is a secret.
+fn key_id_of(given: &str) -> Result<String, String> {
+    let hex = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if hex(given) {
+        return Ok(given.to_ascii_lowercase());
+    }
+    if !given.ends_with(".pub") {
+        return Err(format!(
+            "{given}: a key ID (64 hex digits) or a .pub file; never a .key, it is secret"
+        ));
+    }
+    let text = std::fs::read_to_string(given).map_err(|e| format!("{given}: {e}"))?;
+    let id = text.trim();
+    if hex(id) {
+        Ok(id.to_ascii_lowercase())
+    } else {
+        Err(format!("{given}: no key ID in it"))
+    }
 }
 
 #[cfg(test)]
@@ -859,6 +958,25 @@ mod tests {
         assert!(check_api("http://api.example.com").is_err());
         assert!(check_api("http://localhost.example.com:80").is_err());
         assert!(check_api("ftp://x").is_err());
+    }
+
+    #[test]
+    fn a_key_id_comes_from_itself_or_a_pub_file_never_a_key() {
+        let dir = std::env::temp_dir().join(format!("kernable-cloud-ids-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "AB".repeat(32);
+        assert_eq!(key_id_of(&id).unwrap(), "ab".repeat(32));
+        let public = dir.join("pusher.pub");
+        let secret = dir.join("pusher.key");
+        std::fs::write(&public, format!("{}\n", "cd".repeat(32))).unwrap();
+        std::fs::write(&secret, "ef".repeat(32)).unwrap();
+        assert_eq!(
+            key_id_of(public.to_str().unwrap()).unwrap(),
+            "cd".repeat(32)
+        );
+        let err = key_id_of(secret.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("never a .key"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
