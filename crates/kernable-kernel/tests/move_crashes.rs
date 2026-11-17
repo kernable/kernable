@@ -110,6 +110,7 @@ async fn copied(dir: &Path, epoch: u64) -> Option<kernable_core::proto::MoveStat
             MoveStatusRequest {
                 tenant: "t1".into(),
                 protocol: kernable_core::PROTOCOL,
+                partition: String::new(),
             },
             &key(1),
         ))

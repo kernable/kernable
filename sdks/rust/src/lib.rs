@@ -397,21 +397,29 @@ impl Client {
             .ok_or_else(|| {
                 tonic::Status::internal(format!("the partition map names no partition {name}"))
             })?;
-        let addresses = partition.addresses.join(",");
+        // `relay:<relay>/<copy>` is how partitions at other sites reach this one: not a client's way.
+        let own: Vec<&String> = partition
+            .addresses
+            .iter()
+            .filter(|a| !a.starts_with("relay:"))
+            .collect();
+        if own.is_empty() {
+            return Err(tonic::Status::unavailable(format!(
+                "partition {name} is reached only through a relay: a client needs one of its own addresses"
+            )));
+        }
+        let addresses = own.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(",");
         let mut cached = self.parts.channels.lock().unwrap();
         let channels = match cached.get(&addresses) {
             Some(channels) => Arc::clone(channels),
             None => {
-                let all = partition
-                    .addresses
+                let all = own
                     .iter()
                     .map(|a| {
-                        transport::connect_lazy_among(
-                            a,
-                            self.parts.tls.as_ref(),
-                            partition.addresses.len() > 1,
-                        )
-                        .map_err(|e| tonic::Status::internal(format!("partition {name}, {a}: {e}")))
+                        transport::connect_lazy_among(a, self.parts.tls.as_ref(), own.len() > 1)
+                            .map_err(|e| {
+                                tonic::Status::internal(format!("partition {name}, {a}: {e}"))
+                            })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let channels = Arc::new(Channels {

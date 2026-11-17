@@ -1161,6 +1161,7 @@ async fn cases_go_on_with_a_tenant_that_moved_to_a_shorter_log() {
                 MoveStatusRequest {
                     tenant: "t1".into(),
                     protocol: kernable_core::PROTOCOL,
+                    partition: String::new(),
                 },
                 &key(1),
             ))

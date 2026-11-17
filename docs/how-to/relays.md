@@ -149,6 +149,14 @@ yours, never with the relay's operator. If it leaks, revoke it with the root key
 granted get no copy key from then on (the ones that have one keep it, so start a new copy with a
 new copy key to shut them out).
 
+## Partitions at several sites
+
+[Partitions](./partitions#partitions-at-several-sites) whose writers sit in networks that do not
+reach each other ask each other through the relay too: global keys, moves, the trust records. The
+map names such a partition as `relay:<relay>/<its copy>`; its pusher, started with `--root`, makes
+those calls on it, and hands its copy key to the other partitions' node keys (granted `read`) as
+to readers.
+
 ## 4. Readers at the relay
 
 ```sh

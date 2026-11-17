@@ -521,7 +521,11 @@ async fn make_call(
     };
     // Only what a reader forwards anyway: commands and the writes it passes on as they come.
     // Anything else would open the writer's other services to whoever holds the copy key.
-    if call.path != "/kernable.v1.CommandService/Submit" && !crate::reader::forwarded(&call.path) {
+    // And what partitions ask each other (P58), which checks the asking node key itself.
+    if call.path != "/kernable.v1.CommandService/Submit"
+        && !crate::reader::forwarded(&call.path)
+        && !crate::partitions::THROUGH_RELAY.contains(&call.path.as_str())
+    {
         return ForwardedReply {
             status: 200,
             headers: vec![

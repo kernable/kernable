@@ -80,6 +80,7 @@ async fn move_status(addr: &str, tenant: &str) -> kernable_core::proto::MoveStat
             kernable_core::proto::MoveStatusRequest {
                 tenant: tenant.into(),
                 protocol: kernable_core::PROTOCOL,
+                partition: String::new(),
             },
             &key(1),
         ))
@@ -926,4 +927,131 @@ async fn a_tenant_moves_while_clients_write_to_it() {
         let violations = log.check();
         assert!(violations.is_empty(), "{}: {violations:?}", env.store);
     }
+}
+
+/// Partitions at sites that reach each other only through a relay (P58): the map names p2 only
+/// as `relay:<relay>/<its copy>`, so what p1 asks p2, whether a global key is still held and a
+/// moving tenant's records, goes through the relay to p2's pusher, sealed with p2's copy key,
+/// which p1 got from that pusher with its node key.
+#[tokio::test(flavor = "multi_thread")]
+async fn partitions_ask_each_other_through_a_relay() {
+    use kernable_kernel::{push, relay, seal::CopyKey};
+    // Node keys that also read: the relay checks them as a reader's.
+    let node_key_reading = |dir: &std::path::Path| {
+        let path = node_key(dir);
+        let g = grant(&key(13), &[("replicate", &["*"]), ("read", &["*"])]);
+        std::fs::write(dir.join("node.grant"), hex(&g.encode_to_vec())).unwrap();
+        path
+    };
+    let p1 = start_custom("rl-p1", |config, dir| {
+        config.replication.readers = true;
+        config.partition = Some(PartitionConfig {
+            name: "p1".into(),
+            control: None,
+            node_key: node_key_reading(dir),
+        });
+    })
+    .await;
+    let p1_addr = p1.addr.clone();
+    let p2 = start_custom("rl-p2", |config, dir| {
+        config.replication.readers = true;
+        config.partition = Some(PartitionConfig {
+            name: "p2".into(),
+            control: Some(p1_addr.clone()),
+            node_key: node_key_reading(dir),
+        });
+    })
+    .await;
+    for env in [&p1, &p2] {
+        env.kernel
+            .grant(grant(&key(13), &[("replicate", &["*"]), ("read", &["*"])]))
+            .unwrap();
+    }
+
+    // The relay, and p2's pusher to its copy there (key 90, trusting the root for copy keys).
+    let dir = std::env::temp_dir().join(format!("kn-rl-relay-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let relay_addr = format!("unix:{}", dir.join("relay.sock").display());
+    let config = relay::RelayConfig {
+        listen: relay_addr.clone(),
+        dir: dir.join("copies"),
+        roots: vec![id(&root())],
+        pushers: vec![id(&key(90))],
+        access: None,
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(config).await.unwrap() });
+    wait_for(&relay_addr).await;
+    let pusher_grant = dir.join("pusher.grant");
+    std::fs::write(
+        &pusher_grant,
+        hex(&grant(&key(90), &[("read", &["*"])]).encode_to_vec()),
+    )
+    .unwrap();
+    let pusher = push::Pusher {
+        follow: vec![p2.addr.clone()],
+        key: key(90),
+        grant_file: pusher_grant,
+        relay: relay_addr.clone(),
+        copy: "p2.copy".into(),
+        copy_key: std::sync::Arc::new(CopyKey::new(&[44; 32])),
+        trust: push::Trust::load(vec![id(&root())], Some(dir.join("copy.revoked"))).unwrap(),
+    };
+    tokio::spawn(async move { push::run(pusher).await.unwrap() });
+
+    // p2 only through the relay; p2 reaches p1 (the control partition) directly.
+    let mut m = map(1, &p1.addr, "unused");
+    m.partitions[1].addresses = vec![format!("relay:{relay_addr}/p2.copy")];
+    apply_map(&p1.addr, m).await.unwrap();
+    until_async("p2 holds the map", async || {
+        map_of(&p2.addr).await.is_some()
+    })
+    .await;
+    for env in [&p1, &p2] {
+        let worker = TestWorker {
+            index: Some(std::sync::Arc::new(by_email)),
+            ..TestWorker::honest()
+        };
+        start_worker(env.addr.clone(), worker).await;
+    }
+    let taken = |r: &kernable_core::proto::CommandResult| matches!(&r.outcome, Some(kernable_core::proto::command_result::Outcome::Rejected(x)) if x.code == "unique_taken");
+
+    // acme (on p2) takes b@x; t1 (on p1, the owner) wants it: p1 asks p2 through the relay.
+    let b2 = submit(
+        &p2.addr,
+        with_email("r1", "PlaceOrder", "o1", "acme", "b@x"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(committed_versions(&b2), [1]);
+    let b1 = submit(&p1.addr, with_email("r2", "PlaceOrder", "o2", "t1", "b@x"))
+        .await
+        .unwrap();
+    assert!(taken(&b1), "held on p2, asked through the relay: {b1:?}");
+
+    // acme moves to p1: p1 copies it from p2 through the relay.
+    let mut moving = map_of(&p1.addr).await.unwrap();
+    moving.epoch = 2;
+    moving.moving.push(TenantMove {
+        tenant: "acme".into(),
+        from: "p2".into(),
+        to: "p1".into(),
+        epoch: 2,
+        ..Default::default()
+    });
+    apply_map(&p1.addr, moving).await.unwrap();
+    until_async("p1 copied acme through the relay", async || {
+        let s = move_status(&p1.addr, "acme").await;
+        s.done && s.epoch == 2
+    })
+    .await;
+    let p1_store = kernable_store::open_read_only(&p1.store).unwrap();
+    let copies: Vec<_> = p1_store
+        .read_all(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.tenant_id == "acme")
+        .collect();
+    assert_eq!(copies.len(), 1, "acme's order, copied");
+    assert!(copies.iter().all(|e| e.origin_partition == "p2"));
 }

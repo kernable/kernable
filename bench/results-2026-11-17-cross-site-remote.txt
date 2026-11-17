@@ -20,3 +20,13 @@ Together with bench/cross-site.sh: across sites joined only by a relay, copies, 
 records, and commands through a reader work; global unique keys and moves do not, because the
 partitions call each other directly at their map addresses. Both wait and retry; neither breaks
 anything. Tenant-scoped unique keys are unaffected.
+
+---- After P58 (partitions ask each other through the relay), the same night ----
+The map names each partition also as relay:<relay>/<its copy>; node keys granted replicate and read.
+
+PASS  T5a a global key for a tenant of p2 (site B) committed (reserved at p1 through the relay)
+PASS  T5b the same key for a tenant of p1 (site A) was refused: unique_taken (p1 asked p2 through the relay)
+PASS  T5c another key for a tenant of p1 committed
+PASS  T6a moved a tenant with data from p2 (site B) to p1 (site A): in 2 s, stopped for 1035 ms
+PASS  T6b moved a tenant with data from p1 (site A) to p2 (site B): in 1 s, stopped for 1480 ms
+      (the move command asks the control partition for the target's status, which asks the target)

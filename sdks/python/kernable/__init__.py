@@ -1751,7 +1751,11 @@ class _Partitioned:
         partition = next((p for p in m.partitions if p.name == name), None)
         if partition is None:
             raise ValueError(f"the partition map names no partition {name}")
-        addresses = ",".join(partition.addresses)
+        # `relay:<relay>/<copy>` is how partitions at other sites reach this one: not a client's way.
+        own = [a for a in partition.addresses if not a.startswith("relay:")]
+        if not own:
+            raise ValueError(f"partition {name} is reached only through a relay: a client needs one of its own addresses")
+        addresses = ",".join(own)
         with self._lock:
             if addresses not in self._parts:
                 self._parts[addresses] = self._channel_for(addresses)

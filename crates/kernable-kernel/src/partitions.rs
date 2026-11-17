@@ -292,6 +292,21 @@ impl PartitionService for Api {
         let kernel = &self.0;
         protocol(request.get_ref().protocol)?;
         kernel.checked_grant(request.metadata())?;
+        // Another partition's: asked there, so an operator who reaches only this one (the
+        // control partition, at another site than the target) still learns how a move goes.
+        let other = &request.get_ref().partition;
+        if !other.is_empty()
+            && kernel
+                .config
+                .partition
+                .as_ref()
+                .is_some_and(|p| &p.name != other)
+        {
+            return kernel
+                .moving_at(other, &request.get_ref().tenant)
+                .await
+                .map(Response::new);
+        }
         let tenant = &request.get_ref().tenant;
         Ok(Response::new(
             match kernel.store.tenant_imported(tenant).map_err(internal)? {
@@ -380,6 +395,168 @@ pub(crate) async fn follow_control(kernel: &Arc<Kernel>) {
     }
 }
 
+/// How a map names a partition reached through a relay: `relay:<relay>/<copy>`, the relay's
+/// address and the copy the partition's pusher keeps there (P58).
+pub(crate) const RELAY: &str = "relay:";
+
+/// What a partition asks another one, as a relay passes it on to the copy's pusher: each checks
+/// the asking partition's node key (granted `replicate`) itself, so the copy key opens nothing more.
+pub(crate) const THROUGH_RELAY: &[&str] = &[
+    "/kernable.v1.GlobalKeyService/Reserve",
+    "/kernable.v1.GlobalKeyService/Holds",
+    "/kernable.v1.MoveService/Export",
+    "/kernable.v1.MoveService/Done",
+    "/kernable.v1.TrustSyncService/Sync",
+    "/kernable.v1.PartitionService/Moving",
+];
+
+impl Kernel {
+    /// Partition `name`'s status of moving `tenant`, asked there with this kernel's node key.
+    async fn moving_at(&self, name: &str, tenant: &str) -> Result<MoveStatus, Status> {
+        let map = self
+            .maps
+            .get()
+            .ok_or_else(|| Status::unavailable("no partition map yet"))?;
+        let addresses = map
+            .partitions
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.addresses.clone())
+            .ok_or_else(|| {
+                Status::invalid_argument(format!("the partition map names no {name}"))
+            })?;
+        let node_key = &self
+            .config
+            .partition
+            .as_ref()
+            .ok_or_else(|| Status::internal("not a partition"))?
+            .node_key;
+        let grant = std::fs::read_to_string(node_key.with_extension("grant"))
+            .map_err(|e| Status::failed_precondition(format!("the node key's grant: {e}")))?;
+        let mut last = Status::unavailable(format!("partition {name} has no address"));
+        for address in &addresses {
+            let mut request = Request::new(MoveStatusRequest {
+                tenant: tenant.to_owned(),
+                protocol: kernable_core::PROTOCOL,
+                partition: String::new(),
+            });
+            request.metadata_mut().insert(
+                GRANT_HEADER,
+                grant
+                    .trim()
+                    .parse()
+                    .map_err(|_| Status::failed_precondition("the node key's grant is not hex"))?,
+            );
+            let route = match connect(self, address).await {
+                Ok(r) => r,
+                Err(e) => {
+                    last = Status::unavailable(format!("partition {name} at {address}: {e}"));
+                    continue;
+                }
+            };
+            match kernable_core::proto::partition_service_client::PartitionServiceClient::new(route)
+                .moving(request)
+                .await
+            {
+                Ok(s) => return Ok(s.into_inner()),
+                Err(s) if s.code() == tonic::Code::Unavailable => last = s,
+                Err(s) => return Err(s),
+            }
+        }
+        Err(last)
+    }
+}
+
+/// Copy keys this kernel got from relays, by copy: asked once per process.
+static COPY_KEYS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, Arc<crate::seal::CopyKey>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Another partition at `address`: directly, or as `relay:<relay>/<copy>` through that relay,
+/// where the partition's pusher makes the call on it. A partition at another site, reachable only
+/// through the relay both push to, is asked so (P58): each call sealed with that copy's key,
+/// signed with this partition's node key, whose grant must allow `read` too (the relay checks it
+/// as a reader's). The copy key comes from the relay's pusher, as a reader gets it.
+pub(crate) async fn connect(
+    kernel: &Kernel,
+    address: &str,
+) -> Result<crate::reader::Route, BoxError> {
+    let Some(rest) = address.strip_prefix(RELAY) else {
+        return Ok(crate::reader::Route::Direct(
+            crate::standby::connect(address).await?,
+        ));
+    };
+    let (relay, copy) = rest
+        .rsplit_once('/')
+        .filter(|(r, c)| !r.is_empty() && !c.is_empty())
+        .ok_or_else(|| format!("{address}: a relay's address is relay:<relay>/<copy>"))?;
+    let partition = kernel.config.partition.as_ref().ok_or("not a partition")?;
+    let key = kernel
+        .config()
+        .read_signing_key(&partition.node_key)
+        .map_err(|e| format!("--node-key {}: {e}", partition.node_key.display()))?;
+    let grant = std::fs::read_to_string(partition.node_key.with_extension("grant"))
+        .map_err(|e| format!("the node key's grant: {e}"))?
+        .trim()
+        .to_owned();
+    let channel = crate::standby::connect(relay).await?;
+    let cached = COPY_KEYS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(copy)
+        .cloned();
+    let copy_key = match cached {
+        Some(k) => k,
+        None => {
+            let k = ask_copy_key(&channel, copy, &key, &grant).await?;
+            COPY_KEYS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(copy.to_owned(), Arc::clone(&k));
+            tracing::info!(%copy, %relay, "got the copy key of a partition reached through a relay");
+            k
+        }
+    };
+    Ok(crate::reader::Route::Relay(Arc::new(
+        crate::reader::RelayRoute::new(channel, copy, copy_key, key, grant),
+    )))
+}
+
+/// The key of `copy`, from its pusher through the relay, sealed for `key` (as a reader asks).
+async fn ask_copy_key(
+    relay: &tonic::transport::Channel,
+    copy: &str,
+    key: &ed25519_dalek::SigningKey,
+    grant: &str,
+) -> Result<Arc<crate::seal::CopyKey>, BoxError> {
+    let mut id = [0u8; 8];
+    getrandom::fill(&mut id).map_err(|_| "no randomness")?;
+    let id = u64::from_le_bytes(id);
+    let key_id = signing::key_id(&key.verifying_key());
+    let issued_at = now_ms();
+    let ask = kernable_core::proto::CopyKeyRequest {
+        copy: copy.to_owned(),
+        sig: Some(signing::sign(
+            key,
+            &signing::copy_key_message(copy, &key_id, id, issued_at),
+        )),
+        key_id,
+        issued_at,
+        grant: Some(Grant::decode(hex::decode(grant)?.as_slice())?),
+        id,
+    };
+    let reply = tokio::time::timeout(
+        Duration::from_secs(30),
+        kernable_core::proto::relay_service_client::RelayServiceClient::new(relay.clone())
+            .copy_key(ask),
+    )
+    .await
+    .map_err(|_| format!("the copy key of {copy}: no answer within 30 s"))?
+    .map_err(|e| format!("the copy key of {copy}: {}", e.message()))?;
+    let raw = crate::seal::open_key(key, copy, &reply.into_inner().sealed)?;
+    Ok(Arc::new(crate::seal::CopyKey::new(&raw)))
+}
+
 async fn sync_once(
     kernel: &Arc<Kernel>,
     node_key: &std::path::Path,
@@ -399,7 +576,7 @@ async fn sync_once(
     request
         .metadata_mut()
         .insert(GRANT_HEADER, grant.trim().parse()?);
-    let records = TrustSyncServiceClient::new(crate::standby::connect(address).await?)
+    let records = TrustSyncServiceClient::new(connect(kernel, address).await?)
         .max_decoding_message_size(crate::replication::MAX_MESSAGE_BYTES)
         .max_encoding_message_size(crate::replication::MAX_MESSAGE_BYTES)
         .sync(request)

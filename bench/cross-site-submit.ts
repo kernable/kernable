@@ -4,7 +4,7 @@
 import { Kernable } from "../sdks/typescript/src/index.ts";
 
 const [url, key, tenant, id, timeout = "15000"] = process.argv.slice(2);
-const k = new Kernable({ url, key, log: "off" });
+const k = new Kernable({ url, key });
 const timer = setTimeout(() => {
   console.log(`failed: no answer within ${timeout} ms`);
   process.exit(1);

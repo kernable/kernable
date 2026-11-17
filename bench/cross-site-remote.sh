@@ -5,7 +5,8 @@
 # Site A is this machine (behind NAT: nothing reaches it), site B a Linux server ($SERVER). The
 # relay runs on the server; this machine reaches it through an SSH tunnel for that one port. Every
 # other address is valid only on its own site: the map names p1 at 127.0.0.1:17301 (on this
-# machine) and p2 at 127.0.0.1:17302 (on the server), so neither partition can reach the other.
+# machine) and p2 at 127.0.0.1:17302 (on the server), so neither partition can reach the other
+# directly; each is also named as relay:<relay>/<its copy>, the way through the relay (P58).
 #   site A: p1 (control partition), a reader of site B's copy, a worker
 #   site B: p2 (its --control: its reader of p1's copy), a reader of site A's copy, a worker
 # Then:
@@ -50,7 +51,8 @@ port_up_b() { ssh_b "for i in \$(seq 300); do (exec 3<>/dev/tcp/127.0.0.1/$1) 2>
 for n in root client worker node ops pusherA pusherB readerA readerB kernel1 kernel2 rkA rkB; do "$K" keys new "$n" >/dev/null; done
 "$K" grant root.key client.pub 'submit=bench.*,acct.*' >/dev/null
 "$K" grant root.key worker.pub 'run=bench.*,acct.*' 'listen=*' >/dev/null
-"$K" grant root.key node.pub 'replicate=*' >/dev/null
+# A partition's node key also reads: it asks other partitions through the relay as a reader (P58).
+"$K" grant root.key node.pub 'replicate=*' 'read=*' >/dev/null
 "$K" grant root.key ops.pub 'manage=*' >/dev/null
 for n in pusherA pusherB readerA readerB; do "$K" grant root.key "$n.pub" 'read=*' >/dev/null; done
 "$K" relay key copyA.key >/dev/null; "$K" relay key copyB.key >/dev/null
@@ -107,7 +109,8 @@ port_up 17311 || { say "site A's reader did not start"; exit 1; }
 
 # The map: t1 (and the default) on p1, t2 and t3 on p2. Applied at p1, at site A.
 cat >map.json <<'EOF'
-{"epoch": 1, "partitions": {"p1": ["127.0.0.1:17301"], "p2": ["127.0.0.1:17302"]},
+{"epoch": 1, "partitions": {"p1": ["127.0.0.1:17301", "relay:127.0.0.1:17400/site.a"],
+                            "p2": ["127.0.0.1:17302", "relay:127.0.0.1:17400/site.b"]},
  "default": "p1", "control": "p1", "tenants": {"t2": "p2", "t3": "p2"}}
 EOF
 "$K" partitions apply 127.0.0.1:17301 ops.key map.json >apply.log 2>&1 || { say "map refused: $(tail -1 apply.log)"; exit 1; }
@@ -137,10 +140,10 @@ case "$t5c" in *ommitted*) result PASS "T5c another key for a tenant of p1 commi
 for i in 1 2 3; do submit_b 127.0.0.1:17302 client.key t3 bench Bench "m$i" Write '{}' >/dev/null; done
 for i in 1 2 3; do submit_a 127.0.0.1:17301 client.key t1 bench Bench "n$i" Write '{}' >/dev/null; done
 t6a=$(timeout 90 "$K" partitions move 127.0.0.1:17301 ops.key t3 p1 2>&1 | tail -1)
-if "$K" partitions show 127.0.0.1:17301 ops.key 2>/dev/null | grep -q "t3 -> p1"; then
-  result PASS "T6a moved a tenant with data from p2 (site B) to p1 (site A)"
+if [[ "$t6a" == *"moved from p2 to p1"* ]]; then
+  result PASS "T6a moved a tenant with data from p2 (site B) to p1 (site A): $t6a"
 else result FAIL "T6a moving a tenant from p2 (site B) to p1 (site A): ${t6a:-no answer within 90 s}"; fi
 t6b=$(timeout 90 "$K" partitions move 127.0.0.1:17301 ops.key t1 p2 2>&1 | tail -1)
-if "$K" partitions show 127.0.0.1:17301 ops.key 2>/dev/null | grep -q "t1 -> p2"; then
-  result PASS "T6b moved a tenant with data from p1 (site A) to p2 (site B)"
+if [[ "$t6b" == *"moved from p1 to p2"* ]]; then
+  result PASS "T6b moved a tenant with data from p1 (site A) to p2 (site B): $t6b"
 else result FAIL "T6b moving a tenant from p1 (site A) to p2 (site B): ${t6b:-no answer within 90 s}"; fi

@@ -482,6 +482,7 @@ async fn move_status(addr: &str, tenant: &str) -> kernable_core::proto::MoveStat
         kernable_core::proto::MoveStatusRequest {
             tenant: tenant.into(),
             protocol: kernable_core::PROTOCOL,
+            partition: String::new(),
         },
         &key(1),
     ))

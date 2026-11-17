@@ -2463,9 +2463,11 @@ async fn held_map(addr: &str, key_path: &str) -> Result<Option<PartitionMap>> {
     }
 }
 
-/// Waits until partition `to` (at `addresses`) has copied `tenant` for the move or copy of
-/// `epoch`.
+/// Waits until partition `to` has copied `tenant` for the move or copy of `epoch`: asked through
+/// the control partition at `control` (which asks `to`, through a relay if it is at another site,
+/// P58), else at `to`'s own `addresses`.
 async fn wait_copied(
+    control: &str,
     addresses: &[String],
     key_path: &str,
     tenant: &str,
@@ -2475,10 +2477,12 @@ async fn wait_copied(
     let started = std::time::Instant::now();
     let mut said = std::time::Instant::now();
     loop {
-        for address in addresses {
+        let asks = std::iter::once((control, to)).chain(addresses.iter().map(|a| (a.as_str(), "")));
+        for (address, partition) in asks {
             let mut request = tonic::Request::new(MoveStatusRequest {
                 tenant: tenant.to_owned(),
                 protocol: kernable_core::PROTOCOL,
+                partition: partition.to_owned(),
             });
             with_key_grant(&mut request, key_path)?;
             let Ok(channel) = connect(address).await else {
@@ -2573,7 +2577,7 @@ async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> 
                     c
                 }
             };
-            let copied = wait_copied(&addresses, key_path, tenant, to, c.epoch).await?;
+            let copied = wait_copied(addr, &addresses, key_path, tenant, to, c.epoch).await?;
             println!(
                 "copied while it ran in {}s (source head {})",
                 started.elapsed().as_secs(),
@@ -2600,7 +2604,7 @@ async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> 
         }
     };
     // 3. Wait until the target has copied the rest.
-    let status = wait_copied(&addresses, key_path, tenant, to, m.epoch).await?;
+    let status = wait_copied(addr, &addresses, key_path, tenant, to, m.epoch).await?;
     // 4. The map with the tenant on the target, from the map held now.
     let mut map = held_map(addr, key_path)
         .await?

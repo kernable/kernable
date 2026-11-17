@@ -516,6 +516,7 @@ What a target partition knows of a tenant moving to it.
 |---|---|---|---|
 | `tenant` |  `string` | 1 |  |
 | `protocol` |  `uint32` | 2 |  |
+| `partition` |  `string` | 3 | Another partition's status, asked through this one (the control partition asks it with its node key, directly or through a relay); empty: this partition's own. |
 
 ## Clients
 

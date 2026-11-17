@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn a_key_id_comes_from_itself_or_a_pub_file_never_a_key() {
-        let dir = std::env::temp_dir().join(format!("kernable-cloud-ids-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kn-cli-ids-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let id = "AB".repeat(32);
         assert_eq!(key_id_of(&id).unwrap(), "ab".repeat(32));

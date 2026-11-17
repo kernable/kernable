@@ -198,7 +198,7 @@ impl Kernel {
                     .parse()
                     .map_err(|_| Status::failed_precondition("the node key's grant is not hex"))?,
             );
-            let channel = match crate::standby::connect(address).await {
+            let channel = match crate::partitions::connect(self, address).await {
                 Ok(channel) => channel,
                 Err(e) => {
                     last = Status::unavailable(format!("partition {name} at {address}: {e}"));

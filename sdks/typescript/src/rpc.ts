@@ -527,7 +527,10 @@ export class Partitioned {
   private clientsOf(map: WirePartitionMap, name: string): Clients {
     const partition = map.partitions.find((p) => p.name === name);
     if (!partition) throw new Error(`the partition map names no partition ${name}`);
-    const url = partition.addresses.join(",");
+    // `relay:<relay>/<copy>` is how partitions at other sites reach this one: not a client's way.
+    const own = partition.addresses.filter((a) => !a.startsWith("relay:"));
+    if (!own.length) throw new Error(`partition ${name} is reached only through a relay: a client needs one of its own addresses`);
+    const url = own.join(",");
     let clients = this.parts.get(url);
     if (!clients) {
       clients = this.make(url);

@@ -101,6 +101,55 @@ If the command stops (or a partition does), run it again: it continues the move,
 
 The tenant is unavailable only for the second part. Measured on one Apple M2 Max with both partitions on it (`bench/move.sh`, a command per event, 1 KB each; results in `bench/results-2026-11-04-m2max-move.txt`): with SQLite about a second, whatever the tenant's size (1 s for 268,000 events); with the file log, which reads its whole log for the rest, it grows with the log (2 s for 422,000 events, 1 GB). The move as a whole takes about 60 seconds per million events with SQLite and 30 with the file log, nearly all of it in the first part. Files go along in both parts, so a tenant with many large files stops longer.
 
+## Partitions at several sites
+
+Partitions usually reach each other directly: a partition reserves a global key at the control
+partition, the control partition asks a partition whether it still holds one, and a move's target
+copies the tenant from its source. Partitions at sites that do not reach each other, each writer
+in its own network, can do all of this through a [relay](./relays) instead, the one both push
+their copies to. Name the partition in the map by the relay's address and its copy, as
+`relay:<relay>/<copy>`, beside or instead of its own addresses:
+
+```json
+{
+  "epoch": 1,
+  "partitions": {
+    "p1": ["10.0.1.1:7233", "relay:https://relay.example.net:7400/shop.p1"],
+    "p2": ["10.0.2.1:7233", "relay:https://relay.example.net:7400/shop.p2"]
+  },
+  "default": "p1",
+  "control": "p1",
+  "tenants": { "acme": "p2" }
+}
+```
+
+A partition tries the addresses in turn: its own first (at its own site they answer), then the
+relay. Through the relay, each call is sealed with the other partition's copy key and signed with
+the asking partition's node key; the copy's pusher makes it on its writer. So:
+
+- every partition runs with `--readers on` and a [pusher](./relays#_3-the-pusher-beside-the-writer)
+  to its copy, started with `--root`: it hands the copy key to other partitions as to readers;
+- every node key is granted `read` besides `replicate`
+  (`kernable grant root.key node-p2.pub 'replicate=*' 'read=*'`): the relay checks it as a
+  reader's;
+- the pusher passes on only what partitions ask each other (global keys, moves and their status,
+  the trust records), and each of those checks the asking node key itself: the copy key opens
+  nothing more.
+
+A partition may take the map and the trust records from its own site's reader of the control
+partition's copy (`--control` at that reader), or through the relay like the rest.
+`kernable partitions move` asks the control partition how a move goes, which asks the target, so
+the command needs to reach only the control partition.
+
+What stays as it is: a client (the SDKs) uses a partition's own addresses and leaves `relay:`
+ones out, so a process at one site reaches another site's partition only through a reader there.
+Through a relay, a move's copy comes in one answer of at most 64 MiB: move larger tenants where
+the partitions reach each other, or move them in parts with export and import.
+
+Verified on two sites joined only by a relay (`bench/cross-site-remote.sh`, results in
+`bench/results-2026-11-17-cross-site-remote.txt`): a global key reserved and refused across the
+sites, and tenants moved both ways (stopped for 1 to 1.5 seconds).
+
 ## What it gains
 
 Every partition commits on its own, so throughput grows with partitions on machines of their own. Measured on one Apple M2 Max (12 CPUs, one SSD), where every partition also brings its worker and a load generator of 64 clients, so all of them share the same CPUs and disk (`bench/partitions.sh`, results in `bench/results-2026-11-03-m2max-partitions.txt`):

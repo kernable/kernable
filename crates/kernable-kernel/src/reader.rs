@@ -896,6 +896,26 @@ pub(crate) struct RelayRoute {
     grant: String,
 }
 
+impl RelayRoute {
+    /// Calls made through the relay at `channel` on the writer of `copy`: sealed with its key,
+    /// signed by `signer`, whose `grant` (hex) the relay checks as a reader's.
+    pub(crate) fn new(
+        channel: Channel,
+        copy: &str,
+        key: Arc<crate::seal::CopyKey>,
+        signer: SigningKey,
+        grant: String,
+    ) -> Self {
+        RelayRoute {
+            channel,
+            copy: copy.to_owned(),
+            key,
+            signer,
+            grant,
+        }
+    }
+}
+
 /// The largest call a reader sends through a relay, and the largest answer.
 const MAX_CALL_BYTES: usize = 64 << 20;
 
