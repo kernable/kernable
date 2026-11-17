@@ -1319,3 +1319,29 @@ fn worker_sig() -> kernable_core::proto::Signature {
         sig: vec![0; 64],
     }
 }
+
+/// The local socket's role carries the kernel's own figures (CPU time, memory, store): what a
+/// managed node reports to its control point.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_local_role_tells_the_kernels_own_figures() {
+    let dir = Dir::new("repl-role-figures");
+    let mut c = config(&dir.0, "k", 3);
+    let socket = dir.0.join("k-admin.sock");
+    c.admin_socket = Some(socket.display().to_string());
+    let _k = open(&c).await;
+    until("the local socket is up", || {
+        std::os::unix::net::UnixStream::connect(&socket).is_ok()
+    })
+    .await;
+    let answer = local(&socket, "GET", "/api/role").await;
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    let body: serde_json::Value =
+        serde_json::from_str(answer.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let p = &body["process"];
+    assert!(p["cpu_ms"].as_i64().is_some_and(|ms| ms >= 0), "{body}");
+    assert!(
+        p["rss_bytes"].as_u64().is_some_and(|b| b > 1 << 20),
+        "{body}"
+    );
+    assert!(p["store_bytes"].as_u64().is_some_and(|b| b > 0), "{body}");
+}

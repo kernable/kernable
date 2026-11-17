@@ -132,11 +132,12 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     match (method, path) {
         ("GET", "/metrics" | "/health" | "/ready") => crate::metrics::respond(kernel, request),
-        ("GET", "/api/role") => reply(
-            "200 OK",
-            "application/json",
-            crate::reader::role(kernel).to_string().as_bytes(),
-        ),
+        ("GET", "/api/role") => {
+            // With the kernel's own figures: a managed node reports them to its control point.
+            let mut role = crate::reader::role(kernel);
+            role["process"] = process(kernel);
+            reply("200 OK", "application/json", role.to_string().as_bytes())
+        }
         ("GET", "/api/deployments" | "/api/deployments/warm-up" | "/api/deployments/since") => {
             crate::ui::respond(kernel, request)
         }
@@ -190,4 +191,42 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         (_, "/api/switchover") => reply("405 Method Not Allowed", "text/plain", b"POST only\n"),
         _ => reply("404 Not Found", "text/plain", b"not found\n"),
     }
+}
+
+/// The kernel process's own figures: CPU time used (ms), memory it holds now (bytes; the most it
+/// held where the system tells no current figure), what its stores take on disk. Nothing of the
+/// machine around it.
+pub(crate) fn process(kernel: &crate::Kernel) -> serde_json::Value {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: RUSAGE_SELF and a rusage the call fills.
+    let ok = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0;
+    let ms = |t: libc::timeval| t.tv_sec as i64 * 1000 + t.tv_usec as i64 / 1000;
+    let cpu_ms = ok.then(|| ms(usage.ru_utime) + ms(usage.ru_stime));
+    // Linux: the resident set now, from /proc/self/statm (pages); elsewhere the peak.
+    let rss = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|t| t.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| pages * page_size())
+        .or_else(|| {
+            ok.then(|| {
+                let max = usage.ru_maxrss as u64;
+                // macOS counts bytes, the others kilobytes.
+                if cfg!(target_os = "macos") {
+                    max
+                } else {
+                    max * 1024
+                }
+            })
+        });
+    serde_json::json!({
+        "cpu_ms": cpu_ms,
+        "rss_bytes": rss,
+        "store_bytes": crate::usage::now(kernel).store_bytes,
+    })
+}
+
+fn page_size() -> u64 {
+    // SAFETY: sysconf with a valid name.
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if size > 0 { size as u64 } else { 4096 }
 }

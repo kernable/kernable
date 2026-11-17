@@ -80,6 +80,11 @@ POST /v1/nodes/<node>/report
  "role": <the kernel's GET /api/role>, "problems": ["…"], "at": <ms>}
 ```
 
+The kernel's role (its local socket's `GET /api/role`) carries its own figures in `process`:
+`cpu_ms` (CPU time used since it started), `rss_bytes` (memory it holds now) and `store_bytes`
+(what its stores take on disk). Nothing of the machine around it: not its other processes, not
+its disks beyond the kernel's stores.
+
 ## Leaving
 
 Remove `managed.toml` and `managed-settings.json`: the node runs on its own file again.
