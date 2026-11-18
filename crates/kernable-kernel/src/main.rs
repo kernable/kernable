@@ -545,11 +545,12 @@ Scripting:
                                           values.
 
 kernable Cloud:
-  kernable cloud login | logout | whoami | teams | members | tokens | projects
+  kernable cloud login | logout | whoami | teams | members | tokens | projects | audit
                                           Signs in to a kernable Cloud installation by device
                                           code and manages its teams, members, CI tokens and
-                                          projects through its account API (--api <url>);
-                                          kernable cloud help lists them all.
+                                          projects and reads a team's audit log through its
+                                          account API (--api <url>); kernable cloud help lists
+                                          them all.
 
 Arguments and exit codes:
   <addr> is host:port, http://host:port, or unix:<path> on Unix. To reach a kernel over mutual TLS,

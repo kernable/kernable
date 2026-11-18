@@ -37,6 +37,9 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                        [--expires <days>] | revoke <id>]
                                           Tokens for CI (KERNABLE_CLOUD_TOKEN), never an owner's;
                                           shown once
+  kernable cloud audit [--team <team>] [--before <position>] [--limit <n>]
+                                          The team's audit log, newest first: who changed what
+                                          (admins and owners)
   kernable cloud projects [--team <team>] [create <name> | show <name> | usage <name> [--month <yyyy-mm>]]
                                           A project is your team's record its kernels link to
                                           (kernable Cloud runs no code of yours); past the checks
@@ -604,6 +607,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         ["members", rest @ ..] => members(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["tokens", rest @ ..] => tokens(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["projects", rest @ ..] => projects(Session::open(api.as_deref(), json)?, team_flag, rest),
+        ["audit", rest @ ..] => audit(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["help" | "--help"] | [] => {
             println!("{USAGE}");
             Ok(true)
@@ -748,6 +752,56 @@ fn members(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<b
         }
         _ => return Ok(false),
     }
+    Ok(true)
+}
+
+/// The team's audit log: one line per entry, newest first; how to page further on stderr.
+fn audit(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
+    let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
+    let before = flag(&mut rest, "--before")?;
+    let limit = flag(&mut rest, "--limit")?.unwrap_or_else(|| "50".into());
+    if !rest.is_empty() {
+        return Ok(false);
+    }
+    for (name, value) in [
+        ("--before", before.as_deref()),
+        ("--limit", Some(limit.as_str())),
+    ] {
+        if value.is_some_and(|v| v.parse::<u64>().is_err()) {
+            return Err(format!("{name}: a number"));
+        }
+    }
+    let t = team(&mut s, team_flag)?;
+    let mut path = format!("/v1/teams/{t}/audit?limit={limit}");
+    if let Some(b) = &before {
+        path.push_str(&format!("&before={b}"));
+    }
+    let list = s.call("GET", &path, None)?;
+    s.show(&list, |l| {
+        let entries = l.as_array().map(Vec::as_slice).unwrap_or_default();
+        for e in entries {
+            let named = |name: &str, raw: &str| {
+                e[name].as_str().map_or_else(|| text(e, raw), str::to_owned)
+            };
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                crate::config::utc(e["at"].as_i64().unwrap_or_default()),
+                named("actor_name", "actor"),
+                text(e, "action"),
+                named("subject_name", "subject"),
+                text(e, "detail"),
+            );
+        }
+        if let Some(last) = entries
+            .last()
+            .filter(|_| entries.len().to_string() == limit)
+        {
+            eprintln!(
+                "older: kernable cloud audit --team {t} --before {}",
+                last["position"]
+            );
+        }
+    });
     Ok(true)
 }
 
