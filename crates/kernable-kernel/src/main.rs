@@ -545,7 +545,7 @@ Scripting:
                                           values.
 
 kernable Cloud:
-  kernable cloud login | logout | whoami | teams | members | tokens | projects | audit
+  kernable cloud login | logout | whoami | teams | members | tokens | projects | audit | usage
                                           Signs in to a kernable Cloud installation by device
                                           code and manages its teams, members, CI tokens and
                                           projects and reads a team's audit log through its

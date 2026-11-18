@@ -42,6 +42,9 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
   kernable cloud audit [--team <team>] [--before <position>] [--limit <n>]
                                           The team's audit log, newest first: who changed what
                                           (admins and owners)
+  kernable cloud usage [--team <team>] [--month <yyyy-mm>]
+                                          The team's copies this month: GB-months stored, GB sent
+                                          to readers, against what the monthly fee includes
   kernable cloud projects [--team <team>] [create <name> | show <name> | usage <name> [--month <yyyy-mm>]]
                                           A project is your team's record its kernels link to
                                           (kernable Cloud runs no code of yours); past the checks
@@ -625,6 +628,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         ["tokens", rest @ ..] => tokens(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["projects", rest @ ..] => projects(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["audit", rest @ ..] => audit(Session::open(api.as_deref(), json)?, team_flag, rest),
+        ["usage", rest @ ..] => usage(Session::open(api.as_deref(), json)?, team_flag, rest),
         ["help" | "--help"] | [] => {
             println!("{USAGE}");
             Ok(true)
@@ -773,6 +777,54 @@ fn members(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<b
 }
 
 /// The team's audit log: one line per entry, newest first; how to page further on stderr.
+/// `kernable cloud usage`: the team's copies this month (or `--month`), against what the
+/// monthly fee includes.
+fn usage(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
+    let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
+    let month = flag(&mut rest, "--month")?;
+    if !rest.is_empty() {
+        return Ok(false);
+    }
+    let t = team(&mut s, team_flag)?;
+    let path = match &month {
+        Some(m) => format!("/v1/teams/{t}/usage?month={m}"),
+        None => format!("/v1/teams/{t}/usage"),
+    };
+    let v = s.call("GET", &path, None)?;
+    s.show(&v, print_usage);
+    Ok(true)
+}
+
+/// A month's usage as the customer service answers it: a line per copy, then the total and
+/// what the fee includes.
+fn print_usage(v: &Value) {
+    let n = |v: &Value| v.as_f64().unwrap_or_default();
+    let copies = v["copies"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for c in copies {
+        println!(
+            "{}	holds {:.3} GB	stored {:.3} GB-months	sent {:.3} GB",
+            text(c, "copy"),
+            n(&c["stored_gb"]),
+            n(&c["stored_gb_months"]),
+            n(&c["sent_gb"]),
+        );
+    }
+    if copies.is_empty() {
+        println!("nothing counted in {}", text(v, "month"));
+    }
+    println!(
+        "{} total	stored {:.3} GB-months (included {})	sent {:.3} GB (included {})",
+        text(v, "month"),
+        n(&v["total"]["stored_gb_months"]),
+        n(&v["included"]["stored_gb_months"]),
+        n(&v["total"]["sent_gb"]),
+        n(&v["included"]["sent_gb"]),
+    );
+}
+
 fn audit(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
     let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
     let before = flag(&mut rest, "--before")?;
@@ -921,9 +973,7 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                 None => format!("/v1/teams/{t}/projects/{name}/usage"),
             };
             let v = s.call("GET", &path, None)?;
-            s.show(&v, |v| {
-                println!("{}", serde_json::to_string_pretty(v).unwrap_or_default())
-            });
+            s.show(&v, print_usage);
         }
         ["links", name] => {
             let v = s.call("GET", &format!("/v1/teams/{t}/projects/{name}/links"), None)?;
