@@ -25,10 +25,12 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
   kernable cloud logout                   Ends the session and forgets it
   kernable cloud whoami                   The account, its teams and roles; a CI token's team
   kernable cloud teams [create <slug> [<name>] | accept-terms <team> | verify-payment <team>
-                       | delete <team> | restore <team> | two-factor <team> on|off]
+                       | billing <team> | delete <team> | restore <team> | two-factor <team> on|off]
                                           Lists your teams, or opens one; accepts the terms and
-                                          the Preview Access notice, marks a payment method
-                                          verified, deletes a team (kept 30 days, restorable),
+                                          the Preview Access notice, sets up the team's billing
+                                          (a payment page to open, where the installation bills),
+                                          opens its billing portal (invoices, payment method,
+                                          cancelling), deletes a team (kept 30 days, restorable),
                                           requires a second factor of every member (owners')
   kernable cloud members [--team <team>] [invite <email> --role <role> | role <identity> <role>
                        | remove <identity>]
@@ -585,12 +587,27 @@ pub fn run(args: &[String]) -> Result<bool, String> {
             let v = s.call(method, &path, None)?;
             s.show(&v, |v| match *verb {
                 "accept-terms" => println!("{team}: the terms and the Preview Access notice are accepted"),
-                "verify-payment" => println!("{team}: a payment method is marked verified"),
+                "verify-payment" => match v["url"].as_str() {
+                    Some(url) => {
+                        eprintln!("{team}: set up billing on this page; `kernable cloud whoami` shows when it is done");
+                        println!("{url}");
+                    }
+                    None => println!("{team}: a payment method is marked verified"),
+                },
                 "delete" => println!(
                     "{team}: suspended, its projects stopped; deleted after the notice (restore until then: kernable cloud teams restore {team}){}",
                     v["deleted_at"].as_i64().map(|_| "").unwrap_or_default()
                 ),
                 _ => println!("{team}: restored, its projects running again"),
+            });
+            Ok(true)
+        }
+        ["teams", "billing", team] => {
+            let mut s = Session::open(api.as_deref(), json)?;
+            let v = s.call("POST", &format!("/v1/teams/{team}/billing/portal"), None)?;
+            s.show(&v, |v| {
+                eprintln!("{team}: invoices, the payment method and cancelling, on this page:");
+                println!("{}", text(v, "url"));
             });
             Ok(true)
         }
