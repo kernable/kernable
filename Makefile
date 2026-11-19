@@ -1,4 +1,4 @@
-.PHONY: test check check-rust check-crash check-sdks check-docs prune py check-packages torture fuzz docs soak
+.PHONY: test check check-rust check-crash check-sdks check-docs prune py check-packages check-linux flaky torture fuzz docs soak
 # The simple tier: syntax, types and in-process tests, with no kernel or worker process and no
 # real waiting. Runs in about a minute; `make check` runs everything.
 test: py
@@ -63,6 +63,20 @@ py:
 # Builds the npm and Python packages and runs them, installed, against a kernel (needs network).
 check-packages:
 	./scripts/check-packages.sh
+
+# The same checks on a Linux server, slower than this machine (scripts/check-linux.sh; SERVER=...):
+# before pushing to main, merging a pull request or releasing. GitHub's CI only adds to it.
+check-linux:
+	./scripts/check-linux.sh check
+
+# The tests that depend on timing, FLAKY times each, with every CPU kept busy meanwhile as on a
+# loaded CI machine: a test that fails only sometimes fails here first. On Linux too:
+# scripts/check-linux.sh flaky.
+FLAKY ?= 5
+flaky: py
+	cargo build -q --workspace
+	cd kits/typescript && npm install --no-audit --no-fund --silent
+	./scripts/flaky.sh $(FLAKY)
 
 # Long robustness runs: every crash point ROUNDS times, KILLS random kills under
 # load, SEEDS storage-fault seeds, MODEL_SEEDS model-based runs of 300 steps, CASES property
