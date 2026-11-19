@@ -379,6 +379,10 @@ class KitApi:
             res = requests.get(f"{issuer.rstrip('/')}/.well-known/openid-configuration", timeout=10)
             res.raise_for_status()
             config = res.json()
+            # The endpoints it names carry the client secret, codes and tokens: https too.
+            for key in ("jwks_uri", "token_endpoint", "authorization_endpoint"):
+                if key in config and not self._secure(str(config[key])):
+                    raise ValueError(f"{key} {config[key]} is not https")
             config["jwks"] = requests.get(config["jwks_uri"], timeout=10).json()
             self._configs[issuer] = config
         return self._configs[issuer]

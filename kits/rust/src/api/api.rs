@@ -956,6 +956,14 @@ impl KitApi {
             .json()
             .await
             .map_err(|e| e.to_string())?;
+        // The endpoints it names carry the client secret, codes and tokens: https too.
+        for key in ["jwks_uri", "token_endpoint", "authorization_endpoint"] {
+            if let Some(url) = config[key].as_str()
+                && !self.secure(url)
+            {
+                return Err(format!("{key} {url} is not https"));
+            }
+        }
         let jwks_uri = config["jwks_uri"].as_str().ok_or("no jwks_uri")?.to_owned();
         config["jwks"] = self
             .http

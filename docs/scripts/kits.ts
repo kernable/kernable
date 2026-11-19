@@ -16,7 +16,7 @@ const ORDERS: Record<string, string> = Object.fromEntries(
   [...(readFileSync(join(KIT, "shared/constants.ts"), "utf8").match(/export const ORDERS = \{([^}]*)\}/)?.[1] ?? "").matchAll(/(\w+): (-?\d+)/g)].map((m) => [m[1], m[2]]),
 );
 
-const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
+const cell = (s: string) => s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 const code = (s: string) => `\`${cell(s)}\``;
 
 function parse(path: string): ts.SourceFile | null {

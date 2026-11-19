@@ -2075,6 +2075,24 @@ async fn a_process_acts_as_its_own_identity(w: &World) {
     };
     let t = new_id();
     let order = new_id();
+    // The kit makes the process's identity and key when the process is registered, a moment
+    // later: a case started before that would be refused as unauthenticated, not forbidden.
+    for _ in 0..500 {
+        let row = w
+            .kit
+            .query::<Value>(
+                Query::of(GetIdentity {
+                    identity_id: "process-shop.flagged".into(),
+                })
+                .tenant(PLATFORM)
+                .context(kit.clone()),
+            )
+            .await;
+        if row.is_ok_and(|r| r["apiKeys"].as_array().map(Vec::len) == Some(1)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     // Settled: the reactors handled everything before it, the process's registration too.
     committed(&w.send(PlaceOrder {}, &order, &t, kit.clone()).await);
     committed(&w.send(FlagOrder {}, &order, &t, kit.clone()).await);
