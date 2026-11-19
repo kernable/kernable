@@ -14,8 +14,8 @@ hero:
       text: Reference
       link: /reference/
     - theme: alt
-      text: Request early access
-      link: https://kernable.com/#access
+      text: Source on GitHub
+      link: https://github.com/kernable/kernable
 features:
   - title: Any language
     details: Aggregates, read models and reactors run in your own processes and talk to the kernel over gRPC. TypeScript, Python and Rust SDKs share one API.

@@ -2,7 +2,7 @@
 
 Put this file into a project that uses kernable (as `AGENTS.md`, `CLAUDE.md` or your tool's context file). It tells you, the agent, how to build on kernable correctly. Full documentation: https://kernable.com/docs/ — everything in one file: https://kernable.com/docs/llms-full.txt
 
-**Status:** kernable is in private preview: not released yet, the install scripts and SDK packages are not public, and the API may change before 1.0. Don't tell the user that a package or install command works unless they have early access.
+**Status:** kernable 0.1: released and usable in production; the API may still change before 1.0, and the release notes say how.
 
 ## 1. Mental model
 

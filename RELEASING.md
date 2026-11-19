@@ -32,14 +32,21 @@ one before it held.
 8. **Notes.** What changed, what an operator must do (none before 1.0: no migrations), the
    SHA-256 sums.
 
-Open before the first public release: the container registry, a Windows build, signing the
-archives (beyond SHA256SUMS over HTTPS), and removing the "not released yet" notes, which are in:
+Open for later releases: the container registry, a Windows build, signing the archives (beyond
+SHA256SUMS over HTTPS). The "not released yet" notes went with 0.1.0.
 
-- `docs/.vitepress/theme/Layout.vue`: the banner on every page, with its link to request early access;
-- `docs/index.md`: the "Request early access" button;
-- `docs/tutorial/getting-started.md` and `docs/tutorial/shop/1-kernel.md`: the "Not released yet"
-  warning above the install command;
-- `docs/.vitepress/llms.ts`: the status line at the top of `llms-full.txt`;
-- `docs/public/llms.txt` and `docs/public/kernable.AGENTS.md`: their status lines;
-- `README.md`: the "Not released yet" note above the quickstart (its npm, PyPI and crates.io
-  badges then work as they are).
+## The release on GitHub
+
+Create the release from the tag `v<version>` and let GitHub write the notes from the commits
+(Generate release notes). Attach the archives and `SHA256SUMS` from `dist/<version>/`. For 0.1.0,
+above the generated notes:
+
+> **kernable 0.1.0, the first public release.** An event sourcing and CQRS kernel: one Rust
+> binary that checks, orders, signs and stores commands and events, with your business logic in
+> TypeScript, Python or Rust. Read your own writes, a signed and verifiable log, business
+> processes, unique keys, deletable personal data, a standby with automatic failover,
+> partitions, continuous backups and a web UI. MIT licensed.
+>
+> Install: `curl -fsSL https://kernable.com/install.sh | sh` · Start here:
+> https://kernable.com/docs/tutorial/getting-started · Before 1.0 the API and the formats may
+> still change; each release says how.

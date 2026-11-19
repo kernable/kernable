@@ -30,8 +30,6 @@ The kernel stores commands and events, signs and checks every message, runs comm
 
 ## Quickstart
 
-> **Not released yet.** kernable is in private preview: the install script and the SDK packages (`@kernable/sdk` on npm, `kernable-sdk` on PyPI and crates.io) are not public yet, so the install commands below and the package badges above do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
-
 ```sh
 curl -fsSL https://kernable.com/install.sh | sh     # macOS and Linux, x86_64 and arm64
 mkdir demo && cd demo
