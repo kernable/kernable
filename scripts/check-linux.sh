@@ -52,5 +52,14 @@ rsync -az --delete \
   --exclude '/*.key' --exclude '/*.pub' --exclude '/*.grant' --exclude '/*.db*' \
   "$SOURCE/" "$SERVER:$DIR/"
 
-echo "== make $TARGET on $SERVER ($(date -u +%H:%M:%S) UTC)"
-ssh -o BatchMode=yes "$SERVER" "cd $DIR && . \$HOME/.cargo/env && export PATH=/opt/node-$NODE/bin:\$PATH && make $TARGET"
+# The server may serve other things: never fill its disk. Builds without debug info and without
+# the incremental cache take about a third of the space; the tests run the same.
+free=$(ssh -o BatchMode=yes "$SERVER" "df --output=avail -BG / | tail -1 | tr -dc 0-9")
+if [ "$free" -lt 12 ]; then
+  echo "only ${free} GB free on $SERVER: needs 12 (rm -rf $DIR/target to start afresh)" >&2
+  exit 2
+fi
+
+echo "== make $TARGET on $SERVER ($(date -u +%H:%M:%S) UTC, ${free} GB free)"
+ssh -o BatchMode=yes "$SERVER" "cd $DIR && . \$HOME/.cargo/env && export PATH=/opt/node-$NODE/bin:\$PATH \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 && make $TARGET"
