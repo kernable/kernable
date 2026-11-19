@@ -136,13 +136,24 @@ async fn a_membership_decides_which_aggregates_the_kernel_waits_for() {
     );
     refunds.abort();
     readiness(&env, Ok(())).await;
-    let refund = Command {
-        command_id: "c3".into(),
-        ..refund
-    };
-    let refused = submit(&env.addr, signed(refund, &key(1)))
-        .await
-        .unwrap_err();
+    // The kernel learns that the worker left a moment after it did: until then a command still
+    // waits for it (and times out). Each try with a command of its own.
+    let mut refused = None;
+    for attempt in 0..20 {
+        let refund = Command {
+            command_id: format!("c3-{attempt}"),
+            ..refund.clone()
+        };
+        let status = submit(&env.addr, signed(refund, &key(1)))
+            .await
+            .unwrap_err();
+        if status.code() == Code::NotFound {
+            refused = Some(status);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let refused = refused.expect("the kernel forgets the aggregate once its last worker left");
     assert_eq!(refused.code(), Code::NotFound, "{refused:?}");
 
     // The next version has no invoices any more: they are unregistered once no worker runs them.
