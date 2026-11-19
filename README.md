@@ -9,7 +9,7 @@
   <a href="https://github.com/kernable/kernable/actions/workflows/ci.yml"><img src="https://github.com/kernable/kernable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <a href="https://www.npmjs.com/package/@kernable/sdk"><img src="https://img.shields.io/npm/v/@kernable/sdk?label=npm" alt="npm"></a>
-  <a href="https://pypi.org/project/kernable-sdk/"><img src="https://img.shields.io/pypi/v/kernable-sdk?label=PyPI" alt="PyPI"></a>
+  <a href="https://pypi.org/project/kernable-sdk/"><img src="https://img.shields.io/pypi/v/kernable-sdk.svg?label=PyPI" alt="PyPI"></a>
   <a href="https://crates.io/crates/kernable-sdk"><img src="https://img.shields.io/crates/v/kernable-sdk?label=crates.io" alt="crates.io"></a>
   <a href="https://kernable.com/docs/"><img src="https://img.shields.io/badge/docs-kernable.com-0b5fff.svg" alt="Documentation"></a>
 </p>

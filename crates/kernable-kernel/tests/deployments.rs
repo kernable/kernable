@@ -826,7 +826,15 @@ async fn the_local_socket_serves_readiness_and_drops_an_old_deployment_while_the
     assert!(ready.starts_with("HTTP/1.1 503"), "{ready}");
     assert!(ready.contains("carts@v2 at 0 of 1"), "{ready}");
     carts2.through(1).await;
-    let ready = local(&socket, "GET", "/ready?deployment=v2").await;
+    // The listener handled the event; its acknowledgement reaches the kernel a moment later.
+    let mut ready = String::new();
+    for _ in 0..100 {
+        ready = local(&socket, "GET", "/ready?deployment=v2").await;
+        if ready.starts_with("HTTP/1.1 200") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(ready.starts_with("HTTP/1.1 200"), "{ready}");
     let warm = local(&socket, "GET", "/api/deployments/warm-up?deployment=v2").await;
     assert!(warm.contains("\"caughtUp\":true"), "{warm}");
