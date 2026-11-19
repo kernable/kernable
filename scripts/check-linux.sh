@@ -57,9 +57,11 @@ rsync -az --delete \
 
 # The server may serve other things: never fill its disk. Builds without debug info and without
 # the incremental cache take about a third of the space; the tests run the same.
+# A first build needs about 12 GB; one on top of an earlier build, little more.
 free=$(ssh -o BatchMode=yes "$SERVER" "df --output=avail -BG / | tail -1 | tr -dc 0-9")
-if [ "$free" -lt 12 ]; then
-  echo "only ${free} GB free on $SERVER: needs 12 (rm -rf $DIR/target to start afresh)" >&2
+need=$(ssh -o BatchMode=yes "$SERVER" "[ -d $DIR/target ] && echo 5 || echo 12")
+if [ "$free" -lt "$need" ]; then
+  echo "only ${free} GB free on $SERVER: needs $need (rm -rf $DIR/target to start afresh)" >&2
   exit 2
 fi
 
