@@ -511,7 +511,7 @@ Signs a command with a new ID and submits it, waiting until it has settled; the 
 kernable cloud login | logout | whoami | teams | members | tokens | projects | audit | usage
 ```
 
-Signs in to a kernable Cloud installation by device code and manages its teams, members, CI tokens and projects and reads a team's audit log and usage through its account API (`--api <url>`); kernable cloud help lists them all.
+Signs in to a kernable Cloud installation by device code and manages its teams, members, CI tokens and projects and reads a team's audit log through its account API (`--api <url>`); kernable cloud help lists them all.
 
 ## Arguments and exit codes
 
