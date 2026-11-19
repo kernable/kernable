@@ -1,6 +1,7 @@
 # Dependency updates. Few pull requests: per ecosystem, every minor and patch update across its
-# directories comes as one grouped pull request a week; a major update comes on its own, as it may
-# need code changes.
+# directories comes as one grouped pull request a week. Major updates are not proposed: they need
+# code changes and are done on purpose (a security alert in the Security tab still names one
+# that fixes a vulnerability).
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -23,6 +24,9 @@ updates:
     groups:
       cargo:
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # The TypeScript SDK and kit, and the documentation site.
   - package-ecosystem: npm
@@ -36,6 +40,9 @@ updates:
     groups:
       npm:
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # The Python SDK (pyproject.toml, requirements.txt) and kit (requirements.txt).
   - package-ecosystem: pip
@@ -48,3 +55,6 @@ updates:
     groups:
       pip:
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
