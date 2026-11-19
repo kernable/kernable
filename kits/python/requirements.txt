@@ -4,4 +4,4 @@ webauthn>=3.0.1
 joserfc>=1.8
 cryptography>=44
 requests>=2.32
-dnspython>=2.7
+dnspython>=2.9.2
