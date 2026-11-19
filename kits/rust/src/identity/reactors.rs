@@ -164,7 +164,13 @@ pub fn react(domain: &Domain) {
         join(&ctx, &evt.tenant, &source, d.account_id, d.groups, false).await
     });
 
-    let processes = domain.reactor("identity.processes").order(orders::REACTORS);
+    // From the first event when new: an app registers its processes as it starts, maybe before
+    // this reactor's first connect; starting at the newest event would miss them (each step is
+    // safe to repeat).
+    let processes = domain
+        .reactor("identity.processes")
+        .order(orders::REACTORS)
+        .start(0);
     // A registered business process gets an identity in the platform tenant (no permissions: a
     // platform admin grants it groups) and an API key, and acts as them (design/processes.md).
     // Fixed IDs from the process's name: a new version or a redelivery changes nothing.

@@ -116,7 +116,9 @@ export function processIdentityId(process: string): string {
  * Until a platform admin grants the identity a group, the process's commands are refused.
  */
 export const processesReactor = identityDomain
-  .reactor("identity.processes", { order: ORDERS.reactors })
+  // From the first event when new: an app registers its processes as it starts, maybe before this
+  // reactor's first connect; starting at the newest event would miss them (each step is safe to repeat).
+  .reactor("identity.processes", { order: ORDERS.reactors, start: 0 })
   .on("process.ProcessRegistered", async (d: { name: string; version: number }, _evt, ctx) => {
     const process = d.name;
     const identityId = processIdentityId(process);

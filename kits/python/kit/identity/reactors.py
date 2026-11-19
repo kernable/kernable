@@ -72,7 +72,9 @@ def _(d: InvitationLinkUsed, evt, ctx):
     _join(ctx, evt.tenant, f"{evt.aggregate_id}-{d.account_id}", d.account_id, d.groups, False)
 
 
-processes_reactor = identity_domain.reactor("identity.processes", order=ORDERS.reactors)
+# From the first event when new: an app registers its processes as it starts, maybe before this
+# reactor's first connect; starting at the newest event would miss them (each step is safe to repeat).
+processes_reactor = identity_domain.reactor("identity.processes", order=ORDERS.reactors, start=0)
 
 
 @processes_reactor.on("process.ProcessRegistered")
