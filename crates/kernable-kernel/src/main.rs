@@ -2465,8 +2465,8 @@ async fn held_map(addr: &str, key_path: &str) -> Result<Option<PartitionMap>> {
 }
 
 /// Waits until partition `to` has copied `tenant` for the move or copy of `epoch`: asked through
-/// the control partition at `control` (which asks `to`, through a relay if it is at another site,
-/// P58), else at `to`'s own `addresses`.
+/// the control partition at `control` (which asks `to`, through a relay if it is at another
+/// site), else at `to`'s own `addresses`.
 async fn wait_copied(
     control: &str,
     addresses: &[String],

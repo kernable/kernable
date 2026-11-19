@@ -396,7 +396,7 @@ pub(crate) async fn follow_control(kernel: &Arc<Kernel>) {
 }
 
 /// How a map names a partition reached through a relay: `relay:<relay>/<copy>`, the relay's
-/// address and the copy the partition's pusher keeps there (P58).
+/// address and the copy the partition's pusher keeps there.
 pub(crate) const RELAY: &str = "relay:";
 
 /// What a partition asks another one, as a relay passes it on to the copy's pusher: each checks
@@ -474,7 +474,7 @@ static COPY_KEYS: std::sync::LazyLock<
 
 /// Another partition at `address`: directly, or as `relay:<relay>/<copy>` through that relay,
 /// where the partition's pusher makes the call on it. A partition at another site, reachable only
-/// through the relay both push to, is asked so (P58): each call sealed with that copy's key,
+/// through the relay both push to, is asked so: each call sealed with that copy's key,
 /// signed with this partition's node key, whose grant must allow `read` too (the relay checks it
 /// as a reader's). The copy key comes from the relay's pusher, as a reader gets it.
 pub(crate) async fn connect(

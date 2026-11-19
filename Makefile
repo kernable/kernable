@@ -64,7 +64,7 @@ py:
 check-packages:
 	./scripts/check-packages.sh
 
-# Long robustness runs: every crash point ROUNDS times per backend, KILLS random kills under
+# Long robustness runs: every crash point ROUNDS times, KILLS random kills under
 # load, SEEDS storage-fault seeds, MODEL_SEEDS model-based runs of 300 steps, CASES property
 # cases.
 ROUNDS ?= 20

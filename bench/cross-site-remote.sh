@@ -6,7 +6,7 @@
 # relay runs on the server; this machine reaches it through an SSH tunnel for that one port. Every
 # other address is valid only on its own site: the map names p1 at 127.0.0.1:17301 (on this
 # machine) and p2 at 127.0.0.1:17302 (on the server), so neither partition can reach the other
-# directly; each is also named as relay:<relay>/<its copy>, the way through the relay (P58).
+# directly; each is also named as relay:<relay>/<its copy>, the way through the relay.
 #   site A: p1 (control partition), a reader of site B's copy, a worker
 #   site B: p2 (its --control: its reader of p1's copy), a reader of site A's copy, a worker
 # Then:
@@ -18,7 +18,7 @@
 # Needs: ssh root@$SERVER, an official Node 22 there (NODE_B; Ubuntu's runs no TypeScript), cargo zigbuild (the Linux kernable), Node here.
 set -uo pipefail
 
-SERVER=${SERVER:-2.29.23.105}
+SERVER=${SERVER:?set SERVER to site B, a Linux server you reach over SSH as root}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 K=$ROOT/target/debug/kernable
 KL=$ROOT/target/x86_64-unknown-linux-gnu/release/kernable
@@ -51,7 +51,7 @@ port_up_b() { ssh_b "for i in \$(seq 300); do (exec 3<>/dev/tcp/127.0.0.1/$1) 2>
 for n in root client worker node ops pusherA pusherB readerA readerB kernel1 kernel2 rkA rkB; do "$K" keys new "$n" >/dev/null; done
 "$K" grant root.key client.pub 'submit=bench.*,acct.*' >/dev/null
 "$K" grant root.key worker.pub 'run=bench.*,acct.*' 'listen=*' >/dev/null
-# A partition's node key also reads: it asks other partitions through the relay as a reader (P58).
+# A partition's node key also reads: it asks other partitions through the relay as a reader.
 "$K" grant root.key node.pub 'replicate=*' 'read=*' >/dev/null
 "$K" grant root.key ops.pub 'manage=*' >/dev/null
 for n in pusherA pusherB readerA readerB; do "$K" grant root.key "$n.pub" 'read=*' >/dev/null; done

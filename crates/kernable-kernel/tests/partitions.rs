@@ -929,7 +929,7 @@ async fn a_tenant_moves_while_clients_write_to_it() {
     }
 }
 
-/// Partitions at sites that reach each other only through a relay (P58): the map names p2 only
+/// Partitions at sites that reach each other only through a relay: the map names p2 only
 /// as `relay:<relay>/<its copy>`, so what p1 asks p2, whether a global key is still held and a
 /// moving tenant's records, goes through the relay to p2's pusher, sealed with p2's copy key,
 /// which p1 got from that pusher with its node key.
