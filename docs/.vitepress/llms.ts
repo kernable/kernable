@@ -55,7 +55,7 @@ function page(root: string, link: string): string {
 }
 
 export function llmsFull(root: string, sidebar: Item[]): string {
-  const intro = `# kernable documentation\n\nEvery page of ${SITE}, in the order of its sidebar. For a short guide to building on kernable, see ${SITE}/kernable.AGENTS.md.\n\n**Status:** kernable 0.1: released and usable in production; the API may still change before 1.0, and the release notes say how.\n`;
+  const intro = `# kernable documentation\n\nEvery page of ${SITE}, in the order of its sidebar. For a short guide to building on kernable, see ${SITE}/kernable.AGENTS.md.\n\n**Status:** released and usable in production; before 1.0 the API may still change, and each release says how.\n`;
   return [intro, ...links(sidebar).map((l) => page(root, l))].join("\n\n---\n\n");
 }
 

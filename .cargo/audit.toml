@@ -6,4 +6,9 @@ ignore = [
   # operations. The kit only verifies passkey signatures, over public data with public keys:
   # no secret goes through it. The fix needs p256 0.14 (crypto-bigint 0.7). 2026-11-07.
   "RUSTSEC-2026-0387",
+  # rsa 0.9 (via jsonwebtoken 10's rust_crypto backend, kits/rust): the Marvin attack recovers a
+  # private key from the timing of RSA decryption or signing. The kit only verifies identity
+  # providers' ID tokens with their public keys: it never holds an RSA private key. No fixed
+  # rsa release yet; the other backend (aws-lc-rs) would make every kit user build C. 2026-11-19.
+  "RUSTSEC-2023-0071",
 ]
