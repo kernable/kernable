@@ -14,8 +14,10 @@ trap cleanup EXIT
 cargo build -q --manifest-path "$ROOT/Cargo.toml"
 make -s -C "$ROOT" py
 (cd "$ROOT/sdks/typescript" && npm pack --silent --pack-destination "$DIR" >/dev/null)
+# The wheel as the release builds it: with the kit packed in (pack_kit.py), removed after.
+(cd "$ROOT/sdks/python" && .venv/bin/python pack_kit.py >/dev/null)
 "$ROOT/sdks/python/.venv/bin/pip" wheel -q "$ROOT/sdks/python" -w "$DIR" --no-deps
-rm -rf "$ROOT/sdks/python/build" "$ROOT/sdks/python/"*.egg-info
+rm -rf "$ROOT/sdks/python/build" "$ROOT/sdks/python/"*.egg-info "$ROOT/sdks/python/kernable/_kit"
 
 # A kernel trusting one root key, and one app key for everything, granted by the root.
 cd "$DIR"
@@ -28,6 +30,9 @@ for _ in $(seq 50); do [ -S k.sock ] && break; sleep 0.1; done
 
 # Python: a read model of the demo domain answering demo.GetTotal, installed from the wheel.
 python3 -m venv py && py/bin/pip install -q --disable-pip-version-check kernable_sdk-*.whl
+# Each package carries its kit: `kernable-sdk add kit` copies it into a project.
+(mkdir kit-py && cd kit-py && ../py/bin/kernable-sdk add kit >/dev/null && [ -f kit/README.md ]) \
+  || { echo "the Python package has no kit (kernable-sdk add kit)" >&2; exit 1; }
 cat > model.py <<'PY'
 import sys
 from kernable import Kernable, domain
@@ -49,6 +54,8 @@ MODEL_PID=$!
 
 # TypeScript: a worker, two settling submits and a query, installed from the tarball.
 npm init -y >/dev/null && npm pkg set type=module && npm install --silent kernable-sdk-*.tgz
+(mkdir kit-ts && cd kit-ts && ../node_modules/.bin/kernable-sdk add kit >/dev/null && [ -f kit/README.md ]) \
+  || { echo "the npm package has no kit (kernable-sdk add kit)" >&2; exit 1; }
 cat > app.js <<'JS'
 import { Kernable, domain } from "@kernable/sdk";
 const counter = domain("demo").aggregate("Counter", 0)
