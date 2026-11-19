@@ -25,7 +25,7 @@ ciborium = "0.2"
 p256 = { version = "0.13", features = ["ecdsa"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "12.0", default-features = false, features = ["rust_crypto"] }
 hickory-resolver = "0.26"
 tokio = { version = "1", features = ["rt"] }
 
