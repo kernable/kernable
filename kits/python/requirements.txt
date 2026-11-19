@@ -3,5 +3,5 @@ argon2-cffi>=25.1
 webauthn>=3.0.1
 joserfc>=1.8
 cryptography>=44
-requests>=2.32
+requests>=2.34.2
 dnspython>=2.9.2
