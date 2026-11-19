@@ -1376,7 +1376,9 @@ class Aggregate:
         super().__init_subclass__(**kwargs)
         if domain is None:
             return
-        for field_name in list(cls.__dict__.get("__annotations__", {})):
+        # The class's own annotations: Python 3.14 evaluates them lazily, so they are no longer in
+        # `cls.__dict__["__annotations__"]`; `inspect.get_annotations` reads them on every version.
+        for field_name in list(inspect.get_annotations(cls)):
             default = cls.__dict__.get(field_name)
             if isinstance(default, (list, dict, set)):
                 setattr(cls, field_name, dataclasses.field(default_factory=lambda v=default: copy.deepcopy(v)))
