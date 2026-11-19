@@ -1,0 +1,44 @@
+name: CLA
+
+# The Contributor License Agreement (.github/CLA.md), checked on every pull request: a
+# contributor who has not agreed yet is asked to post the sentence below as a comment, once; the
+# agreement is recorded in signatures/cla.json on the branch cla-signatures. Runs on
+# pull_request_target and never checks out the pull request's code.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    name: CLA
+    runs-on: ubuntu-24.04
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event.comment.body == 'recheck' ||
+      github.event.comment.body == 'I have read the kernable Individual Contributor License Agreement in .github/CLA.md and I agree to it for all my contributions to kernable.'
+    steps:
+      - uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: https://github.com/kernable/kernable/blob/main/.github/CLA.md
+          path-to-signatures: signatures/cla.json
+          branch: cla-signatures
+          allowlist: susdorf,dependabot[bot],github-actions[bot]
+          custom-pr-sign-comment: I have read the kernable Individual Contributor License Agreement in .github/CLA.md and I agree to it for all my contributions to kernable.
+          custom-notsigned-prcomment: >-
+            Thank you for your pull request. Before we can merge it, please agree to the
+            [kernable Contributor License Agreement](https://github.com/kernable/kernable/blob/main/.github/CLA.md)
+            once, by posting the sentence below, unchanged, as a comment. It covers all your
+            later pull requests too.
+          custom-allsigned-prcomment: Everyone in this pull request has agreed to the Contributor License Agreement. Thank you.
+          lock-pullrequest-aftermerge: false

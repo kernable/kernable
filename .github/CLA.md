@@ -9,7 +9,7 @@ and so that you and every user are protected. You keep the copyright in your con
 agreement only grants a license to use them.
 
 You accept this agreement by posting the following sentence, unchanged, as a comment on your first
-pull request when the maintainer asks you to; the maintainer keeps a record of it:
+pull request when the CLA check asks you to; the check keeps a record of it:
 
 > I have read the kernable Individual Contributor License Agreement in .github/CLA.md and I agree
 > to it for all my contributions to kernable.
