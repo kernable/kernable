@@ -391,18 +391,20 @@ async fn the_kit_end_to_end() {
         &booted.api_key_id,
     );
 
-    let acme = slice(&world).await;
-    suspended_and_deleted(&world, &acme).await;
-    resumes_after_a_restart(&world).await;
-    account_flows(&world).await;
-    second_factor_and_api_keys(&world).await;
-    passkeys(&world).await;
-    oauth_and_sso(&world).await;
-    lists_and_explain(&world).await;
-    example_server(&world).await;
-    invitation_links(&world).await;
-    joining_checks_the_tenant(&world).await;
-    a_process_acts_as_its_own_identity(&world).await;
+    // Each step on the heap: their futures together outgrow a test thread's 2 MiB stack in a
+    // debug build (a stack overflow, not an error of the kit).
+    let acme = Box::pin(slice(&world)).await;
+    Box::pin(suspended_and_deleted(&world, &acme)).await;
+    Box::pin(resumes_after_a_restart(&world)).await;
+    Box::pin(account_flows(&world)).await;
+    Box::pin(second_factor_and_api_keys(&world)).await;
+    Box::pin(passkeys(&world)).await;
+    Box::pin(oauth_and_sso(&world)).await;
+    Box::pin(lists_and_explain(&world)).await;
+    Box::pin(example_server(&world)).await;
+    Box::pin(invitation_links(&world)).await;
+    Box::pin(joining_checks_the_tenant(&world)).await;
+    Box::pin(a_process_acts_as_its_own_identity(&world)).await;
     world.stop_app();
 }
 
