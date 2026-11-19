@@ -159,9 +159,17 @@ async fn grants_must_be_signed_by_a_root_key_for_the_presenting_key() {
     let env = start("keys-grants").await;
     let mut forged = grant(&key(8), &[("submit", &["*"])]);
     forged.root_sig = Some(signing::sign(&key(1), &signing::grant_message(&forged)));
-    assert_eq!(
-        env.kernel.grant(forged).unwrap_err().code(),
-        Code::PermissionDenied
+    let refused = env.kernel.grant(forged).unwrap_err();
+    assert_eq!(refused.code(), Code::PermissionDenied);
+    // It names both roots: the usual cause is a client of another kernel on the same address.
+    let root_id: String = id(&root()).chars().take(12).collect();
+    assert!(
+        refused
+            .message()
+            .contains(&format!("this kernel trusts {root_id}…"))
+            && refused.message().contains("is this the kernel you meant"),
+        "{}",
+        refused.message()
     );
     let mut tampered = grant(&key(8), &[("submit", &["orders.PlaceOrder"])]);
     tampered.permissions[0].types = vec!["*".into()];

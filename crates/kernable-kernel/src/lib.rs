@@ -628,7 +628,17 @@ impl Kernel {
     /// Whether `sig` was made by a root key that is not revoked.
     fn by_root(&self, sig: &Signature, msg: &[u8]) -> Result<(), Status> {
         if !self.config.roots.contains(&sig.key_id) {
-            return Err(Status::permission_denied("not signed by a root key"));
+            // Most often a client of another kernel: one started with other keys, in another
+            // directory, still running on this address. Key IDs are public: naming them helps.
+            let short = |id: &str| id.chars().take(12).collect::<String>();
+            let trusted: Vec<String> = self.config.roots.iter().map(|r| short(r)).collect();
+            return Err(Status::permission_denied(format!(
+                "not signed by a root key: the grant's root is {}…, this kernel trusts {}…; \
+                 is this the kernel you meant (not one started with other keys, still running \
+                 on this address)?",
+                short(&sig.key_id),
+                trusted.join("…, ")
+            )));
         }
         if self.revoked_since(&sig.key_id).is_some() {
             return Err(Status::permission_denied("the root key was revoked"));
@@ -1771,7 +1781,20 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 router.serve_with_incoming(incoming).await?;
             }
             None => {
-                let listener = TcpListener::bind(&listen).await?;
+                let listener = TcpListener::bind(&listen).await.map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AddrInUse {
+                        std::io::Error::new(
+                            e.kind(),
+                            format!(
+                                "{listen} is in use: is another kernel still running there (in \
+                                 another terminal or directory)? Stop it, or start this one \
+                                 with --listen <address>"
+                            ),
+                        )
+                    } else {
+                        e
+                    }
+                })?;
                 let incoming = connections::limited(Arc::clone(&kernel), listener);
                 router.serve_with_incoming(incoming).await?;
             }

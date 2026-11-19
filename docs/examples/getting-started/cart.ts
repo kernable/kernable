@@ -19,6 +19,7 @@ cartAggregate.command("AddItem", (state, data: { sku: string; qty: number }) => 
 
 cartAggregate.command("CheckOut", (state, _data, _cmd, ctx) => {
   if (state.items === 0) throw new Rejected("Cart is empty");
+  if (state.checkedOut) throw new Rejected("Cart is checked out");
   // ctx.now() and ctx.id() stay the same if the command runs again.
   return [{ type: "CheckedOut", data: { at: ctx.now().toISOString(), orderId: ctx.id() } }];
 });

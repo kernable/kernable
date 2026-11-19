@@ -30,7 +30,7 @@ The kernel keeps its events in `kernable.db` in this directory and listens on `h
 
 `--dev` also turns on the kernel's UI: open **http://127.0.0.1:7234** in a browser. It stays empty until the next steps connect something; then it shows them live.
 
-Leave the kernel running and continue in a second terminal.
+Leave the kernel running and continue in a second terminal. One kernel per address: if `kernable start` says `127.0.0.1:7233 is in use`, a kernel from an earlier try still runs; stop it first (`Ctrl-C` in its terminal).
 
 ## 3. Business logic
 

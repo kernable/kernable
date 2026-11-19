@@ -31,6 +31,8 @@ def _(state, data):
 def _(state, data, cmd, ctx):
     if state["items"] == 0:
         raise Rejected("Cart is empty")
+    if state["checked_out"]:
+        raise Rejected("Cart is checked out")
     # ctx.now() and ctx.id() stay the same if the command runs again.
     return [{"type": "CheckedOut", "data": {"at": ctx.now().isoformat(), "orderId": ctx.id()}}]
 # endregion commands

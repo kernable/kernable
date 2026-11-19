@@ -43,6 +43,9 @@ async fn main() -> Result<(), BoxError> {
         if state.items == 0 {
             return Err(Rejected::new("Cart is empty"));
         }
+        if state.checked_out {
+            return Err(Rejected::new("Cart is checked out"));
+        }
         // ctx.now() and ctx.id() stay the same if the command runs again.
         Ok(vec![NewEvent::new(
             "CheckedOut",
