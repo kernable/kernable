@@ -50,7 +50,7 @@ SETUP
 echo "== $SOURCE -> $SERVER:$DIR"
 ssh -o BatchMode=yes "$SERVER" "mkdir -p $DIR"
 rsync -az --no-owner --no-group --delete \
-  --exclude '/target/' --exclude 'node_modules/' --exclude '.venv/' --exclude '/dist/' \
+  --exclude 'target/' --exclude 'node_modules/' --exclude '.venv/' --exclude '/dist/' \
   --exclude '.vitepress/dist/' --exclude '.vitepress/cache/' --exclude '.DS_Store' \
   --exclude '/*.key' --exclude '/*.pub' --exclude '/*.grant' --exclude '/*.db*' \
   "$SOURCE/" "$SERVER:$DIR/"

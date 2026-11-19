@@ -576,7 +576,9 @@ async fn commit(env: &Env, id: &str, aggregate: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_serving_deployment_s_reactors_act_and_a_new_one_starts_at_the_switch() {
+    let ui = free_addr();
     let env = start_custom("deployments-reactors", |config, _| {
+        config.ui_listen = Some(ui.clone());
         config.deployment_switch_lag = 0;
     })
     .await;
@@ -609,6 +611,27 @@ async fn only_the_serving_deployment_s_reactors_act_and_a_new_one_starts_at_the_
     let mut mailer1 = listen(&env, "mailer", "v1", true).await;
     assert_eq!(mailer1.start, 2);
     mailer1.through(3).await;
+    // Its acknowledgement reaches the kernel a moment later; v2 goes on after what v1
+    // acknowledged, so the switch waits for it (else v2 would get event 3 again, rightly).
+    let acknowledged = async || {
+        let state = get(&ui, "/api/state").await;
+        let (_, body) = state.split_once("\r\n\r\n").unwrap();
+        let state: serde_json::Value = serde_json::from_str(body).unwrap();
+        state["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["name"] == "mailer" && l["deployment"] == "v1" && l["position"] == 3)
+    };
+    let mut done = false;
+    for _ in 0..100 {
+        if acknowledged().await {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(done, "v1's acknowledgement of 3 never reached the kernel");
 
     // The warm-up counts a waiting reactor as ready: it takes over at the switch.
     let mut m2 = m1.clone();

@@ -106,9 +106,17 @@ async fn a_full_queue_refuses_new_commands_and_still_answers_stored_ones() {
         .await
         .unwrap();
     assert!(matches!(done.outcome, Some(Outcome::Committed(_))));
-    submit_with(&env.addr, accepted("c4", "o3"), Wait::Committed)
-        .await
-        .unwrap();
+    // c1 and c2 may still be queued when c3 is done: ask until the worker has run them too.
+    let mut last = None;
+    for _ in 0..100 {
+        match submit_with(&env.addr, accepted("c4", "o3"), Wait::Committed).await {
+            Ok(_) => return,
+            Err(s) if s.code() == Code::ResourceExhausted => last = Some(s),
+            Err(s) => panic!("{s:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the queue never ran down: {last:?}");
 }
 
 #[tokio::test]

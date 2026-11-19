@@ -256,6 +256,18 @@ async fn a_read_model_is_never_asked_from_its_own_handler() {
     // Another read model answers instead.
     let _other = read_model(&env, "other", key(5), true);
     place(&env, "c2", "o2").await;
+    // The other read model may still be connecting under load: ask until it answers, at most 5 s.
+    let mut first = None;
+    for _ in 0..100 {
+        match ask(&env, q.clone()).await {
+            Ok(r) if response(&r) == "2" => {
+                first = Some(r);
+                break;
+            }
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    assert!(first.is_some(), "the other read model never answered");
     for _ in 0..4 {
         assert_eq!(response(&ask(&env, q.clone()).await.unwrap()), "2");
     }
