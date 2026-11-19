@@ -9,7 +9,9 @@ share one API.
 cargo add kernable-sdk tokio --features tokio/full serde --features serde/derive
 ```
 
-The crate is `kernable-sdk`; your code imports it as `kernable`.
+The crate is `kernable-sdk`; your code imports it as `kernable`. It is the only crate you add: it brings
+`kernable-core` (the protocol, shared with the kernel) and `kernable-sdk-macros` (its
+attributes; Rust keeps such macros in a crate of their own) along.
 
 Start a kernel (macOS and Linux):
 
