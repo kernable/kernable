@@ -1,6 +1,6 @@
 # The kit's dependencies besides kernable-sdk: pip install -r requirements.txt
 argon2-cffi>=25.1
-webauthn>=3.0
+webauthn>=3.0.1
 joserfc>=1.8
 cryptography>=44
 requests>=2.32
