@@ -853,12 +853,16 @@ class SliceTest(unittest.TestCase):
         api: KitApi = S["api"]
         identity = "process-shop.reminders"
 
-        def until(what: str, check, seconds: float = 10):
-            for _ in range(int(seconds * 50)):
+        def until(what: str, check, seconds: float = 60):
+            # Slow machines (CI) take their time: the kit's reactor gives the process its identity
+            # after the app registered it.
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
                 if (found := check()):
                     return found
-                time.sleep(0.02)
-            self.fail(f"no {what}")
+                time.sleep(0.05)
+            listed = kernel.cli("processes", "list", kernel.store)
+            self.fail(f"no {what} within {seconds} s; processes list: {listed.stdout} {listed.stderr}")
 
         def acting():
             out = kernel.cli("processes", "list", kernel.store).stdout

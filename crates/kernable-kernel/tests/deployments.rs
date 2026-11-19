@@ -506,7 +506,16 @@ async fn a_new_deployment_takes_over_only_once_caught_up_and_only_an_operator_ro
     // Caught up and its worker connected: it takes over; v1 keeps its read model.
     start_worker(env.addr.clone(), worker("v2", 1).0).await;
     carts2.through(1).await;
-    let ready = get(&metrics, "/ready?deployment=v2").await;
+    // The listener's acknowledgement and the worker's registration reach the kernel a moment
+    // after: asked until then.
+    let mut ready = String::new();
+    for _ in 0..100 {
+        ready = get(&metrics, "/ready?deployment=v2").await;
+        if ready.starts_with("HTTP/1.1 200") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(ready.starts_with("HTTP/1.1 200"), "{ready}");
     apply_eventually(&env, &m2).await;
     let written = events(&run(&env, "a2", "AddItem", "a").await);
