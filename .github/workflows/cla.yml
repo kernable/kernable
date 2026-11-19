@@ -21,10 +21,12 @@ jobs:
   cla:
     name: CLA
     runs-on: ubuntu-24.04
+    # Bots sign nothing, and GitHub gives their workflows read-only access anyway.
     if: >-
+      !endsWith(github.actor, '[bot]') && (
       github.event_name == 'pull_request_target' ||
       github.event.comment.body == 'recheck' ||
-      github.event.comment.body == 'I have read the kernable Individual Contributor License Agreement in .github/CLA.md and I agree to it for all my contributions to kernable.'
+      github.event.comment.body == 'I have read the kernable Individual Contributor License Agreement in .github/CLA.md and I agree to it for all my contributions to kernable.')
     steps:
       - uses: contributor-assistant/github-action@v2.6.1
         env:
