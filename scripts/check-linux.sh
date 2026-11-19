@@ -6,7 +6,8 @@
 #   scripts/check-linux.sh [<target>] [<source dir>]
 #     <target>      a make target (default: check; `flaky` repeats the timing-sensitive tests)
 #     <source dir>  the tree to test (default: this repository; e.g. a worktree of a pull request)
-#   SERVER=root@<host>     the server (default: root@116.202.30.113), with root over SSH
+#   SERVER=root@<host>     the server, with root over SSH; or the line in
+#                          ~/.config/kernable/check-linux.server (no address in the repository)
 #   NAME=<name>            its directory there, /srv/kernable-check/<name> (default: from the
 #                          source dir); kept between runs so builds are incremental
 #
@@ -16,7 +17,9 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=${1:-check}
 SOURCE=$(cd "${2:-$ROOT}" && pwd)
-SERVER=${SERVER:-root@116.202.30.113}
+CONFIG=$HOME/.config/kernable/check-linux.server
+SERVER=${SERVER:-$([ -f "$CONFIG" ] && tr -d '[:space:]' < "$CONFIG")}
+[ -n "$SERVER" ] || { echo "set SERVER=root@<host> or write it into $CONFIG" >&2; exit 2; }
 NAME=${NAME:-$(basename "$SOURCE")}
 DIR=/srv/kernable-check/$NAME
 NODE=v22.22.1
