@@ -23,7 +23,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 ciborium = "0.2"
 p256 = { version = "0.13", features = ["ecdsa"] }
-ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+ed25519-dalek = { version = "3", features = ["pkcs8", "pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
 hickory-resolver = "0.26"
