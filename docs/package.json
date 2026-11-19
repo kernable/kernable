@@ -10,7 +10,7 @@
   },
   "devDependencies": {
     "@kernable/sdk": "file:../sdks/typescript",
-    "mermaid": "^11.4.0",
+    "mermaid": "^12.3.0",
     "typescript": "~5.9.0",
     "vitepress": "1.6.4",
     "vitepress-plugin-mermaid": "2.0.17"
