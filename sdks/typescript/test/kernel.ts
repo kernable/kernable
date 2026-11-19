@@ -47,8 +47,7 @@ export class TestKernel {
   private configured = false;
   /** One key for both submitting commands and running the worker; its grant lies next to it. */
   readonly appKey = join(this.dir, "app.key");
-  /** Backend under test: KERNABLE_TEST_STORE=file selects the file store, else SQLite. */
-  readonly store = process.env.KERNABLE_TEST_STORE === "file" ? `file:${join(this.dir, "k.log")}` : `sqlite:${join(this.dir, "k.db")}`;
+  readonly store = `sqlite:${join(this.dir, "k.db")}`;
   private process?: ChildProcess;
   private watchdog?: ChildProcess;
 

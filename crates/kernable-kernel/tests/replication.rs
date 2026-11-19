@@ -35,10 +35,7 @@ use tonic::Code;
 fn config(dir: &Path, name: &str, kernel_seed: u8) -> Config {
     let kernel_key = dir.join(format!("{name}-kernel.key"));
     std::fs::write(&kernel_key, hex(key(kernel_seed).as_bytes())).unwrap();
-    let store = match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => format!("file:{}", dir.join(format!("{name}.log")).display()),
-        _ => format!("sqlite:{}", dir.join(format!("{name}.db")).display()),
-    };
+    let store = format!("sqlite:{}", dir.join(format!("{name}.db")).display());
     Config {
         roots: vec![id(&root())],
         store,
@@ -1202,11 +1199,6 @@ async fn a_switchover_on_the_local_socket_needs_no_key_and_makes_the_same_checks
 /// takes the tail back; with them gone (a crash dropped them), it starts over.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_completion_with_vault_values_is_taken_back_while_they_are_held() {
-    // The file log keeps no undo window: it cannot tell confirmed completions from others, so
-    // their secrets go when the stores open, and such a tail starts over.
-    if std::env::var("KERNABLE_TEST_STORE").as_deref() == Ok("file") {
-        return;
-    }
     for values_held in [true, false] {
         let dir = Dir::new(&format!("repl-rewind-values-{values_held}"));
         let mut primary_config = config(&dir.0, "primary", 3);

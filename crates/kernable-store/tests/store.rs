@@ -7,7 +7,7 @@ use kernable_core::proto::{
     Middleware, NewEvent, ParkedEvent, Permission, Rejected, RequestContext, Requirement,
     RevocationRecord, Signature, StoredKey, When, WorkerRecord, command_result::Outcome,
 };
-use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store, StoredCommand, StreamId};
+use kernable_store::{Enqueued, Error, SqliteStore, Store, StoredCommand, StreamId};
 
 fn cmd(id: &str, command_type: &str) -> Command {
     Command {
@@ -382,10 +382,10 @@ fn a_copy_mark_is_kept_and_carried_by_an_image(store: &dyn Store) {
     assert!(records.contains(&Record::Copy(mark(2))));
     static TARGETS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = TARGETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let (_db, file) = file_store(&format!("copy-mark-target-{n}"));
+    let (_db, disk) = disk_store(&format!("copy-mark-target-{n}"));
     for target in [
         Box::new(SqliteStore::open_in_memory().unwrap()) as Box<dyn Store>,
-        file,
+        disk,
     ] {
         target.apply_image(&records).unwrap();
         assert_eq!(target.copy_mark().unwrap(), Some(mark(2)));
@@ -1091,14 +1091,10 @@ fn keys_are_found_by_identity_and_freed_with_their_stream(store: &dyn Store) {
 
 #[test]
 fn an_index_survives_reopening_the_store() {
-    for backend in ["sqlite", "file"] {
+    {
+        let backend = "sqlite";
         let db = TempDb::new(&format!("index-reopened.{backend}"));
-        let open = || -> Box<dyn Store> {
-            match backend {
-                "sqlite" => Box::new(SqliteStore::open(&db.0).unwrap()),
-                _ => Box::new(FileStore::open(&db.0).unwrap()),
-            }
-        };
+        let open = || -> Box<dyn Store> { Box::new(SqliteStore::open(&db.0).unwrap()) };
         let store = open();
         store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
         store
@@ -1136,9 +1132,10 @@ fn an_index_survives_reopening_the_store() {
     }
 }
 
-fn file_store(name: &str) -> (TempDb, Box<dyn Store>) {
-    let db = TempDb::new(&format!("{name}.log"));
-    let store = FileStore::open(&db.0).unwrap();
+/// A SQLite store on disk: its reads go over the readers' own connections.
+fn disk_store(name: &str) -> (TempDb, Box<dyn Store>) {
+    let db = TempDb::new(&format!("{name}.db"));
+    let store = SqliteStore::open(&db.0).unwrap();
     (db, Box::new(store))
 }
 
@@ -1221,16 +1218,10 @@ macro_rules! for_each_backend {
                 super::$name(&super::SqliteStore::open_in_memory().unwrap());
             })*
         }
-        mod memory {
+        mod disk {
             $(#[test]
             fn $name() {
-                super::$name(&super::FileStore::in_memory());
-            })*
-        }
-        mod file {
-            $(#[test]
-            fn $name() {
-                let (_db, store) = super::file_store(stringify!($name));
+                let (_db, store) = super::disk_store(stringify!($name));
                 super::$name(&*store);
             })*
         }

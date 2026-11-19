@@ -5,7 +5,7 @@
 //! exits 1 at the first violation, leaving everything in place to look at.
 //!
 //! ```text
-//! kernable-soak run [--minutes 60] [--dir DIR] [--backend sqlite|file] [--check-every 10]
+//! kernable-soak run [--minutes 60] [--dir DIR] [--check-every 10]
 //!                   [--clients 8] [--rate 0] [--seed N] [--fault-every 45] [--faults a,b,...]
 //!                   [--data DIR] [--fill DIR] [--power-loss-cmd CMD] [--pair yes]
 //! kernable-soak app    (the Rust app; started by `run`)
@@ -318,10 +318,6 @@ async fn run(a: Args) -> Result<(), String> {
         "sqlite" => Ok(format!(
             "sqlite:{}",
             data.join(format!("{name}.db")).display()
-        )),
-        "file" => Ok(format!(
-            "file:{}",
-            data.join(format!("{name}.log")).display()
         )),
         other => Err(format!("unknown backend {other}")),
     };

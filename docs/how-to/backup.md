@@ -32,8 +32,6 @@ With `kernable start --dev`, all of these are in the working directory: `kernabl
 
    Do not `cp` a running SQLite store: the event store runs in WAL mode, and the latest commits are still in `kernable.db-wal`. To copy plain files, stop the kernel first.
 
-   A `file:` event log can be copied while the kernel runs. The copy may end in a torn record; the kernel cuts it off when it opens the copy and keeps the cut bytes in `<path>.torn-<offset>`.
-
 2. **Copy the data directory** (`data/` by default). Each file is written next to its place and then renamed, so a copy never holds half a file.
 
 3. **Check the backup** of the event store:

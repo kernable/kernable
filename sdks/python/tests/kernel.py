@@ -23,8 +23,7 @@ class TestKernel:
         self.url = f"unix:{self.socket}"
         #: One key for submitting, the worker and listeners; its grant lies next to it.
         self.app_key = f"{self.dir}/app.key"
-        self.store = (f"file:{self.dir}/k.log" if os.environ.get("KERNABLE_TEST_STORE") == "file"
-                      else f"sqlite:{self.dir}/k.db")
+        self.store = f"sqlite:{self.dir}/k.db"
         for name in ("root", "kernel", "app"):
             self._kernable("keys", "new", name)
         actions = ("submit", "subscribe", "listen", "query", "answer", "check", "vault_read", "vault_erase", "manage")

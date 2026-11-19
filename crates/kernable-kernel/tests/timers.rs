@@ -290,7 +290,7 @@ async fn after_a_restart_due_commands_run_late_unless_past_their_limit() {
     // Back after both were due: the late one runs, the other is past its limit.
     let from = env.dir.clone();
     let back = start_custom("timer-restart-back", move |_, dir| {
-        for file in ["k.db", "k.db-wal", "k.log"] {
+        for file in ["k.db", "k.db-wal"] {
             if from.join(file).exists() {
                 std::fs::copy(from.join(file), dir.join(file)).unwrap();
             }

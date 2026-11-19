@@ -23,7 +23,7 @@ STANDBY_SOCK="unix:$DIR/s.sock"
 STORE=${STORE:-sqlite:k.db}
 DURABILITY=${DURABILITY:-full}
 STANDBY_DURABILITY=${STANDBY_DURABILITY:-$DURABILITY}
-standby_store() { case "$STORE" in file:*) echo "file:s.log" ;; *) echo "sqlite:s.db" ;; esac; }
+standby_store() { echo "sqlite:s.db"; }
 
 wait_socket() { for _ in $(seq 200); do [ -S "${1#unix:}" ] && return; sleep 0.05; done; }
 

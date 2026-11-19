@@ -404,11 +404,8 @@ fn check_common(store: &dyn Store, backend: &str) {
     assert_eq!(shop.metadata[0].value, "1.0.0", "{backend}");
 }
 
-/// The current format, on each backend.
-const STORES: [(u32, &str, &str); 2] = [
-    (kernable_store::FORMAT, "sqlite", "k.db"),
-    (kernable_store::FORMAT, "file", "k.log"),
-];
+/// The current format.
+const STORES: [(u32, &str, &str); 1] = [(kernable_store::FORMAT, "sqlite", "k.db")];
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stores_of_every_format_verify_and_run_with_their_vault() {

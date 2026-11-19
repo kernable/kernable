@@ -3,7 +3,7 @@
 # under load and random faults (crates/kernable-soak):
 #
 # - A: SQLite, its data on a small ext4 file system that the soak fills (disk-full);
-# - B: the file log, its data on LazyFS, whose unsynced writes the soak drops (power-loss).
+# - B: SQLite too, its data on LazyFS, whose unsynced writes the soak drops (power-loss).
 #
 # From this machine (the repository is copied, not cloned):
 #   scripts/soak-server.sh push root@HOST         copy the repository and set the server up
@@ -109,7 +109,7 @@ run-a)
 
 run-b)
   mkdir -p $SOAK/b/fs/data
-  exec "$REMOTE/target/release/kernable-soak" run --minutes $(( ${2:-72} * 60 )) --backend file \
+  exec "$REMOTE/target/release/kernable-soak" run --minutes $(( ${2:-72} * 60 )) --backend sqlite \
     --rate 50 --check-every 60 --dir $SOAK/b/run --data $SOAK/b/fs/data --power-loss-cmd "echo lazyfs::clear-cache > $LAZYFS_FIFO" \
     --kernel-port 17243 --proxy-port 17244
   ;;

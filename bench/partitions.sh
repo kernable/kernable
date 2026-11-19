@@ -2,7 +2,7 @@
 # How throughput grows with partitions: 1 to PARTITIONS (default 4) kernels sharing the
 # tenants by a map, each with its own Rust worker and its own load generator (64 clients,
 # wait=committed, 1 KB payloads) writing one tenant that lives on it. Prints the sum per run.
-# STORE (sqlite or file) and DURABILITY as in run.sh. All kernels share this machine's CPUs and
+# DURABILITY as in run.sh. All kernels share this machine's CPUs and
 # disk: on separate machines each partition has its own.
 set -euo pipefail
 
@@ -24,7 +24,7 @@ DURABILITY=${DURABILITY:-full}
 MAX=${PARTITIONS:-4}
 SECONDS_EACH=${SECONDS_EACH:-10}
 
-store_of() { case "$STORE" in file*) echo "file:p$1.log" ;; *) echo "sqlite:p$1.db" ;; esac; }
+store_of() { echo "sqlite:p$1.db"; }
 sock() { echo "unix:$DIR/p$1.sock"; }
 
 run() { # <partitions>

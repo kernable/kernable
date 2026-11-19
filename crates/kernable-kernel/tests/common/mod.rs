@@ -241,12 +241,9 @@ pub async fn get(addr: &str, path: &str) -> String {
     response
 }
 
-/// The backend under test: `KERNABLE_TEST_STORE=file` selects the file store, else SQLite.
+/// The store of a test kernel: SQLite in its directory.
 pub fn store_url(dir: &std::path::Path) -> String {
-    match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => format!("file:{}", dir.join("k.log").display()),
-        _ => format!("sqlite:{}", dir.join("k.db").display()),
-    }
+    format!("sqlite:{}", dir.join("k.db").display())
 }
 
 /// Waits until the kernel accepts connections (at the socket level, so TLS works too), for up

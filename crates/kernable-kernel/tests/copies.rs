@@ -158,10 +158,7 @@ fn on_disk(dir: &Path, needle: &str) -> bool {
 }
 
 fn backend() -> &'static str {
-    match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => "file",
-        _ => "sqlite",
-    }
+    "sqlite"
 }
 
 /// A source kernel with a vault: two customers' orders with their emails in the vault, one of
@@ -216,7 +213,7 @@ impl Copy {
     fn new(dir: &Path, name: &str) -> Self {
         let dir = dir.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        let file = if backend() == "file" { "k.log" } else { "k.db" };
+        let file = "k.db";
         Copy {
             store: format!("{}:{}", backend(), dir.join(file).display()),
             vault_store: format!("sqlite:{}", dir.join("vault.db").display()),

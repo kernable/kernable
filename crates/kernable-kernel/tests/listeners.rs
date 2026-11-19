@@ -898,7 +898,7 @@ async fn a_retry_waits_for_the_listener_and_survives_a_restart() {
 
     let from = env.dir.clone();
     let after = start_custom("listener-parked-restarted", move |_, dir| {
-        for file in ["k.db", "k.db-wal", "k.log"] {
+        for file in ["k.db", "k.db-wal"] {
             if from.join(file).exists() {
                 std::fs::copy(from.join(file), dir.join(file)).unwrap();
             }

@@ -86,10 +86,7 @@ impl TestKernel {
         let mut vault_key = [0u8; 32];
         getrandom_fill(&mut vault_key);
         std::fs::write(dir.join("vault.key"), hex(&vault_key)).unwrap();
-        let store = match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-            Ok("file") => format!("file:{}", dir.join("k.log").display()),
-            _ => format!("sqlite:{}", dir.join("k.db").display()),
-        };
+        let store = format!("sqlite:{}", dir.join("k.db").display());
         let url = format!("unix:{}", dir.join("kernable.sock").display());
         let mut flags: Vec<String> = [
             "--root",

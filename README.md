@@ -75,7 +75,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 |---|---|
 | `proto/` | The protocol (`kernable.proto`), the store's log format (`storage.proto`), `SIGNING.md` and test vectors |
 | `crates/kernable-core` | Protocol types, signing, hash chain, client transport |
-| `crates/kernable-store` | The event store (`sqlite:`, `file:`, `memory:`), the snapshot store and the vault |
+| `crates/kernable-store` | The event store (SQLite, or `memory:` for tests), the snapshot store and the vault |
 | `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, listeners, vault |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix and results |
 | `crates/kernable-soak` | The soak: the kernel and an app per SDK under load and random faults (`make soak`) |

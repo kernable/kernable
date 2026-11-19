@@ -1172,8 +1172,7 @@ async fn run(
                             }
                         });
                     }
-                    // SQLite keeps what a reconnecting standby or backup follower may need;
-                    // the file log keeps all.
+                    // SQLite keeps what a reconnecting standby or backup follower may need.
                     if seq >= pruned + RETAIN / 10
                         && let Some(point) = prune_point(&kernel)
                     {

@@ -515,4 +515,4 @@ Signs in to a kernable Cloud installation by device code and manages its teams, 
 
 ## Arguments and exit codes
 
-`<addr>` is `host:port`, `http://host:port`, or `unix:<path>` on Unix. To reach a kernel over mutual TLS, set `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY` to PEM files, as for the SDKs. `<store>` is the kernel's `--store`: `sqlite:<path>`, a bare SQLite path, or `file:<path>`. Exit codes, unless a command says otherwise: 0 success, 1 failure, 2 unknown command or wrong arguments.
+`<addr>` is `host:port`, `http://host:port`, or `unix:<path>` on Unix. To reach a kernel over mutual TLS, set `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY` to PEM files, as for the SDKs. `<store>` is the kernel's `--store`: `sqlite:<path>` or a bare SQLite path. Exit codes, unless a command says otherwise: 0 success, 1 failure, 2 unknown command or wrong arguments.

@@ -29,15 +29,9 @@ impl Syncer {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Refuses a write once a flush failed.
-    pub(crate) fn check(&self) -> Result<()> {
-        match &self.state().failed {
-            Some(why) => Err(failed(why)),
-            None => Ok(()),
-        }
-    }
-
-    /// Counts a write that reached the OS.
+    /// Counts one write that reached the OS (in tests; the store counts by SQLite's total
+    /// changes, [`Self::wrote_up_to`]).
+    #[cfg(test)]
     pub(crate) fn wrote(&self) {
         self.state().written += 1;
     }
@@ -183,7 +177,6 @@ mod tests {
         let syncer = Syncer::default();
         syncer.wrote();
         assert!(syncer.sync(|| Err(std::io::Error::other("EIO"))).is_err());
-        assert!(syncer.check().is_err());
         assert!(syncer.sync(|| Ok(())).is_err());
     }
 }

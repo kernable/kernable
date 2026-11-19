@@ -21,22 +21,8 @@ prost = "0.14"
 members = ["."]
 
 [[bin]]
-name = "file_log"
-path = "fuzz_targets/file_log.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "messages"
 path = "fuzz_targets/messages.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "log_records"
-path = "fuzz_targets/log_records.rs"
 test = false
 doc = false
 bench = false

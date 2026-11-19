@@ -589,7 +589,7 @@ async fn after_the_snapshots_are_lost_a_long_history_comes_in_parts_with_every_v
     // A restart without the snapshot store: the whole history, in parts, with its values.
     let from = env.dir.clone();
     let after = start_custom("limit-parts-vault-restarted", move |config, dir| {
-        for file in ["k.db", "k.db-wal", "k.log", "vault.db", "vault.db-wal"] {
+        for file in ["k.db", "k.db-wal", "vault.db", "vault.db-wal"] {
             if from.join(file).exists() {
                 std::fs::copy(from.join(file), dir.join(file)).unwrap();
             }

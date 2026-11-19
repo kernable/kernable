@@ -53,10 +53,7 @@ fn temp_dir(name: &str) -> PathBuf {
 
 /// The backend under test, as compat.rs names its fixture files.
 fn backend() -> (&'static str, &'static str) {
-    match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => ("file", "k.log"),
-        _ => ("sqlite", "k.db"),
-    }
+    ("sqlite", "k.db")
 }
 
 /// The fixtures of the current store format.
@@ -348,10 +345,7 @@ fn vault_rekey_moves_every_value_to_the_new_key() {
 
 /// The vault fixture that belongs to the backend under test.
 fn vault_fixture(dir: &Path, name: &str) -> String {
-    let file = match backend().0 {
-        "file" => "vault-file.db",
-        _ => "vault-sqlite.db",
-    };
+    let file = "vault-sqlite.db";
     std::fs::copy(fixtures().join(file), dir.join(name)).unwrap();
     format!("sqlite:{}", dir.join(name).display())
 }
@@ -483,11 +477,8 @@ fn an_export_of_stopped_stores_imports_into_new_ones() {
     let copied = kernable_store::data::open(&new_data).unwrap();
     assert_eq!(copied.get(&invoice).unwrap(), Some(pdf));
 
-    // Into the other backend: the same store.
-    let other = match backend {
-        "file" => format!("sqlite:{}", dir.join("other.db").display()),
-        _ => format!("file:{}", dir.join("other.log").display()),
-    };
+    // Into another store: the same.
+    let other = format!("sqlite:{}", dir.join("other.db").display());
     let (code, printed) = kernable(
         &dir,
         &[

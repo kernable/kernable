@@ -3,7 +3,7 @@
 `kernable export` writes everything a kernel holds into one file, and `kernable import` fills new stores from it. Use it to:
 
 - **leave a hosted kernel** and run it yourself, with the same commands, events, vault values and files;
-- **move to another machine**, or **change the store backend** (SQLite to the `file:` log, or back);
+- **move to another machine**;
 - **hand a copy to someone** who checks it with `kernable verify`, without access to your machines.
 
 For regular backups, see [Back up and restore](./backup); an export is a full copy each time. For a preview, a copy without the personal data, import with `--mask-vault` ([Previews and copies](./previews)).
@@ -54,7 +54,7 @@ Without `--vault-key` the vault is left out, which fails if the store refers to 
 Import into **new, empty** stores, with the source's vault key:
 
 ```sh
-kernable import kernable.kx --store file:kernable.log --data-store file:data \
+kernable import kernable.kx --store sqlite:kernable.db --data-store file:data \
   --vault-store sqlite:vault.db --vault-key vault.key --kernel-pub old-kernel.pub
 ```
 
@@ -71,7 +71,7 @@ Name the source's kernel keys with `--kernel-pub`. Without them, the store is ch
 ## Start the new kernel
 
 ```sh
-kernable start --root root.pub --store file:kernable.log --vault-key vault.key ...
+kernable start --root root.pub --store sqlite:kernable.db --vault-key vault.key ...
 ```
 
 - **The root key:** grants are imported with the store and stay valid only under the root key that signed them. Start with the same `--root`, or grant every key again with a new one ([Keys](./keys)).

@@ -26,10 +26,7 @@ use kernable_store::invariants::Log;
 use prost::Message;
 
 fn store(dir: &Path, name: &str) -> String {
-    match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => format!("file:{}", dir.join(format!("{name}.log")).display()),
-        _ => format!("sqlite:{}", dir.join(format!("{name}.db")).display()),
-    }
+    format!("sqlite:{}", dir.join(format!("{name}.db")).display())
 }
 
 fn sock(dir: &Path, name: &str) -> String {

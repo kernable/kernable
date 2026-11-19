@@ -99,7 +99,7 @@ A listener (with the SDK) keeps a tenant's order across the move: it handles `ac
 
 If the command stops (or a partition does), run it again: it continues the move, and p3 keeps what it copied already. Moving a tenant back works the same way; only what happened since it left is copied.
 
-The tenant is unavailable only for the second part. Measured on one Apple M2 Max with both partitions on it (`bench/move.sh`, a command per event, 1 KB each; results in `bench/results-2026-11-04-m2max-move.txt`): with SQLite about a second, whatever the tenant's size (1 s for 268,000 events); with the file log, which reads its whole log for the rest, it grows with the log (2 s for 422,000 events, 1 GB). The move as a whole takes about 60 seconds per million events with SQLite and 30 with the file log, nearly all of it in the first part. Files go along in both parts, so a tenant with many large files stops longer.
+The tenant is unavailable only for the second part. Measured on one Apple M2 Max with both partitions on it (`bench/move.sh`, a command per event, 1 KB each; results in `bench/results-2026-11-04-m2max-move.txt`): about a second, whatever the tenant's size (1 s for 268,000 events). The move as a whole takes about 60 seconds per million events, nearly all of it in the first part. Files go along in both parts, so a tenant with many large files stops longer.
 
 ## Partitions at several sites
 
@@ -157,7 +157,6 @@ Every partition commits on its own, so throughput grows with partitions on machi
 | Store, durability | 1 partition | 2 | 3 | 4 |
 |---|---|---|---|---|
 | SQLite, `normal` | 7,008/s | 10,279/s | 11,820/s | 12,287/s |
-| file log, `normal` | 12,670/s | 19,217/s | 20,909/s | 21,456/s |
 | SQLite, `full` | 3,052/s | 3,042/s | 3,675/s | 4,062/s |
 
 On one machine, two partitions give about 1.5 times one; beyond that the shared CPUs and disk are the limit, not kernable. Measure your own machines.

@@ -1906,8 +1906,8 @@ async fn sample_trend(kernel: &Kernel) {
     }
 }
 
-/// The bytes a store at `url` takes on the disk: a SQLite file with its journal, a file log, or
-/// a directory of files.
+/// The bytes a store at `url` takes on the disk: a SQLite file with its journal, or a directory
+/// of files (the data store).
 fn bytes_of(url: &str) -> u64 {
     fn walk(path: &std::path::Path) -> u64 {
         match std::fs::symlink_metadata(path) {

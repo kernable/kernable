@@ -2,6 +2,8 @@
 
 Status: **built**: a hand-written undo per frequent write, filed in the same transaction and dropped as the standby acknowledges; anything else is irreversible and still means starting over. Cost (bench/replication.sh, a primary and its standby on one machine): about 0 at full durability and one client, about -3 % saturated; -4 % and -8 % at normal durability. The log is sealed while fenced.
 
+> The `file:` store (an append-only log file) this design also covers was removed before 0.1.0: the store is SQLite. What it says about the file log is history.
+
 ## As built
 
 - **SQLite** (`kernable-store/src/undo.rs`): an `undo (first, last, steps)` table beside the record log. An enqueue undoes by deleting its command; a commit by deleting its events and putting back its command (pending), each event type's schema and the stream's index as they were; a rejection by putting its command back; a checkpoint by deleting it; a listener or a worker by saving it as it was. Every other write files `Irreversible`, and so does a commit with an erasure (the values are destroyed). A commit or rejection of a command with vault values notes them: a rewind puts the command back only if the vault still holds them, else the standby starts over. Their secrets stay until a standby confirms the completion (when stores open too), then go: on the primary as the standby acknowledges, on a standby once it follows on or has rewound. Steps go once the standby acknowledges the records (every 1,000), and beyond the newest 100,000 records without a standby.

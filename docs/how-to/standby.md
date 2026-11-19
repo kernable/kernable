@@ -151,7 +151,7 @@ kernable start --root root.pub \
 - `--primary-kernel-key` is the primary's kernel public key: the standby checks the primary's checkpoints with it. Give every key the primary had, if it changed its key.
 - Start it with the flags it should have as the primary later, such as `--replication sync` if it should wait for a standby of its own once promoted.
 
-An **empty** standby takes a full image of the primary first, then follows. The first standby of a primary does so while the primary serves alone. A standby that replaces one that caught up before makes the primary's writes wait while it takes the image: with a large store, add it in a quiet hour. To let it catch up without the wait instead, stop the primary, delete `<store>.standby-caught-up`, and start it again; from then on, the old standby must not be promoted. A standby that was away only briefly catches up from where it stopped: the file log keeps every record, and SQLite keeps 100,000 records beyond what the standby acknowledged.
+An **empty** standby takes a full image of the primary first, then follows. The first standby of a primary does so while the primary serves alone. A standby that replaces one that caught up before makes the primary's writes wait while it takes the image: with a large store, add it in a quiet hour. To let it catch up without the wait instead, stop the primary, delete `<store>.standby-caught-up`, and start it again; from then on, the old standby must not be promoted. A standby that was away only briefly catches up from where it stopped: SQLite keeps 100,000 records beyond what the standby acknowledged.
 
 ## 4. Watch it
 
@@ -213,7 +213,6 @@ Every write waits for one more round trip: to the standby, its own flush, and ba
 | SQLite, `full` | 167/s | 84/s | 3,094/s | 659/s |
 | SQLite, `full`, standby `normal` | 161/s | 153/s | 3,042/s | 2,018/s |
 | SQLite, `normal` | 2,823/s | 1,702/s | 7,154/s | 4,090/s |
-| file log, `normal` | 3,711/s | 2,535/s | 12,833/s | 7,253/s |
 
 With `full` durability on one disk, the two kernels' flushes queue behind each other; the row with a `normal` standby shows the cost without that, which is closer to two machines with their own disks. Measure on your own machines before you size them.
 

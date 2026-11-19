@@ -131,10 +131,7 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
         hex(&grant.encode_to_vec()),
     )
     .unwrap();
-    let store = match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => format!("file:{}", dir.join(format!("{name}.log")).display()),
-        _ => format!("sqlite:{}", dir.join(format!("{name}.db")).display()),
-    };
+    let store = format!("sqlite:{}", dir.join(format!("{name}.db")).display());
     let listen = format!("unix:{}", dir.join(format!("{name}.sock")).display());
     // The other kernel and every client reach it through its plug.
     let advertise = format!("unix:{}", dir.join(format!("{name}-plug.sock")).display());

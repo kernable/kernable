@@ -5,6 +5,15 @@ run by kernable that manages kernables you run yourself; its own code is not ope
 where the line runs and why, so you know what you can run yourself and what you would be paying
 for.
 
+## How the two fit together
+
+With kernable Cloud, **your kernel still runs right next to your code**, in your own
+infrastructure, built from this repository: your services read and write it locally. kernable
+Cloud **keeps it in sync automatically**: your kernel pushes every change, sealed, to a copy in the
+EU within seconds, and your read-only kernels anywhere follow that copy. Your kernel stays the
+source of your data; the copy is encrypted with keys only your kernels hold. Without kernable
+Cloud, you do the same with the open pusher and a relay of your own ([relays](/how-to/relays)).
+
 ## The test
 
 A feature is open if **someone running their own application on their own servers needs it**.

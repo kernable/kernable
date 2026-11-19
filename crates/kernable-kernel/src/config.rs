@@ -15,7 +15,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--store",
         "KERNABLE_STORE",
         "sqlite:kernable.db",
-        "The event store. It also holds the command queue and results, checkpoints, revocations and registrations. `sqlite:<path>` or a bare path: SQLite. `file:<path>`: an append-only log file. `memory:`: nothing survives the process, for tests. Keep it, the vault and the snapshots on a local disk, never on a network file system such as NFS or SMB: one kernel per store rests on file locks (`<store>.lock`, and the vault's and the snapshots' own), which such file systems do not hold reliably, so two kernels could write one store.",
+        "The event store. It also holds the command queue and results, checkpoints, revocations and registrations. `sqlite:<path>` or a bare path: SQLite. `memory:`: SQLite in memory, nothing survives the process, for tests. Keep it, the vault and the snapshots on a local disk, never on a network file system such as NFS or SMB: one kernel per store rests on file locks (`<store>.lock`, and the vault's and the snapshots' own), which such file systems do not hold reliably, so two kernels could write one store.",
     ),
     (
         "--listen",
@@ -33,7 +33,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--snapshots",
         "KERNABLE_SNAPSHOTS",
         "",
-        "The snapshot store, a cache of aggregate states that workers rebuild from the events. `sqlite:<path>` or a bare path: SQLite, kept across restarts. `memory:`: lost on a restart, so the first command per aggregate reads all its events again. Not `file:`. Default: SQLite next to the event store, `<its name>-snapshots.db` (`kernable-snapshots.db` for `kernable.db`), or `memory:` for a `memory:` store. One kernel per snapshot store: a second one is refused (`<path>.lock`).",
+        "The snapshot store, a cache of aggregate states that workers rebuild from the events. `sqlite:<path>` or a bare path: SQLite, kept across restarts. `memory:`: lost on a restart, so the first command per aggregate reads all its events again. Default: SQLite next to the event store, `<its name>-snapshots.db` (`kernable-snapshots.db` for `kernable.db`), or `memory:` for a `memory:` store. One kernel per snapshot store: a second one is refused (`<path>.lock`).",
     ),
     (
         "--data-store",
@@ -57,7 +57,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--vault-store",
         "KERNABLE_VAULT_STORE",
         "sqlite:vault.db",
-        "Where the vault keeps personal and secret values, encrypted with `--vault-key`. `sqlite:<path>` or a bare path: SQLite. `memory:`: every value is lost on a restart, for tests. Not `file:`. Ignored without `--vault-key`. One kernel per vault: a second one is refused (`<path>.lock`).",
+        "Where the vault keeps personal and secret values, encrypted with `--vault-key`. `sqlite:<path>` or a bare path: SQLite. `memory:`: every value is lost on a restart, for tests. Ignored without `--vault-key`. One kernel per vault: a second one is refused (`<path>.lock`).",
     ),
     (
         "--tls-cert",
@@ -1292,7 +1292,7 @@ mod tests {
             ("sqlite:kernable.db", "sqlite:kernable-snapshots.db"),
             ("data/k.db", "sqlite:data/k-snapshots.db"),
             (
-                "file:/var/lib/kernable/k.log",
+                "sqlite:/var/lib/kernable/k.db",
                 "sqlite:/var/lib/kernable/k-snapshots.db",
             ),
             ("memory:", "memory:"),
@@ -1301,8 +1301,7 @@ mod tests {
         }
         let root =
             kernable_core::signing::key_id(&kernable_core::signing::generate_key().verifying_key());
-        let config =
-            Config::from_args(&["--root", &root, "--store", "file:k.log"], |_| None).unwrap();
+        let config = Config::from_args(&["--root", &root, "--store", "k.db"], |_| None).unwrap();
         assert_eq!(config.snapshots, "sqlite:k-snapshots.db");
         let config =
             Config::from_args(&["--root", &root, "--snapshots", "memory:"], |_| None).unwrap();

@@ -3,7 +3,7 @@
 # tenant while it runs, then stops it for the rest. Two partitions; a load generator (64
 # clients, wait=committed, 1 KB payloads) fills tenant t1 on p1 for each of FILL (seconds,
 # default "5 15 45"), then `kernable partitions move` copies it to p2, timed.
-# STORE (sqlite or file) and DURABILITY as in run.sh; both kernels share this machine.
+# DURABILITY as in run.sh; both kernels share this machine.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -23,7 +23,7 @@ STORE=${STORE:-sqlite}
 DURABILITY=${DURABILITY:-normal}
 FILL=${FILL:-5 15 45}
 
-store_of() { case "$STORE" in file*) echo "file:p$1.log" ;; *) echo "sqlite:p$1.db" ;; esac; }
+store_of() { echo "sqlite:p$1.db"; }
 sock() { echo "unix:$DIR/p$1.sock"; }
 now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
 

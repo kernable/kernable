@@ -573,7 +573,6 @@ async fn a_kernel_needs_a_vault_for_personal_keys() {
         assert!(refused.to_string().contains("--vault-key"), "{refused}");
         std::fs::remove_file(dir.join("k.db")).ok();
         std::fs::remove_file(dir.join("k.db-wal")).ok();
-        std::fs::remove_file(dir.join("k.log")).ok();
     })
     .await;
     // A kernel without a vault rejects a personal key.

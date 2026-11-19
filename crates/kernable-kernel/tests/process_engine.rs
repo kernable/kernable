@@ -787,7 +787,7 @@ async fn cases_go_on_after_a_restart() {
     // Another kernel on a copy of the store, as after a restart: the waits and timers held.
     let from = env.dir.clone();
     let back = start_custom("pe-restart-back", move |_, dir| {
-        for file in ["k.db", "k.db-wal", "k.log"] {
+        for file in ["k.db", "k.db-wal"] {
             if from.join(file).exists() {
                 std::fs::copy(from.join(file), dir.join(file)).unwrap();
             }

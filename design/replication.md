@@ -2,6 +2,8 @@
 
 Status: built. The store's record log, the primary and the standby, `kernable promote` and the docs ([Run a standby](../docs/how-to/standby.md)); the witness and pairs (below); address lists in the SDKs, crash points during replication, `kill -9` tests, soak runs with failover faults and a model-based test of a pair under seeded kills and pauses. Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`, `pair.rs`, `replication_crashes.rs`, `replication_kills.rs`. Invariants P1–P4 are in [invariants.md](invariants.md). A handing-over primary and a fenced one seal their record log, so a handover leaves no tail; a diverged standby keeps only its newest set-aside copy, and takes its own newest records back instead of starting over ([rewind.md](rewind.md)).
 
+> The `file:` store (an append-only log file) this design also covers was removed before 0.1.0: the store is SQLite. What it says about the file log is history.
+
 ## Goal
 
 A second kernel, the **standby**, holds every write the primary acknowledged. If the primary dies, an operator promotes the standby (`kernable promote <address> <key>`); it starts like a restarted kernel and loses nothing. Automatic failover goes through a witness ([below](#the-witness-and-pairs)); the SDKs take a list of addresses and try the next one after a failure.

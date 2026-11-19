@@ -2,14 +2,12 @@
 //! and every backend behaves the same for the same operations.
 //! `PROPTEST_CASES=<n>` sets the number of cases (default 64; `make torture` runs many more).
 
-use std::sync::OnceLock;
-
 use ed25519_dalek::SigningKey;
 use kernable_core::{
-    proto::{Command, Event, NewEvent, Rejected, Signature},
+    proto::{Command, NewEvent, Rejected, Signature},
     signing,
 };
-use kernable_store::{Error, FileStore, SqliteStore, Store};
+use kernable_store::{Error, SqliteStore, Store};
 use proptest::prelude::*;
 
 fn config() -> ProptestConfig {
@@ -46,86 +44,6 @@ fn events(n: usize) -> Vec<NewEvent> {
             deployment: Default::default(),
         })
         .collect()
-}
-
-/// The bytes of a small, valid file log with commits, a rejection, a pending command, a
-/// listener, a snapshot-free history and checkpoints.
-fn valid_log() -> &'static (Vec<u8>, Vec<Event>) {
-    static LOG: OnceLock<(Vec<u8>, Vec<Event>)> = OnceLock::new();
-    LOG.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("kernable-props-{}.log", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        {
-            let store = FileStore::open(&path).unwrap();
-            let kernel = SigningKey::from_bytes(&[3; 32]);
-            for i in 0..6 {
-                let cmd = command(i, i % 2);
-                store.enqueue(&cmd, 1).unwrap();
-                let version = store
-                    .read_stream("t1", "orders", "Order", &cmd.aggregate_id)
-                    .unwrap()
-                    .len() as u64;
-                let new = events(1 + i % 2);
-                let sig = signing::sign(&kernel, &signing::result_message(&cmd, version, &new));
-                store
-                    .commit(&cmd.command_id, version, &new, &sig, None, 2)
-                    .unwrap();
-                if i == 3 {
-                    store.checkpoint(&kernel, 3).unwrap();
-                }
-            }
-            store.enqueue(&command(6, 0), 4).unwrap();
-            store.reject("c6", Rejected::default()).unwrap();
-            store.enqueue(&command(7, 1), 5).unwrap();
-            store.checkpoint(&kernel, 6).unwrap();
-        }
-        let bytes = std::fs::read(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        let events = FileStore::open_bytes(&bytes)
-            .unwrap()
-            .read_all(0, 100)
-            .unwrap();
-        (bytes, events)
-    })
-}
-
-proptest! {
-    #![proptest_config(config())]
-
-    /// Any bytes: an error or a store, never a panic.
-    #[test]
-    fn random_bytes_never_crash_the_file_log(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
-        if let Ok(store) = FileStore::open_bytes(&bytes) {
-            let _ = store.read_all(0, 1000);
-            let _ = store.verify(&["00".to_string()]);
-        }
-    }
-
-    /// A damaged log is refused or read as a prefix of what was written; it is never misread.
-    #[test]
-    fn a_damaged_log_is_refused_or_read_as_a_prefix(
-        at in any::<proptest::sample::Index>(),
-        flip in 1u8..=255,
-        cut in any::<bool>(),
-    ) {
-        let (log, written) = valid_log();
-        let at = at.index(log.len());
-        let mut bytes = log.clone();
-        if cut {
-            bytes.truncate(at);
-        } else {
-            bytes[at] ^= flip;
-        }
-        match FileStore::open_bytes(&bytes) {
-            Err(Error::Corrupt(_) | Error::Format(_) | Error::Decode(_)) => {}
-            Err(e) => prop_assert!(false, "unexpected error {e}"),
-            Ok(store) => {
-                let read = store.read_all(0, 1000).unwrap();
-                prop_assert!(read.len() <= written.len());
-                prop_assert_eq!(&read[..], &written[..read.len()]);
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -213,16 +131,19 @@ fn apply(store: &dyn Store, ops: &[Op]) -> Vec<String> {
 proptest! {
     #![proptest_config(config())]
 
-    /// SQLite, the file log and memory give the same answers to the same operations.
+    /// SQLite on disk (with its readers' connections) and in memory (`memory:`) give the same
+    /// answers to the same operations.
     #[test]
-    fn every_backend_behaves_the_same(ops in proptest::collection::vec(op(), 1..40)) {
-        let sqlite = apply(&SqliteStore::open_in_memory().unwrap(), &ops);
-        let memory = apply(&FileStore::in_memory(), &ops);
-        prop_assert_eq!(&sqlite, &memory);
-        let path = std::env::temp_dir().join(format!("kernable-props-diff-{}.log", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let file = apply(&FileStore::open(&path).unwrap(), &ops);
-        let _ = std::fs::remove_file(&path);
-        prop_assert_eq!(&sqlite, &file);
+    fn on_disk_and_in_memory_behave_the_same(ops in proptest::collection::vec(op(), 1..40)) {
+        let memory = apply(&SqliteStore::open_in_memory().unwrap(), &ops);
+        let path = std::env::temp_dir().join(format!("kernable-props-diff-{}.db", std::process::id()));
+        for suffix in ["", "-wal", "-shm", ".lock"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let disk = apply(&SqliteStore::open(&path).unwrap(), &ops);
+        for suffix in ["", "-wal", "-shm", ".lock"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        prop_assert_eq!(&memory, &disk);
     }
 }

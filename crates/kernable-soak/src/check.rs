@@ -42,7 +42,7 @@ pub struct Report {
     pub took: Duration,
 }
 
-/// Read from a fresh read-only open (a file store is a snapshot): the head, every listener's
+/// Read from a fresh read-only open: the head, every listener's
 /// name and position, and how many commands are pending.
 type Positions = (u64, Vec<(String, u64)>, usize);
 

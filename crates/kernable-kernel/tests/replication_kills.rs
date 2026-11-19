@@ -56,10 +56,7 @@ impl Dir {
     }
 
     fn store(&self, name: &str) -> String {
-        match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-            Ok("file") => format!("file:{}", self.0.join(format!("{name}.log")).display()),
-            _ => format!("sqlite:{}", self.0.join(format!("{name}.db")).display()),
-        }
+        format!("sqlite:{}", self.0.join(format!("{name}.db")).display())
     }
 
     /// Generation 1 of the witness the kernels name (`w.sock`), signed by the root: the

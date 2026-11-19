@@ -2,8 +2,7 @@
 //!
 //! Backends, selected by URL:
 //! - `sqlite:<path>` (or a bare path): SQLite in WAL mode; several processes may open it.
-//! - `file:<path>`: one append-only log file, state rebuilt in memory on open; one writer.
-//! - `memory:`: the file backend's logic without a file; nothing survives the process.
+//! - `memory:`: SQLite in memory; nothing survives the process (tests).
 //!
 //! Every backend gives the same guarantees: commands are persisted before they run, a command
 //! completes at most once, a commit appends all events of a command atomically and only on the
@@ -14,7 +13,7 @@
 //! ([`Store::index`]), written with the commit that changed them.
 //!
 //! Every write is also a record of the [`replication`] record log, which a primary sends its
-//! standby: the file log is one by itself, SQLite keeps one in a table while replication is on.
+//! standby: SQLite keeps one in a table while replication is on.
 //!
 //! Two more stores live apart from the log, because what they hold must be deletable:
 //! [`snapshots`] (the latest snapshot per aggregate, a cache) and the [`vault`] (personal and
@@ -25,7 +24,6 @@
 pub mod data;
 #[cfg(feature = "faults")]
 pub mod faults;
-mod file;
 pub mod invariants;
 pub mod replication;
 pub mod snapshots;
@@ -50,7 +48,6 @@ use kernable_core::proto::{
 /// earlier development build may not open, or may not read correctly.
 pub const FORMAT: u32 = 1;
 
-pub use file::FileStore;
 pub use replication::Head;
 pub use sqlite::SqliteStore;
 pub use verify::Report;
@@ -838,8 +835,8 @@ pub enum Durability {
     Normal,
 }
 
-/// Opens a store for reading and writing: `sqlite:<path>`, `file:<path>`, `memory:` or a bare
-/// SQLite path, with [`Durability::Full`].
+/// Opens a store for reading and writing: `sqlite:<path>`, `memory:` or a bare SQLite path,
+/// with [`Durability::Full`].
 pub fn open(url: &str) -> Result<Box<dyn Store>> {
     open_with(url, Durability::Full)
 }
@@ -847,8 +844,8 @@ pub fn open(url: &str) -> Result<Box<dyn Store>> {
 /// Like [`open`], with the given durability.
 pub fn open_with(url: &str, durability: Durability) -> Result<Box<dyn Store>> {
     Ok(match backend(url) {
-        ("memory", _) => Box::new(FileStore::in_memory()),
-        ("file", path) => Box::new(FileStore::open_with(path, durability)?),
+        ("memory", _) => Box::new(SqliteStore::open_in_memory()?),
+        ("file", _) => return Err(no_file_store()),
         (_, path) => Box::new(SqliteStore::open_with(path, durability)?),
     })
 }
@@ -856,7 +853,7 @@ pub fn open_with(url: &str, durability: Durability) -> Result<Box<dyn Store>> {
 /// Opens a store for inspection, e.g. `kernable verify` while a kernel is running.
 pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
     Ok(match backend(url) {
-        ("file", path) => Box::new(FileStore::open_read_only(path)?),
+        ("file", _) => return Err(no_file_store()),
         ("memory", path) => Box::new(SqliteStore::open_unlocked(path)?),
         // A store that is not there is an error, never a new, empty one: a mistyped path must
         // not make `kernable verify` report an intact log.
@@ -890,9 +887,19 @@ pub(crate) fn lock_file(path: &std::path::Path, what: &str) -> Result<std::fs::F
 /// Like [`lock_file`], for the SQLite database at `url`; none in memory.
 pub(crate) fn lock_url(url: &str, what: &str) -> Result<Option<std::fs::File>> {
     match backend(url) {
-        ("memory", _) | ("file", _) => Ok(None),
+        ("memory", _) => Ok(None),
+        ("file", _) => Err(no_file_store()),
         (_, path) => lock_file(std::path::Path::new(path), what).map(Some),
     }
+}
+
+/// The event store is SQLite: a `file:` URL (a backend of development builds) is refused rather
+/// than taken as a SQLite file of that name.
+fn no_file_store() -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "there is no file: store: the store is SQLite (sqlite:<path> or a bare path)",
+    ))
 }
 
 /// Splits a store URL into backend and path; a bare path means SQLite.

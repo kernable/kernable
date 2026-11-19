@@ -10,7 +10,7 @@ use kernable_core::{
     signing,
 };
 use kernable_store::{
-    FileStore, SqliteStore, Store, StreamId,
+    SqliteStore, Store, StreamId,
     invariants::{self, Log, Observed, Violation},
 };
 
@@ -127,7 +127,7 @@ fn workload(store: &dyn Store) {
 }
 
 fn healthy() -> Log {
-    let store = FileStore::in_memory();
+    let store = SqliteStore::open_in_memory().unwrap();
     workload(&store);
     Log::read(&store, &kernel_ids()).unwrap()
 }
@@ -142,12 +142,12 @@ fn fires(violations: Vec<Violation>, invariant: &str) {
 
 #[test]
 fn a_healthy_store_holds_every_invariant() {
-    let file = FileStore::in_memory();
-    workload(&file);
+    let memory = SqliteStore::open_in_memory().unwrap();
+    workload(&memory);
     let path = std::env::temp_dir().join(format!("kernable-invariants-{}.db", std::process::id()));
     let sqlite = SqliteStore::open(&path).unwrap();
     workload(&sqlite);
-    for store in [&file as &dyn Store, &sqlite] {
+    for store in [&memory as &dyn Store, &sqlite] {
         let log = Log::read(store, &kernel_ids()).unwrap();
         assert_eq!(log.events.len(), 4);
         assert_eq!(log.pending.len(), 1);

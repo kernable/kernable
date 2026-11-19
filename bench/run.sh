@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the benchmark matrix on this machine and prints one line per run.
-# Release builds, 1 KB payloads, warm connections. STORE=file:k.log or STORE=memory: picks the backend
+# Release builds, 1 KB payloads, warm connections. STORE=memory: picks SQLite in memory
 # (default: sqlite:k.db); DURABILITY=normal hands writes to the OS instead of syncing them
 # (default: full, as `kernable start`).
 set -euo pipefail
@@ -70,7 +70,6 @@ echo "== $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(date -
 "$BIN/kernable-bench" crypto
 printf '%-28s ' "baseline in-process"
 case "$STORE" in
-  file:*) BASELINE="file:$DIR/baseline.log" ;;
   memory:*) BASELINE="memory:" ;;
   *) BASELINE="sqlite:$DIR/baseline.db" ;;
 esac

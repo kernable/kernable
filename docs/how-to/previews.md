@@ -32,7 +32,7 @@ kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
 
 `--at <time>` or `--at-record <n>` copies the state at a point, as for any restore. The source's vault key is not needed: the backup's vault values are left out unread.
 
-**From a store on this machine**, read in one consistent view, also while its kernel runs (a SQLite store; a `file:` log as far as it was written when the copy opened it):
+**From a store on this machine**, read in one consistent view, also while its kernel runs (a SQLite store):
 
 ```sh
 kernable copy sqlite:kernable.db --mask-vault --store sqlite:preview/kernable.db \
@@ -106,7 +106,6 @@ The source's erasures stay visible in the copy: the erasing events, with the sub
 
 A copy streams: it reads the source in batches (up to 512 records or 1 MiB each) and applies each to the new store, so memory stays at a batch whatever a SQLite store's size, and the disk needs the copy's size once (`import` also the export file's). It applies and checks every record as a restore does, so it takes about as long as a restore of the same store: about a minute for 200,000 events and five for a million on a 2-core server ([measured restores](./backup#what-it-loses-and-how-long-the-way-back-takes)), most of it applying the records and checking every signature.
 
-- A `file:` log, as source or target, is held in memory whole, as the `file:` backend always does.
 - `kernable copy` holds one read transaction on a SQLite source for the whole copy: the running kernel goes on writing, but its write-ahead log cannot be folded back until the copy ends and grows meanwhile. For a large production store, copy from the backup instead.
 - A copy needs new, empty target stores; delete a half-made copy and start again.
 - A copy is not incremental: a fresh preview is a fresh copy. Copy-on-write snapshots of the file system may make copies near-instant later.

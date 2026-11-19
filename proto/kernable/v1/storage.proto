@@ -1,6 +1,6 @@
-// Records of the append-only file store (`file:` backend); one record per state change. They
-// are also the record log a primary sends its standby (SQLite keeps them in a table while
-// replication is on; design/replication.md). Not part of the client protocol.
+// Records of the store's record log, one per state change: what a primary sends its standby,
+// kept by SQLite in a table while replication is on (design/replication.md), and the records of
+// images, exports and backups. Not part of the client protocol.
 syntax = "proto3";
 
 package kernable.v1;

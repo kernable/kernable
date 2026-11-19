@@ -15,25 +15,10 @@ use kernable_core::{
     signing,
 };
 use kernable_store::{
-    Durability, Error, FileStore, Head, SqliteStore, Store,
+    Durability, Error, Head, SqliteStore, Store,
     invariants::Log,
     replication::{self, chained},
 };
-
-#[derive(Clone, Copy, Debug)]
-enum Kind {
-    File,
-    Sqlite,
-}
-
-use Kind::{File, Sqlite};
-
-const PAIRS: [(Kind, Kind); 4] = [
-    (File, File),
-    (File, Sqlite),
-    (Sqlite, File),
-    (Sqlite, Sqlite),
-];
 
 /// A directory of stores, removed afterwards.
 struct Dir(PathBuf);
@@ -50,22 +35,15 @@ impl Dir {
     }
 
     /// Opens store `name`, without its record log (SQLite).
-    fn plain(&self, kind: Kind, name: &str) -> Box<dyn Store> {
-        match kind {
-            File => Box::new(
-                FileStore::open_with(self.0.join(format!("{name}.log")), Durability::Normal)
-                    .unwrap(),
-            ),
-            Sqlite => Box::new(
-                SqliteStore::open_with(self.0.join(format!("{name}.db")), Durability::Normal)
-                    .unwrap(),
-            ),
-        }
+    fn plain(&self, name: &str) -> Box<dyn Store> {
+        Box::new(
+            SqliteStore::open_with(self.0.join(format!("{name}.db")), Durability::Normal).unwrap(),
+        )
     }
 
     /// Opens store `name` with its record log on.
-    fn open(&self, kind: Kind, name: &str) -> Box<dyn Store> {
-        let store = self.plain(kind, name);
+    fn open(&self, name: &str) -> Box<dyn Store> {
+        let store = self.plain(name);
         store.keep_record_log(true).unwrap();
         store
     }
@@ -420,10 +398,11 @@ fn same(primary: &dyn Store, standby: &dyn Store, what: &str) {
 
 #[test]
 fn a_standby_that_applies_the_records_holds_the_same_store() {
-    for (p, s) in PAIRS {
+    {
+        let (p, s) = ("sqlite", "sqlite");
         let what = format!("{p:?} to {s:?}");
         let dir = Dir::new(&format!("follow-{p:?}-{s:?}"));
-        let (primary, standby) = (dir.open(p, "primary"), dir.open(s, "standby"));
+        let (primary, standby) = (dir.open("primary"), dir.open("standby"));
         writes(&*primary, 0);
         follow(&*primary, &*standby, 3);
         same(&*primary, &*standby, &what);
@@ -433,7 +412,7 @@ fn a_standby_that_applies_the_records_holds_the_same_store() {
 
         // Both open again where they stood.
         drop((primary, standby));
-        let (primary, standby) = (dir.open(p, "primary"), dir.open(s, "standby"));
+        let (primary, standby) = (dir.open("primary"), dir.open("standby"));
         same(&*primary, &*standby, &format!("{what}, reopened"));
         writes(&*primary, 2);
         follow(&*primary, &*standby, 7);
@@ -443,20 +422,21 @@ fn a_standby_that_applies_the_records_holds_the_same_store() {
 
 #[test]
 fn a_standby_takes_an_image_then_follows() {
-    for (p, s) in PAIRS {
+    {
+        let (p, s) = ("sqlite", "sqlite");
         let what = format!("{p:?} to {s:?}");
         let dir = Dir::new(&format!("image-{p:?}-{s:?}"));
-        // The primary wrote before its record log was on (SQLite): no standby can follow it
+        // The primary wrote before its record log was on: no standby can follow it
         // from the start.
-        let primary = dir.plain(p, "primary");
+        let primary = dir.plain("primary");
         writes(&*primary, 0);
         primary.keep_record_log(true).unwrap();
-        if let Sqlite = p {
+        {
             assert_eq!(primary.records_after(0, 10).unwrap(), None, "{what}");
         }
         writes(&*primary, 1);
 
-        let standby = dir.open(s, "standby");
+        let standby = dir.open("standby");
         let head = take_image(&*primary, &*standby);
         assert_eq!(standby.record_head().unwrap(), head, "{what}");
         same(&*primary, &*standby, &what);
@@ -465,7 +445,7 @@ fn a_standby_takes_an_image_then_follows() {
         same(&*primary, &*standby, &what);
 
         drop(standby);
-        let standby = dir.open(s, "standby");
+        let standby = dir.open("standby");
         writes(&*primary, 3);
         follow(&*primary, &*standby, 5);
         same(&*primary, &*standby, &format!("{what}, reopened"));
@@ -476,9 +456,10 @@ fn a_standby_takes_an_image_then_follows() {
 /// a worker; nothing of a refused write stays. Unsealed, it goes on from the same head.
 #[test]
 fn a_sealed_record_log_takes_no_record_more() {
-    for kind in [File, Sqlite] {
+    {
+        let kind = "sqlite";
         let dir = Dir::new(&format!("sealed-{kind:?}"));
-        let store = dir.open(kind, "primary");
+        let store = dir.open("primary");
         writes(&*store, 0);
         let head = store.record_head().unwrap();
         assert_eq!(store.seal_records(true).unwrap(), head, "{kind:?}");
@@ -523,10 +504,11 @@ fn a_sealed_record_log_takes_no_record_more() {
 
 #[test]
 fn records_that_do_not_continue_the_log_are_refused() {
-    for (p, s) in PAIRS {
+    {
+        let (p, s) = ("sqlite", "sqlite");
         let what = format!("{p:?} to {s:?}");
         let dir = Dir::new(&format!("refused-{p:?}-{s:?}"));
-        let (primary, standby) = (dir.open(p, "primary"), dir.open(s, "standby"));
+        let (primary, standby) = (dir.open("primary"), dir.open("standby"));
         writes(&*primary, 0);
         let records = primary.records_after(0, 1000).unwrap().unwrap();
         let refused = |records: &[ReplicatedRecord], why: &str| {
@@ -587,7 +569,7 @@ fn records_that_do_not_continue_the_log_are_refused() {
 #[test]
 fn a_pruned_or_restarted_sqlite_log_sends_a_standby_to_an_image() {
     let dir = Dir::new("pruned");
-    let primary = dir.open(Sqlite, "primary");
+    let primary = dir.open("primary");
     writes(&*primary, 0);
     let head = primary.record_head().unwrap();
     assert_eq!(
@@ -620,16 +602,16 @@ fn a_pruned_or_restarted_sqlite_log_sends_a_standby_to_an_image() {
 }
 
 #[test]
-fn the_file_log_finds_every_record_across_its_marks() {
+fn the_record_log_finds_every_record_after_reopening() {
     let dir = Dir::new("marks");
-    let primary = dir.open(File, "primary");
+    let primary = dir.open("primary");
     for i in 0..3000 {
         primary
             .save_listeners(&[listener("shop", i, i as i64)])
             .unwrap();
     }
     drop(primary);
-    let primary = dir.open(File, "primary");
+    let primary = dir.open("primary");
     let all = primary.records_after(0, 10_000).unwrap().unwrap();
     assert_eq!(all.len(), 3000);
     chained(&Head::default(), &all).unwrap();
@@ -672,9 +654,10 @@ fn tenant_ids(s: &dyn Store, after: Option<u64>) -> [Vec<String>; 3] {
 #[test]
 fn a_tenant_is_exported_whole_or_after_a_position() {
     let strings = |ids: &[&str]| ids.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-    for kind in [File, Sqlite] {
+    {
+        let kind = "sqlite";
         let dir = Dir::new(&format!("tenant-after-{kind:?}"));
-        let s = dir.open(kind, "s");
+        let s = dir.open("s");
         writes(s.as_ref(), 0); // events 1 to 4
         writes(s.as_ref(), 1); // events 5 to 8
         let [enqueued, committed, rejected] = tenant_ids(s.as_ref(), None);
@@ -718,7 +701,7 @@ fn a_tenant_is_exported_whole_or_after_a_position() {
         assert!(s.tenant_index("t2").unwrap().is_empty(), "{kind:?}");
 
         // Setting the tenant's index replaces it, on the standbys and their images too.
-        let standby = dir.open(kind, "standby");
+        let standby = dir.open("standby");
         let streams = vec![kernable_core::proto::StreamIndex {
             domain: "orders".into(),
             aggregate_type: "Order".into(),
@@ -738,7 +721,7 @@ fn a_tenant_is_exported_whole_or_after_a_position() {
             standby.as_ref(),
             &format!("{kind:?} after a tenant index"),
         );
-        let imaged = dir.open(kind, "imaged");
+        let imaged = dir.open("imaged");
         take_image(s.as_ref(), imaged.as_ref());
         assert_eq!(
             imaged.tenant_index("t1").unwrap(),
@@ -818,14 +801,15 @@ fn hot_writes(s: &dyn Store, round: u8) {
 /// and follows on from there (design/rewind.md).
 #[test]
 fn a_store_takes_back_its_newest_writes_and_follows_on() {
-    for kind in [Sqlite, File] {
+    {
+        let kind = "sqlite";
         rewinds(kind);
     }
 }
 
-fn rewinds(kind: Kind) {
+fn rewinds(kind: &str) {
     let dir = Dir::new(&format!("rewind-{kind:?}"));
-    let (primary, standby) = (dir.open(kind, "primary"), dir.open(kind, "standby"));
+    let (primary, standby) = (dir.open("primary"), dir.open("standby"));
     writes(&*primary, 0);
     follow(&*primary, &*standby, 1000);
     same(&*primary, &*standby, "before");
@@ -852,9 +836,9 @@ fn rewinds(kind: Kind) {
     follow(&*primary, &*standby, 1000);
     same(&*primary, &*standby, "after");
 
-    // Acknowledged, nothing is to be taken back (SQLite; the file log keeps every record):
+    // Acknowledged, nothing is to be taken back:
     // only the head is a point.
-    if let Sqlite = kind {
+    {
         primary
             .forget_undo(primary.record_head().unwrap().seq)
             .unwrap();
@@ -870,7 +854,7 @@ fn rewinds(kind: Kind) {
 #[test]
 fn a_rewind_stops_before_a_write_it_cannot_take_back() {
     let dir = Dir::new("rewind-stop");
-    let primary = dir.open(Sqlite, "primary");
+    let primary = dir.open("primary");
     writes(&*primary, 0);
     primary
         .forget_undo(primary.record_head().unwrap().seq)

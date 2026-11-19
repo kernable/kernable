@@ -25,10 +25,7 @@ use kernable_store::invariants::Log;
 use prost::Message;
 
 fn store(dir: &Path, name: &str) -> String {
-    match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => format!("file:{}", dir.join(format!("{name}.log")).display()),
-        _ => format!("sqlite:{}", dir.join(format!("{name}.db")).display()),
-    }
+    format!("sqlite:{}", dir.join(format!("{name}.db")).display())
 }
 
 fn sock(dir: &Path, name: &str) -> String {
@@ -130,9 +127,6 @@ async fn crash_and_recover(point: &str, round: u32) {
     std::fs::write(dir.join("standby.grant"), hex(&grant.encode_to_vec())).unwrap();
     let imaging = point == "standby.imaging";
     if imaging {
-        if store(&dir, "p").starts_with("file:") {
-            return; // a file log's standby follows from the start: no image
-        }
         // Written before replication was on: the standby needs an image.
         let s = kernable_store::open(&store(&dir, "p")).unwrap();
         for i in 0..40 {

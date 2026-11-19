@@ -35,10 +35,7 @@ use tonic::Code;
 fn config(dir: &Path, name: &str, kernel_seed: u8) -> Config {
     let kernel_key = dir.join(format!("{name}-kernel.key"));
     std::fs::write(&kernel_key, hex(key(kernel_seed).as_bytes())).unwrap();
-    let store = match std::env::var("KERNABLE_TEST_STORE").as_deref() {
-        Ok("file") => format!("file:{}", dir.join(format!("{name}.log")).display()),
-        _ => format!("sqlite:{}", dir.join(format!("{name}.db")).display()),
-    };
+    let store = format!("sqlite:{}", dir.join(format!("{name}.db")).display());
     Config {
         roots: vec![id(&root())],
         store,

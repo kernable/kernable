@@ -326,10 +326,10 @@ impl FileData {
         file.sync_all()?;
         fs::rename(&partial, path)?;
         // The rename, and the directories created for it, survive a power loss.
-        crate::file::sync_directory(path)?;
+        sync_directory(path)?;
         if created {
-            crate::file::sync_directory(dir)?;
-            crate::file::sync_directory(dir.parent().expect("has a directory"))?;
+            sync_directory(dir)?;
+            sync_directory(dir.parent().expect("has a directory"))?;
         }
         Ok(())
     }
@@ -485,7 +485,7 @@ impl DataStore for FileData {
             Err(e) => return Err(e.into()),
         }
         fs::remove_dir_all(&dir)?;
-        crate::file::sync_directory(&dir)?;
+        sync_directory(&dir)?;
         Ok(count)
     }
 
@@ -546,4 +546,19 @@ impl DataStore for FileData {
         }
         Ok(files)
     }
+}
+
+/// Syncs the directory holding `path`, so a newly created file is found after a power loss.
+fn sync_directory(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => std::path::Path::new("."),
+        };
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }

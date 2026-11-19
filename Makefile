@@ -18,33 +18,27 @@ test: py
 check: check-rust check-crash check-sdks check-docs
 
 # Rust: format, known vulnerable dependencies (cargo install cargo-audit; .cargo/audit.toml),
-# lints, and every test on both storage backends.
+# lints, and every test.
 check-rust: prune
 	cargo fmt --all --check
 	cargo audit -q
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
-	KERNABLE_TEST_STORE=file cargo test --workspace --lib --tests
 
-# The real kernel aborted at every crash point (--features crash-points), on both backends.
+# The real kernel aborted at every crash point (--features crash-points).
 check-crash: prune
 	CARGO_TARGET_DIR=target/crash cargo clippy -p kernable-kernel --all-targets --features crash-points -- -D warnings
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test crashes
-	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test replication_crashes
-	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test replication_crashes
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test move_crashes
-	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test move_crashes
 
-# The TypeScript and Python SDKs against a real kernel, on both backends; then the kits' tests
+# The TypeScript and Python SDKs against a real kernel; then the kits' tests
 # that need a kernel (the TypeScript kit's `npm run check`, the Python kit's tests/e2e_*.py).
 check-sdks: prune py
 	cargo build --workspace
 	cargo test -p kernable-kit --test e2e -- --ignored
-	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check \
-		&& KERNABLE_TEST_STORE=file npm run -s check
-	cd sdks/python && .venv/bin/python -m unittest discover tests \
-		&& KERNABLE_TEST_STORE=file .venv/bin/python -m unittest discover tests
+	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check
+	cd sdks/python && .venv/bin/python -m unittest discover tests
 	cd kits/typescript && npm install --no-audit --no-fund --silent && npm run -s check
 	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t . -p 'e2e_*.py'
 
@@ -80,19 +74,13 @@ MODEL_SEEDS ?= 100
 CASES ?= 10000
 torture:
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --features crash-points --test crashes
-	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) cargo test -p kernable-kernel --features crash-points --test replication_crashes
-	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test replication_crashes
 	KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --test replication_kills
-	KERNABLE_KILLS=$(KILLS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test replication_kills
 	KERNABLE_FAULT_SEEDS=$(SEEDS) cargo test -p kernable-kernel --test storage
-	KERNABLE_FAULT_SEEDS=$(SEEDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test storage
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-store --test props
 	KERNABLE_MODEL_SEEDS=$(MODEL_SEEDS) KERNABLE_MODEL_STEPS=300 cargo test -p kernable-kernel --test model
-	KERNABLE_MODEL_SEEDS=$(MODEL_SEEDS) KERNABLE_MODEL_STEPS=300 KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test model
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-core --test layouts
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-kernel --test props
-	PROPTEST_CASES=$(CASES) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test props
 
 # The soak: the kernel and an app per SDK under load and random faults for SOAK_MINUTES, every
 # invariant checked every 10 minutes (crates/kernable-soak; more options in its main.rs).
@@ -109,7 +97,7 @@ soak: py
 # Findings land in fuzz/artifacts/<target>; add them to fuzz/seeds/<target> once fixed.
 FUZZ_SECONDS ?= 300
 fuzz:
-	cd fuzz && for t in file_log log_records messages config grants http registrations store_files; do \
+	cd fuzz && for t in messages config grants http registrations store_files; do \
 		mkdir -p corpus/$$t seeds/$$t && \
 		cargo +nightly fuzz run $$t corpus/$$t seeds/$$t -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
 	done

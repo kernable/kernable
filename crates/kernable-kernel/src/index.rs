@@ -382,7 +382,7 @@ pub(crate) fn validate(r: &kernable_core::proto::Result) -> Result<(), Rejected>
 #[cfg(test)]
 mod tests {
     use kernable_core::proto::{Command, NewEvent, Signature};
-    use kernable_store::FileStore;
+    use kernable_store::SqliteStore;
 
     use super::*;
 
@@ -396,7 +396,7 @@ mod tests {
     }
 
     /// Commits `index` as the first event of `id`'s stream.
-    fn commit(store: &FileStore, id: &str, key: u8, fact: &str) {
+    fn commit(store: &SqliteStore, id: &str, key: u8, fact: &str) {
         let cmd = Command {
             command_id: format!("c-{id}"),
             tenant_id: "t1".into(),
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn an_evicted_aggregate_is_read_again_as_the_store_holds_it() {
-        let store = FileStore::in_memory();
+        let store = SqliteStore::open_in_memory().unwrap();
         for (n, id) in ["a", "b", "c"].into_iter().enumerate() {
             commit(&store, id, n as u8 + 1, "active");
         }
