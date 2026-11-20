@@ -1265,7 +1265,9 @@ async fn streams_end_once_their_copy_leaves_the_access_file() {
             .any(|l| l.contains(what) && l.contains("holds no copy shop.eu"))
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while !(ended("a push ended") && ended("a reader's stream ended")) {
+    // The reader may be between two streams as the copy leaves (just caught up, say): then its
+    // next stream is refused rather than ended; either way it gets nothing more.
+    while !(ended("a push ended") && (ended("a reader's stream ended") || ended("refused"))) {
         assert!(
             std::time::Instant::now() < deadline,
             "both streams end within 15 s:\n{}",
