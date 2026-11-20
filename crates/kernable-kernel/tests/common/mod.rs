@@ -229,10 +229,21 @@ pub fn free_addr() -> String {
     listener.local_addr().unwrap().to_string()
 }
 
-/// The raw HTTP response to `GET path` at `addr` (the metrics port).
+/// The raw HTTP response to `GET path` at `addr` (the metrics port). A kernel opens that port a
+/// moment after its socket: a refused connection is tried again, for up to 5 s.
 pub async fn get(addr: &str, path: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut tries = 0;
+    let mut conn = loop {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(conn) => break conn,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused && tries < 500 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(e) => panic!("GET {path} at {addr}: {e}"),
+        }
+    };
     conn.write_all(format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
         .await
         .unwrap();

@@ -35,6 +35,7 @@ for n in $(seq "$ROUNDS"); do
   run "workers" cargo test -q -p kernable-kernel --test workers || { echo "== failed in round $n"; exit 1; }
   run "limits" cargo test -q -p kernable-kernel --test limits || { echo "== failed in round $n"; exit 1; }
   run "queries" cargo test -q -p kernable-kernel --test queries || { echo "== failed in round $n"; exit 1; }
+  run "locks" cargo test -q -p kernable-kernel --test locks || { echo "== failed in round $n"; exit 1; }
   run "Rust kit end to end" cargo test -q -p kernable-kit --test e2e -- --ignored || { echo "== failed in round $n"; exit 1; }
   run "Python kit end to end" python_kit || { echo "== failed in round $n"; exit 1; }
   run "TypeScript kit" typescript_kit || { echo "== failed in round $n"; exit 1; }
