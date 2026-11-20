@@ -466,7 +466,11 @@ async fn the_status_file_says_how_far_the_backup_reached_and_what_its_check_foun
     }
     running.abort();
     let s = read();
-    assert_eq!(s.record, head);
+    // At least the head it was waited for; the kernel's head moves on with its checkpoints.
+    assert!(
+        s.record >= head && s.record <= env.kernel_head(),
+        "{s:?}, head {head}"
+    );
     assert!(
         s.uploaded_at > 0 && s.checked_at > 0 && s.current_at > 0,
         "{s:?}"

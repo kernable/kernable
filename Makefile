@@ -23,7 +23,10 @@ check:
 # lints, and every test: with cargo-nextest (cargo install cargo-nextest --locked; .config/nextest.toml),
 # each test in its own process and the test binaries side by side, then the doc tests, which
 # nextest does not run. RERUN=1 runs again only the tests that failed or did not finish last time.
-NEXTEST = NEXTEST_EXPERIMENTAL_RECORD=1 cargo nextest run --user-config-file .config/nextest-record.toml
+# The tests build in target/nextest: a test build links its own `kernable` (the store with its
+# `faults` feature), and in target/debug it would replace the kernel that the other parts of
+# `make check`, running side by side, start in the same moment.
+NEXTEST = CARGO_TARGET_DIR=$(CURDIR)/target/nextest NEXTEST_EXPERIMENTAL_RECORD=1 cargo nextest run --user-config-file .config/nextest-record.toml
 check-rust: prune
 	cargo fmt --all --check
 	cargo audit -q
@@ -54,7 +57,7 @@ check-sdks: prune py
 # in one language and driven through another's KitApi, every pair; every run's results, mails and
 # stored events must equal the TypeScript/TypeScript run's (kits/parity/README.md).
 parity: py
-	cargo build -p kernable-kernel
+	cargo build --workspace --bin kernable
 	cargo build -p kernable-kit --example parity
 	cd kits/typescript && npm install --no-audit --no-fund --silent
 	node kits/parity/scenario.ts
