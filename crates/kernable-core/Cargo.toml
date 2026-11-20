@@ -41,3 +41,4 @@ ed25519-dalek.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
+protox.workspace = true
