@@ -451,6 +451,9 @@ struct Copy {
     served: AtomicU64,
     /// Who is connected now, for `status.json`.
     who: Mutex<Who>,
+    /// Per reader key, the generation of the copy it followed last (since the relay started):
+    /// a reader of an older one that is ahead of the copy holds records of a copy that is gone.
+    followed: Mutex<HashMap<String, u64>>,
 }
 
 /// A copy's pusher and readers as they are connected now (`status.json`, every ten seconds):
@@ -676,6 +679,7 @@ impl Relay {
             pending: Mutex::default(),
             keys: Mutex::default(),
             who: Mutex::default(),
+            followed: Mutex::default(),
             served: AtomicU64::new(
                 std::fs::read_to_string(dir.join("served"))
                     .ok()
@@ -1243,8 +1247,19 @@ async fn follow(
             log.head.clone(),
         )
     };
+    let before = copy
+        .followed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&hello.key_id)
+        .copied();
     let mode = if hello.seq < base.seq {
         FollowMode::Image
+    } else if hello.seq > head.seq && before.is_some_and(|g| g < generation) {
+        // It followed this copy before it began anew: what it holds beyond the copy's head is
+        // of the copy that is gone (the new one is another writer's log, or it would have
+        // begun from an image at or past the reader). Waiting would wait for nothing.
+        FollowMode::Diverged
     } else if hello.seq > head.seq {
         // The reader followed the writer, or another relay, further than this copy holds.
         return Err(Status::unavailable(format!(
@@ -1267,6 +1282,14 @@ async fn follow(
         }
     };
     tracing::info!(copy = %copy.name, reader = %hello.key_id, from = hello.seq, mode = ?mode, "a reader follows");
+    // Told it diverged, it has not followed this generation: until it starts over, it is told
+    // so again.
+    if mode != FollowMode::Diverged {
+        copy.followed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(hello.key_id.clone(), generation);
+    }
     static STREAMS: AtomicU64 = AtomicU64::new(0);
     let stream = STREAMS.fetch_add(1, SeqCst);
     copy.who()
@@ -1278,6 +1301,11 @@ async fn follow(
         follow_response::Msg::Start(FollowStart {
             mode: mode.into(),
             message: match mode {
+                FollowMode::Diverged if hello.seq > head.seq => format!(
+                    "the copy began anew since the reader followed it: its records up to {} are of \
+                     the copy before",
+                    hello.seq
+                ),
                 FollowMode::Diverged => {
                     format!("the reader's record {} differs from the copy's", hello.seq)
                 }
@@ -1703,6 +1731,7 @@ mod tests {
                 keys: Mutex::default(),
                 served: AtomicU64::new(0),
                 who: Mutex::default(),
+                followed: Mutex::default(),
             }
         };
         copy.log().add(batch(1, 4)).unwrap();

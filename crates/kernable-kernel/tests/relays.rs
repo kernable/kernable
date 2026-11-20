@@ -331,6 +331,20 @@ async fn a_writer_whose_log_no_longer_continues_the_copy_empties_it() {
     )
     .await;
     assert_eq!(held(&new_reader), at, "and none of the first's");
+    // The first reader, further than the new copy reaches, holds records of the copy that is
+    // gone: it stops, and started again (as its supervisor does) it starts over from the new
+    // copy rather than wait for it to grow past them.
+    until("the first reader stopped", || {
+        Arc::strong_count(&old_reader) == 1
+    })
+    .await;
+    drop(old_reader);
+    let old_reader = start_reader(&old).await;
+    until_async(
+        "the first reader, started again, holds the second writer's records",
+        async || held(&old_reader) == at,
+    )
+    .await;
 }
 
 /// The writer as a process in `dir`, so its store can be changed between runs.
