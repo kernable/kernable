@@ -30,11 +30,14 @@ fn rename(text: &str, lib: &str) -> String {
     out
 }
 
-/// The kit's manifest for the copy: its own name, the SDK from crates.io at this version.
+/// The kit's manifest for the copy: its own name, the SDK from crates.io at this version, and
+/// what it took from kernable's workspace written out (the copy's project has no such workspace).
 fn manifest(text: &str, package: &str, lib: &str) -> String {
     text.lines()
         .map(|line| {
-            if line.starts_with("name = \"kernable-kit\"") {
+            if line.starts_with("license.workspace") {
+                "license = \"MIT\"".to_owned()
+            } else if line.starts_with("name = \"kernable-kit\"") {
                 format!("name = {package:?}")
             } else if line.starts_with("name = \"kit\"") {
                 format!("name = {lib:?}")
@@ -144,5 +147,19 @@ fn main() -> ExitCode {
             );
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_copied_manifest_stands_alone() {
+        let kit = include_str!("../../../../kits/rust/Cargo.toml");
+        let copy = manifest(kit, "kit", "kit");
+        assert!(!copy.contains(".workspace"), "{copy}");
+        assert!(copy.contains("license = \"MIT\""));
+        assert!(copy.contains(&format!("kernable-sdk = \"{VERSION}\"")));
     }
 }
