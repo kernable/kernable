@@ -13,7 +13,9 @@
 # stopped anywhere goes on where it stopped; logs in dist/<version>/logs/):
 #   preflight  main, clean, up to date with origin; the tag free
 #   version    the version in every manifest and lock file, committed
-#   tests      make check, make check-packages, make flaky (3 rounds), on this machine only
+#   tests      make check (its four parts side by side; after a failure, run again, only the
+#              parts that failed run), make check-packages, make flaky (3 rounds), on this
+#              machine only
 #   push       main and the annotated tag v<version> (its message: the summary)
 #   workflow   GitHub's release workflow (.github/workflows/release.yml): binaries and notes,
 #              then, after approval in the `release` environment, crates.io, npm, PyPI, the
@@ -145,10 +147,27 @@ PY
 
 step_tests() {
   [ "$(current)" = "$VERSION" ] || fail "the manifests say $(current)"
-  say "make check (logs in $LOGS)"
-  logged check make check
-  say "make check-packages"
-  logged check-packages make check-packages
+  # Each part that passed is noted (tests:<part>): run again after a fix, only the others run.
+  local part ok todo=()
+  for part in check-rust check-crash check-sdks check-docs; do
+    grep -qx "tests:$part" "$DONE" || todo+=("$part")
+  done
+  if [ ${#todo[@]} -gt 0 ]; then
+    say "make check: ${todo[*]} side by side (logs in $LOGS/check)"
+    rm -f "$LOGS"/check/*.status
+    ./scripts/check.sh --logs "$LOGS/check" "${todo[@]}" && ok=1 || ok=0
+    for part in "${todo[@]}"; do
+      if [ "$(cut -d' ' -f1 "$LOGS/check/$part.status" 2>/dev/null)" = 0 ]; then
+        echo "tests:$part" >>"$DONE"
+      fi
+    done
+    [ $ok = 1 ] || fail "make check failed: $(tr '\n' ' ' <"$LOGS/check/failed")(logs in $LOGS/check); run the release again for only those"
+  fi
+  if ! grep -qx tests:check-packages "$DONE"; then
+    say "make check-packages"
+    logged check-packages make check-packages
+    echo tests:check-packages >>"$DONE"
+  fi
   say "make flaky (3 rounds, every CPU busy)"
   logged flaky make flaky FLAKY=3
 }

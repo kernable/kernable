@@ -14,16 +14,23 @@ test: py
 	cd kits/typescript && npm install --no-audit --no-fund --silent && npm test
 	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t .
 
-# Everything, in four parts that CI runs as parallel jobs.
-check: check-rust check-crash check-sdks check-docs
+# Everything, in four parts that CI runs as parallel jobs and scripts/check.sh side by side here
+# (logs in target/check; after a failure it names the parts to run again).
+check:
+	./scripts/check.sh
 
 # Rust: format, known vulnerable dependencies (cargo install cargo-audit; .cargo/audit.toml),
-# lints, and every test.
+# lints, and every test: with cargo-nextest (cargo install cargo-nextest --locked; .config/nextest.toml),
+# each test in its own process and the test binaries side by side, then the doc tests, which
+# nextest does not run. RERUN=1 runs again only the tests that failed or did not finish last time.
+NEXTEST = NEXTEST_EXPERIMENTAL_RECORD=1 cargo nextest run --user-config-file .config/nextest-record.toml
 check-rust: prune
 	cargo fmt --all --check
 	cargo audit -q
 	cargo clippy --workspace --all-targets -- -D warnings
-	cargo test --workspace
+	cargo build -q --workspace --bin kernable
+	KERNABLE_TEST_KERNEL=$(CURDIR)/target/debug/kernable $(NEXTEST) --workspace --no-tests=pass $(if $(RERUN),--rerun latest)
+	$(if $(RERUN),,cargo test -q --workspace --doc)
 
 # The real kernel aborted at every crash point (--features crash-points).
 check-crash: prune

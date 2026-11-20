@@ -1,0 +1,9 @@
+# Passed to nextest by the Makefile (--user-config-file): records every run, the last 20, in
+# nextest's state directory (~/.local/state/nextest), so `make check-rust RERUN=1` runs again
+# only the tests that failed or did not finish last time.
+[experimental]
+record = true
+
+[record]
+enabled = true
+max-records = 20

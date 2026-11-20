@@ -11,7 +11,12 @@ use std::{
 use kernable::{Kernable, Options};
 
 /// The workspace's `kernable` binary, built once per test process so it matches the sources.
+/// The kernel: KERNABLE_TEST_KERNEL when set (`make check-rust` builds it once before nextest,
+/// which runs every test in a process of its own), else built here, once per test binary.
 fn binary() -> PathBuf {
+    if let Some(kernel) = std::env::var_os("KERNABLE_TEST_KERNEL") {
+        return PathBuf::from(kernel);
+    }
     static BUILD: Once = Once::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     BUILD.call_once(|| {

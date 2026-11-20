@@ -667,7 +667,11 @@ async fn queries_without_a_read_model_are_refused() {
     let kernel = TestKernel::new(&["shop.*"], &["--query-timeout-ms", "200"]);
     kernel.start().await;
     let kernable = kernel.client();
-    let answer: Result<serde_json::Value, _> = kernable.query(Query::new("shop", "GetCart")).await;
+    // No read model answers: the kernel says UNAVAILABLE, which the SDK asks again until the
+    // query's timeout (by default a minute).
+    let answer: Result<serde_json::Value, _> = kernable
+        .query(Query::new("shop", "GetCart").timeout(Duration::from_secs(1)))
+        .await;
     assert!(answer.is_err());
 }
 

@@ -14,7 +14,7 @@ Thank you for helping. Bug reports, documentation fixes and pull requests are al
 
 ## Build and test
 
-You need Rust through rustup (`rust-toolchain.toml` pins the version), Node.js 22.18 or newer and Python 3.10 or newer.
+You need Rust through rustup (`rust-toolchain.toml` pins the version), Node.js 22.18 or newer and Python 3.10 or newer; for `make check-rust` also `cargo install --locked cargo-audit cargo-nextest`.
 
 ```sh
 make test     # fmt, clippy and in-process tests (about a minute)

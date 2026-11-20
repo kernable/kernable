@@ -1,0 +1,11 @@
+# cargo nextest (make check-rust): each test in its own process, the test binaries side by side.
+[profile.default]
+# Every failure shown at once, not only the first.
+fail-fast = false
+# A test still running after 60 s is reported; after 10 minutes it is stopped as hung.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The longest tests first, so they do not run alone at the end.
+[[profile.default.overrides]]
+filter = 'test(=every_chapter_of_the_demo_shows_what_it_says) | test(=a_pair_under_seeded_kills_and_pauses_keeps_p1_to_p4) | test(=a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_lease) | test(=a_relay_ends_handshakes_that_do_not_finish_and_repeats_no_bad_names)'
+priority = 100

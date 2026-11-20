@@ -15,8 +15,10 @@ a stop the same command goes on where it stopped (`--from <step>` repeats from a
    `sdks/typescript/package.json`, `sdks/python/pyproject.toml` and the lock files, committed.
    Before 1.0 the protocol and the store formats stay version 1 and change in place (no
    migrations).
-3. **tests**: `make check`, `make check-packages` and `make flaky` (3 rounds), on this machine.
-   GitHub's CI runs the checks again on Linux.
+3. **tests**: `make check` (its four parts side by side, `scripts/check.sh`), `make
+   check-packages` and `make flaky` (3 rounds), on this machine. A part that passed is noted:
+   after a fix, the release run again repeats only the parts that failed (`--from tests` all of
+   them). GitHub's CI runs the checks again on Linux.
 4. **push**: main and the annotated tag `v<version>`; the summary is the tag's message.
 5. **workflow**: the tag starts `.github/workflows/release.yml`; the script prints where to approve
    and waits for it.
