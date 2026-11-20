@@ -143,6 +143,15 @@ PY
   [ "$changed" = "$want" ] || fail "the version change touched other files than expected: $changed"
   git -c user.email=artur.susdorf@gmail.com commit -q -am "$VERSION"
   echo "  committed $(git log --oneline -1)"
+  # The new number makes every build of the workspace's own crates new; the old ones would stay
+  # in target/ for ever. They go now, in every target directory; the dependencies' builds stay.
+  local packages t
+  packages=$(cargo metadata -q --no-deps --format-version 1 |
+    python3 -c 'import json, sys; print(" ".join("-p " + p["name"] for p in json.load(sys.stdin)["packages"]))')
+  for t in target target/nextest target/crash; do
+    [ -d "$t" ] && CARGO_TARGET_DIR="$ROOT/$t" cargo clean -q $packages
+  done
+  echo "  the workspace's builds of $was removed from target/ (dependencies kept)"
 }
 
 step_tests() {

@@ -131,10 +131,16 @@ fuzz:
 		cargo +nightly fuzz run $$t corpus/$$t seeds/$$t -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
 	done
 
-# Cargo never removes outdated build artifacts. A fresh build has about 40,000 files in
-# target/debug/deps; once it has grown far past that, every test binary starts slowly (the
-# directory is on their library search path), so start over.
+# Cargo never removes outdated build artifacts: every version, every feature set, every compiler
+# stays in target/ (it reached 97 GB and filled the disk). Start over when target/ holds more
+# than PRUNE_GB, or when a deps directory has grown far past a fresh build's 40,000 files (every
+# test binary then starts slowly: the directory is on their library search path).
+PRUNE_GB ?= 40
 PRUNE_FILES ?= 150000
 prune:
-	@n=$$(ls -f target/debug/deps 2>/dev/null | wc -l | tr -d " "); \
-	if [ "$$n" -gt $(PRUNE_FILES) ]; then echo "target/debug/deps has $$n files: cargo clean"; cargo clean; fi
+	@gb=$$(du -sk target 2>/dev/null | awk '{print int($$1 / 1048576)}'); \
+	if [ "$${gb:-0}" -gt $(PRUNE_GB) ]; then echo "target/ holds $$gb GB: cargo clean"; cargo clean; exit 0; fi; \
+	for d in target/debug/deps target/nextest/debug/deps; do \
+	  n=$$(ls -f $$d 2>/dev/null | wc -l | tr -d " "); \
+	  if [ "$$n" -gt $(PRUNE_FILES) ]; then echo "$$d has $$n files: cargo clean"; cargo clean; exit 0; fi; \
+	done
