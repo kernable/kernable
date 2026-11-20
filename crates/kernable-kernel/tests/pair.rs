@@ -23,6 +23,22 @@ use tokio::{net::UnixListener, sync::oneshot, task::JoinHandle};
 
 const LEASE_MS: u64 = 600;
 
+/// Grants key `seed` on the primary `kernel`. With a lease this short, a renewal late on a
+/// loaded machine fences a primary whose standby is not in sync yet, and its log is sealed
+/// for that moment: asked again, for up to 10 s.
+async fn grant_eventually(kernel: &Kernel, seed: u8) {
+    for _ in 0..200 {
+        match kernel.grant(default_grant(&key(seed)).unwrap()) {
+            Ok(()) => return,
+            Err(e) if e.code() == tonic::Code::Unavailable => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    panic!("the primary stayed sealed for 10 s");
+}
+
 /// A socket in front of a kernel's: cut, every connection through it ends, as when the
 /// kernel's machine is gone.
 struct Plug {
@@ -257,7 +273,7 @@ async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_stan
     let a = a_primary.await.unwrap();
     let (_b_task, b_primary) = run_node(b_config.clone());
     for seed in [1, 2] {
-        a.grant(default_grant(&key(seed)).unwrap()).unwrap();
+        grant_eventually(&a, seed).await;
     }
     until("the witness knows B is in sync", || {
         witnessed().in_sync == id(&key(12))
@@ -375,7 +391,7 @@ async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
     let a = primary.await.unwrap();
     // No standby: after --standby-timeout-ms the primary commits alone.
     for seed in [1, 2] {
-        a.grant(default_grant(&key(seed)).unwrap()).unwrap();
+        grant_eventually(&a, seed).await;
     }
     // Tried again until registered, as an SDK's worker does: a lease renewed late under load
     // fences the primary for a moment, and a registration then is refused.
@@ -556,7 +572,7 @@ async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease(
     let a = a_primary.await.unwrap();
     let (_b_task, b_primary) = run_node(b_config.clone());
     for seed in [1, 2] {
-        a.grant(default_grant(&key(seed)).unwrap()).unwrap();
+        grant_eventually(&a, seed).await;
     }
     until("the witness knows B is in sync", || {
         witnessed().in_sync == id(&key(12))
@@ -648,7 +664,7 @@ async fn a_standby_takes_over_from_a_primary_the_network_cut_off_silently() {
     route_witness(&dir.0, "b-witness.sock");
     let (_b_task, b_primary) = run_node(b_config.clone());
     for seed in [1, 2] {
-        a.grant(default_grant(&key(seed)).unwrap()).unwrap();
+        grant_eventually(&a, seed).await;
     }
     let witnessed = || {
         Witness::open(&state, Duration::from_millis(LEASE_MS))

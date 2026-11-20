@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The tests that depend on timing, <rounds> times each, with every CPU kept busy meanwhile as on a
-# loaded CI machine (`make flaky`; on Linux: scripts/check-linux.sh flaky). Stops at the first
+# loaded CI machine (`make flaky`). Stops at the first
 # failure. Expects `make py` and the workspace built.
 #
 #   scripts/flaky.sh [<rounds>]     (default 5)
@@ -37,6 +37,7 @@ for n in $(seq "$ROUNDS"); do
   run "queries" cargo test -q -p kernable-kernel --test queries || { echo "== failed in round $n"; exit 1; }
   run "locks" cargo test -q -p kernable-kernel --test locks || { echo "== failed in round $n"; exit 1; }
   run "relays" cargo test -q -p kernable-kernel --test relays || { echo "== failed in round $n"; exit 1; }
+  run "pair" cargo test -q -p kernable-kernel --test pair || { echo "== failed in round $n"; exit 1; }
   run "Rust kit end to end" cargo test -q -p kernable-kit --test e2e -- --ignored || { echo "== failed in round $n"; exit 1; }
   run "Python kit end to end" python_kit || { echo "== failed in round $n"; exit 1; }
   run "TypeScript kit" typescript_kit || { echo "== failed in round $n"; exit 1; }

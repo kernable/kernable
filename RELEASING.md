@@ -4,20 +4,19 @@ One command releases a version. Running it is the decision to release; nothing e
 
     scripts/release.sh <version> [--summary "<what this release brings, in a sentence or two>"]
 
-Here, on our own machines: the version, every check, the tag. On GitHub, after one approval:
+On this machine: the version, every check, the tag. On GitHub, after one approval:
 the build, the registries, the release, the downloads, the docs. Last, here and on GitHub: the
 release checked as a user gets it. A step that held is noted in `dist/<version>/.done`, so after
 a stop the same command goes on where it stopped (`--from <step>` repeats from a step on). Logs:
 `dist/<version>/logs/`.
 
-1. **preflight**: on main, nothing uncommitted, up to date with origin, the tag free, the Linux
-   server reachable.
+1. **preflight**: on main, nothing uncommitted, up to date with origin, the tag free.
 2. **version**: the number in `Cargo.toml`, `kits/rust`, `sdks/rust` (the `=` pins),
    `sdks/typescript/package.json`, `sdks/python/pyproject.toml` and the lock files, committed.
    Before 1.0 the protocol and the store formats stay version 1 and change in place (no
    migrations).
-3. **tests**: `make check` here and on the Linux server side by side, `make check-packages`, and
-   `make flaky` on Linux (`scripts/check-linux.sh`). GitHub's CI only adds to these.
+3. **tests**: `make check`, `make check-packages` and `make flaky` (3 rounds), on this machine.
+   GitHub's CI runs the checks again on Linux.
 4. **push**: main and the annotated tag `v<version>`; the summary is the tag's message.
 5. **workflow**: the tag starts `.github/workflows/release.yml`; the script prints where to approve
    and waits for it.
@@ -38,7 +37,7 @@ a stop the same command goes on where it stopped (`--from <step>` repeats from a
    - Last, `scripts/verify-release.sh` on a Linux and a macOS runner.
    A part already done is skipped (a version a registry has, a release that exists), so failed
    jobs can be re-run there; then `--from workflow`.
-6. **verify**: `scripts/verify-release.sh <version>` here and on the Linux server: `install.sh`,
+6. **verify**: `scripts/verify-release.sh <version>` on this machine: `install.sh`,
    the SDKs from npm, PyPI and crates.io in fresh projects (imported, their kits copied out, the
    Rust one built), the GitHub release with its files.
 

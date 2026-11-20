@@ -1,7 +1,7 @@
 name: Release
 
-# Releases a version tag (v0.2.1), which scripts/release.sh pushes once every check held on our
-# own machines. First, without publishing anything: the binaries (scripts/build-binaries.sh, as
+# Releases a version tag (v0.2.1), which scripts/release.sh pushes once every check held on the
+# developer's machine. First, without publishing anything: the binaries (scripts/build-binaries.sh, as
 # a local build makes them) and the release notes (scripts/release-notes.py). Then, after one
 # approval in the `release` environment, side by side: the Rust crates to crates.io,
 # @kernable/sdk to npm, kernable-sdk to PyPI (Trusted Publishing: no tokens), the GitHub release
@@ -303,7 +303,4 @@ jobs:
         with:
           node-version: "22"
       - run: rustup toolchain install stable --profile minimal
-      # LINUX empty: the Linux runner is the Linux machine itself.
       - run: scripts/verify-release.sh "${{ needs.version.outputs.version }}"
-        env:
-          LINUX: ""

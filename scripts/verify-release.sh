@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Checks a published release as a user gets it, outside this repository: the binary from
-# install.sh on this machine and on the Linux server, the SDKs from npm, PyPI and crates.io
-# (installed into fresh projects, imported, their kit copied out), and the GitHub release.
-# scripts/release.sh runs it last; it can run on its own any time.
+# install.sh on this machine, the SDKs from npm, PyPI and crates.io (installed into fresh
+# projects, imported, their kit copied out), and the GitHub release. GitHub's release workflow
+# runs it on a Linux and a macOS runner, scripts/release.sh on this machine; it can run on its
+# own any time.
 #
 #   scripts/verify-release.sh <version>
-#   LINUX=root@<host>    the Linux machine (default: ~/.config/kernable/check-linux.server)
 #
 # A registry may show a new version some minutes late (npm stages it): each is asked again for
 # up to 15 minutes.
@@ -13,8 +13,6 @@ set -euo pipefail
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 VERSION=${1:?usage: scripts/verify-release.sh <version>}
 SITE=https://kernable.com
-CONFIG=$HOME/.config/kernable/check-linux.server
-LINUX=${LINUX:-$([ -f "$CONFIG" ] && tr -d '[:space:]' < "$CONFIG")}
 DIR=$(mktemp -d /tmp/kv-XXXX)
 trap 'rm -rf "$DIR"' EXIT
 cd "$DIR"
@@ -41,14 +39,6 @@ ok "download/latest is $VERSION"
 curl -fsSL "$SITE/install.sh" | KERNABLE_INSTALL="$DIR/bin" sh >/dev/null
 "$DIR/bin/kernable" --version | grep -q "$VERSION" || fail "install.sh installed $("$DIR/bin/kernable" --version)"
 ok "install.sh on $(uname -sm)"
-
-if [ -n "$LINUX" ]; then
-  got=$(ssh -o BatchMode=yes "$LINUX" "t=\$(mktemp -d) && curl -fsSL $SITE/install.sh | KERNABLE_INSTALL=\$t sh >/dev/null && \$t/kernable --version; rm -rf \$t")
-  echo "$got" | grep -q "$VERSION" || fail "install.sh on Linux installed: $got"
-  ok "install.sh on Linux ($LINUX)"
-else
-  echo "  --  install.sh on Linux skipped: no LINUX and no $CONFIG"
-fi
 
 eventually "@kernable/sdk@$VERSION on npm" npm view "@kernable/sdk@$VERSION" version
 mkdir npm && (cd npm && npm init -y >/dev/null && npm pkg set type=module \

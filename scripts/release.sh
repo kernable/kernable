@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Releases kernable <version>: here the version, every check and the tag; then GitHub's release
+# Releases kernable <version>: on this machine the version, every check and the tag; then GitHub's release
 # workflow builds, publishes and deploys it after one approval; last, the release is checked as
 # a user gets it. Running it is the decision to release. See RELEASING.md.
 #
@@ -11,15 +11,15 @@
 #
 # Steps (one that held is noted in dist/<version>/.done and skipped next time, so a release
 # stopped anywhere goes on where it stopped; logs in dist/<version>/logs/):
-#   preflight  main, clean, up to date with origin; the tag free; the Linux server reachable
+#   preflight  main, clean, up to date with origin; the tag free
 #   version    the version in every manifest and lock file, committed
-#   tests      make check here and on Linux side by side, make check-packages, make flaky on Linux
+#   tests      make check, make check-packages, make flaky (3 rounds), on this machine only
 #   push       main and the annotated tag v<version> (its message: the summary)
 #   workflow   GitHub's release workflow (.github/workflows/release.yml): binaries and notes,
 #              then, after approval in the `release` environment, crates.io, npm, PyPI, the
 #              GitHub release, the downloads and the docs on kernable.com, and its own check on
 #              Linux and macOS. This waits for it and prints where to approve.
-#   verify     scripts/verify-release.sh here and on the Linux server
+#   verify     scripts/verify-release.sh on this machine (GitHub's workflow checked Linux)
 # With --local, instead of workflow: binaries, notes, publish, downloads, github, docs.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -48,7 +48,6 @@ DONE=$DIST/.done
 LOGS=$DIST/logs
 REPO=kernable/kernable
 CONF=$HOME/.config/kernable
-LINUX=$(tr -d '[:space:]' < "$CONF/check-linux.server" 2>/dev/null || true)
 KEY=$CONF/release-deploy
 RSYNC=$(command -v /opt/homebrew/bin/rsync /usr/local/bin/rsync 2>/dev/null | head -1 || true)
 SITE_REPO=${SITE_REPO:-$ROOT/../kernable.com}
@@ -85,8 +84,6 @@ step_preflight() {
   ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || fail "the tag $TAG exists already"
   echo "  last release $(git describe --tags --abbrev=0 2>/dev/null || echo none), this one $VERSION"
   gh auth status >/dev/null 2>&1 || fail "gh is not logged in"
-  [ -n "$LINUX" ] || fail "no $CONF/check-linux.server (root@<address> of the Linux test machine)"
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$LINUX" true || fail "cannot reach $LINUX"
   if [ $LOCAL = 1 ]; then
     command -v cargo-zigbuild >/dev/null || fail "cargo zigbuild is missing (cargo install cargo-zigbuild)"
     [ -n "$RSYNC" ] || fail "GNU rsync is missing (brew install rsync): kernable.com refuses openrsync"
@@ -148,17 +145,12 @@ PY
 
 step_tests() {
   [ "$(current)" = "$VERSION" ] || fail "the manifests say $(current)"
-  say "make check on Linux and make check here, side by side (logs in $LOGS)"
-  "$ROOT/scripts/check-linux.sh" check >"$LOGS/check-linux.log" 2>&1 &
-  local linux=$! mac=0 lin=0
-  make check >"$LOGS/check.log" 2>&1 || mac=$?
-  wait $linux || lin=$?
-  [ $mac = 0 ] || { tail -40 "$LOGS/check.log"; fail "make check failed here ($LOGS/check.log)"; }
-  [ $lin = 0 ] || { tail -40 "$LOGS/check-linux.log"; fail "make check failed on Linux ($LOGS/check-linux.log)"; }
+  say "make check (logs in $LOGS)"
+  logged check make check
   say "make check-packages"
   logged check-packages make check-packages
-  say "make flaky on Linux (3 rounds, every CPU busy)"
-  logged flaky-linux env FLAKY=3 "$ROOT/scripts/check-linux.sh" flaky
+  say "make flaky (3 rounds, every CPU busy)"
+  logged flaky make flaky FLAKY=3
 }
 
 step_push() {
@@ -297,7 +289,7 @@ step_docs() {
 }
 
 step_verify() {
-  LINUX=$LINUX "$ROOT/scripts/verify-release.sh" "$VERSION" 2>&1 | tee "$LOGS/verify.log"
+  "$ROOT/scripts/verify-release.sh" "$VERSION" 2>&1 | tee "$LOGS/verify.log"
   [ "${PIPESTATUS[0]}" = 0 ] || fail "the release does not hold as a user gets it ($LOGS/verify.log)"
 }
 
