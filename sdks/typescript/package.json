@@ -41,7 +41,7 @@
     "prepack": "npm run build",
     "postpack": "rm -rf dist proto kit",
     "test": "tsc && node --test test/unit/*.test.ts",
-    "check": "tsc && KERNABLE_LOG=${KERNABLE_LOG:-warn} node --test test/unit/*.test.ts test/*.test.ts ../../examples/shop/*.test.ts"
+    "check": "tsc && KERNABLE_LOG=${KERNABLE_LOG:-warn} node --test test/unit/*.test.ts test/*.test.ts"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.6",

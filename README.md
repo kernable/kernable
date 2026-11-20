@@ -79,8 +79,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `crates/kernable-soak` | The soak: the kernel and an app per SDK under load and random faults (`make soak`) |
 | `sdks/typescript`, `sdks/python`, `sdks/rust` | The SDKs |
 | `kits/` | The kits in TypeScript, Python and Rust, and the fixtures all three are tested against |
-| `examples/shop` | Reference application: identity in Python, orders and an HTTP API in TypeScript, with kill tests |
-| `docs/` | The documentation site and its runnable examples |
+| `docs/` | The documentation site and its runnable examples (the tutorial's shop in three languages, tested as written) |
 | `fuzz/` | Fuzz targets (cargo-fuzz) |
 | `design/` | Design notes: decisions and the reasons behind them, for contributors |
 | `scripts/` | The install script, release builds, the package check and the soak on a server |
@@ -120,6 +119,6 @@ security issues privately, as [SECURITY.md](.github/SECURITY.md) describes.
 
 ## License
 
-kernable is open source under the [MIT license](LICENSE): the kernel, the store, the tools, the SDKs, the kits and the examples.
+kernable is open source under the [MIT license](LICENSE): the kernel, the store, the tools, the SDKs, the kits and the documentation's examples.
 
 "kernable" and "kernable Cloud" are trademarks of kernable (proprietor: Artur Susdorf); the license grants no rights to the names.

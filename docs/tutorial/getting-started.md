@@ -249,14 +249,6 @@ kernable · shop 1.0.0
   ready in 12 ms
 ```
 
-## 7. The reference application
-
-`examples/shop` is a two-domain shop. The `identity` domain is written in Python, the `orders` domain and the HTTP API in TypeScript. A reactor confirms orders using the other domain's read model. Its acceptance tests run everything over TCP with mutual TLS and kill each process once:
-
-```sh
-make check            # all tests, including examples/shop/shop.test.ts
-```
-
 ## Keys and grants
 
 Every process signs what it sends with its own Ed25519 key, so the kernel and `kernable verify` know who sent every command and event. A signature proves who sent a message, but anyone can make a key. So the kernel trusts one **root key**, and the root key **grants** each key what it may do: which commands it may submit or run, which events it may read, which queries it may ask or answer.
@@ -273,6 +265,7 @@ kernable start --root root.pub
 
 ## Where to go next
 
+- [Build a shop](./shop/) builds an application step by step, in TypeScript, Python and Rust: commands, read models, reactors, an HTTP API with sign-in, operations and a business process. Every part runs as written in the tests (`make check`), in each language and mixed, and with each process killed once.
 - The [reference](../reference/) covers every [kernel flag](../reference/configuration), the [CLI](../reference/cli) (also `kernable certs new` for mutual TLS), the SDKs, [metrics](../reference/metrics), the [protocol](../reference/protocol) and the exact [signed byte layouts](../reference/signing), with test vectors to write an SDK for another language.
 - Rules worth knowing:
   - **Command handlers must be deterministic.** Use `ctx.now()` and `ctx.id()`.

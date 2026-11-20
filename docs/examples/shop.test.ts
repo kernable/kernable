@@ -4,12 +4,14 @@
 
 import assert from "node:assert/strict";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { Kernable } from "@kernable/sdk";
+import { Kernable, type StoredEvent } from "@kernable/sdk";
 
 import { TestKernel, freePort } from "../../sdks/typescript/test/kernel.ts";
+import { shopDomain } from "./shop/ts/domain.ts";
 
 const HERE = new URL("./shop/", import.meta.url).pathname;
 const ROOT = new URL("../../", import.meta.url).pathname;
@@ -119,6 +121,93 @@ test("part 5: the same shop with every process in any language", async () => {
   await run(4, { worker: "py", "read-models": "ts", confirmations: "rs" }, "ts");
   await run(4, { worker: "rs", "read-models": "py", confirmations: "ts" }, "py");
   await run(4, { worker: "ts", "read-models": "rs", confirmations: "py" }, "rs");
+});
+
+/**
+ * Part 4's shop, one process per language, and `kill -9` of each process and of the kernel in
+ * turn, with orders before and after each: every order is confirmed exactly once, each
+ * confirmation names its submit as its cause, and the log verifies.
+ */
+test("kill -9 of each process and of the kernel loses and duplicates nothing", async () => {
+  const kernel = new TestKernel(["shop.*"], [], { metrics: true });
+  await kernel.start();
+  const env = { ...ENV, KERNABLE_URL: kernel.url };
+  const langs: Record<string, Lang> = { worker: "py", "read-models": "ts", confirmations: "rs" };
+  const running = new Map<string, ChildProcess>();
+  const start = (name: string) => {
+    const [cmd, args] = command(langs[name], name);
+    running.set(name, spawn(cmd, args, { cwd: kernel.dir, env, stdio: ["ignore", "ignore", "inherit"] }));
+  };
+  const kill = async (name: string) => {
+    const p = running.get(name)!;
+    p.kill("SIGKILL");
+    if (p.exitCode === null && p.signalCode === null) await once(p, "exit");
+  };
+  const metrics = () => fetch(kernel.metricsUrl!).then((r) => r.text(), () => "");
+  const up = async () => {
+    const ok = (m: string) => m.includes("kernable_worker_sessions 1") && ["customers", "orders", "confirmations"].every((l) => m.includes(`kernable_listener_connected{listener="${l}"} 1`));
+    for (let i = 0; i < 1000 && !ok(await metrics()); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(ok(await metrics()), "every process connected");
+  };
+  let client = new Kernable({ url: kernel.url, key: kernel.appKey });
+  let n = 0;
+  const order = async () => {
+    n++;
+    const send = (aggregateType: string, aggregateId: string, type: string, data?: object) =>
+      client.submit({ domain: "shop", aggregateType, aggregateId, type, data, id: `${type}-${aggregateId}-${n}` });
+    await send("customer", `c${n}`, "Register", { email: `c${n}@example.com`, name: `C${n}` });
+    await send("order", `o${n}`, "Place", { customerId: `c${n}` });
+    await send("order", `o${n}`, "AddItem", { sku: "apple", qty: n });
+    await send("order", `o${n}`, "Submit");
+  };
+  try {
+    for (const name of Object.keys(langs)) start(name);
+    await up();
+    for (const victim of ["worker", "read-models", "confirmations", "kernel"]) {
+      await order();
+      if (victim === "kernel") {
+        client.close();
+        await kernel.kill("SIGKILL");
+        await kernel.start();
+        client = new Kernable({ url: kernel.url, key: kernel.appKey });
+      } else {
+        await kill(victim);
+        start(victim);
+      }
+      await up();
+      await order();
+    }
+
+    for (let i = 1; i <= n; i++) {
+      const row = await client.query<{ status: string; items: Record<string, number> }>({ domain: "shop", type: "GetOrder", data: { id: `o${i}` } });
+      assert.equal(row.status, "confirmed", `o${i}`);
+      assert.deepEqual(row.items, { apple: i });
+    }
+    // The log, read again from the start by a new listener.
+    const events: StoredEvent[] = [];
+    const replay = shopDomain.readModel("replay");
+    for (const type of ["OrderSubmitted", "OrderConfirmed"]) replay.on(type, (data, evt, ctx) => void events.push({ ...evt, data, request: ctx.request }));
+    const reader = client.listener(replay);
+    const reading = reader.run();
+    for (let i = 0; i < 500 && events.filter((e) => e.type === "OrderConfirmed").length < n; i++) await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 200));
+    reader.stop();
+    await reading;
+    const confirmed = events.filter((e) => e.type === "OrderConfirmed");
+    assert.deepEqual(confirmed.map((e) => e.aggregateId).sort(), Array.from({ length: n }, (_, i) => `o${i + 1}`).sort());
+    for (const c of confirmed) {
+      const submitted = events.find((e) => e.type === "OrderSubmitted" && e.aggregateId === c.aggregateId)!;
+      assert.equal(c.request.causationId, submitted.commandId);
+      assert.equal(c.request.correlationId, submitted.request.correlationId);
+    }
+    assert.match(kernel.verify(), /\nOK\n$/);
+    const m = await metrics();
+    for (const l of ["customers", "orders", "confirmations"]) assert.match(m, new RegExp(`^kernable_listener_lag\\{listener="${l}"\\} 0$`, "m"));
+  } finally {
+    for (const p of running.values()) p.kill("SIGKILL");
+    client.close();
+    await kernel.dispose();
+  }
 });
 
 /** The keys each process of the production shop uses (part 8). */
