@@ -1,46 +1,46 @@
 #!/usr/bin/env bash
-# Releases kernable <version>, from the version number to a verified release, in steps that each
-# hold before the next one starts. Running it is the decision to release. See RELEASING.md.
+# Releases kernable <version>: here the version, every check and the tag; then GitHub's release
+# workflow builds, publishes and deploys it after one approval; last, the release is checked as
+# a user gets it. Running it is the decision to release. See RELEASING.md.
 #
-#   scripts/release.sh <version>                 all steps not done yet for <version>
-#   scripts/release.sh <version> --from <step>   again from <step> on (the ones before stay done)
-#   scripts/release.sh <version> --tokens        publish the SDKs from here with the tokens in
-#                                                ~/.config/kernable/{crates,npm,pypi}.token
-#                                                instead of GitHub's release workflow
+#   scripts/release.sh <version> [--summary "<text>"]   the release; the summary starts its notes
+#   scripts/release.sh <version> --from <step>          again from <step> on
+#   scripts/release.sh <version> --local                everything from this machine, without
+#                                                       GitHub's workflow (the fallback): tokens
+#                                                       in ~/.config/kernable/{crates,npm,pypi}.token
 #
-# Steps (a step that held is noted in dist/<version>/.done and skipped on the next run, so a
-# release stopped anywhere goes on where it stopped):
-#   preflight  main, clean, up to date with origin; the tag free; the servers reachable
-#   version    the version in every manifest and lock file, committed (not pushed)
-#   tests      make check and make check-packages here, make check and make flaky on Linux
-#   binaries   scripts/build-binaries.sh: four archives and SHA256SUMS in dist/<version>/
-#   notes      dist/<version>/NOTES.md, the release text: when missing, drafted from the commits
-#              since the last tag, and the script stops for it to be edited; the next run takes
-#              it as it is (written beforehand, it is taken at once)
-#   push       main and the tag v<version> to origin
-#   publish    GitHub's release workflow publishes crates.io, npm and PyPI (Trusted Publishing,
-#              no tokens): it waits for approval in the `release` environment; this waits for it
-#   downloads  the archives to kernable.com/download/<version>/, then download/latest
-#   github     the GitHub release: NOTES.md, the archives, SHA256SUMS
-#   docs       the documentation on kernable.com (make deploy-docs in ../kernable.com)
-#   verify     scripts/verify-release.sh: everything as a user gets it
-#
-# Servers, never in this repository: ~/.config/kernable/site.server (kernable.com, root over
-# SSH) and ~/.config/kernable/check-linux.server (the Linux test machine).
+# Steps (one that held is noted in dist/<version>/.done and skipped next time, so a release
+# stopped anywhere goes on where it stopped; logs in dist/<version>/logs/):
+#   preflight  main, clean, up to date with origin; the tag free; the Linux server reachable
+#   version    the version in every manifest and lock file, committed
+#   tests      make check here and on Linux side by side, make check-packages, make flaky on Linux
+#   push       main and the annotated tag v<version> (its message: the summary)
+#   workflow   GitHub's release workflow (.github/workflows/release.yml): binaries and notes,
+#              then, after approval in the `release` environment, crates.io, npm, PyPI, the
+#              GitHub release, the downloads and the docs on kernable.com, and its own check on
+#              Linux and macOS. This waits for it and prints where to approve.
+#   verify     scripts/verify-release.sh here and on the Linux server
+# With --local, instead of workflow: binaries, notes, publish, downloads, github, docs.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STEPS=(preflight version tests binaries notes push publish downloads github docs verify)
-VERSION=${1:?usage: scripts/release.sh <version> [--from <step>] [--tokens]}
+VERSION=${1:?usage: scripts/release.sh <version> [--summary <text>] [--from <step>] [--local]}
 shift
 FROM=
-TOKENS=0
+LOCAL=0
+SUMMARY=
 while [ $# -gt 0 ]; do
   case $1 in
-    --from) FROM=${2:?--from needs a step: ${STEPS[*]}}; shift 2 ;;
-    --tokens) TOKENS=1; shift ;;
+    --from) FROM=${2:?--from needs a step}; shift 2 ;;
+    --local) LOCAL=1; shift ;;
+    --summary) SUMMARY=${2:?--summary needs a text}; shift 2 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
+if [ $LOCAL = 1 ]; then
+  STEPS=(preflight version tests push binaries notes publish downloads github docs verify)
+else
+  STEPS=(preflight version tests push workflow verify)
+fi
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "a version is x.y.z, not $VERSION" >&2; exit 2; }
 TAG=v$VERSION
 DIST=$ROOT/dist/$VERSION
@@ -48,9 +48,9 @@ DONE=$DIST/.done
 LOGS=$DIST/logs
 REPO=kernable/kernable
 CONF=$HOME/.config/kernable
-SITE_SERVER=$(tr -d '[:space:]' < "$CONF/site.server" 2>/dev/null || true)
 LINUX=$(tr -d '[:space:]' < "$CONF/check-linux.server" 2>/dev/null || true)
-WEBROOT=/var/www/kernable.com
+KEY=$CONF/release-deploy
+RSYNC=$(command -v /opt/homebrew/bin/rsync /usr/local/bin/rsync 2>/dev/null | head -1 || true)
 SITE_REPO=${SITE_REPO:-$ROOT/../kernable.com}
 mkdir -p "$LOGS"
 touch "$DONE"
@@ -65,6 +65,9 @@ logged() {
   "$@" >"$LOGS/$name.log" 2>&1 || { tail -40 "$LOGS/$name.log"; fail "$name failed (all of it: $LOGS/$name.log)"; }
 }
 current() { sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml; }
+site_rsync() {
+  "$RSYNC" -e "ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$KEY.known_hosts -o StrictHostKeyChecking=yes" "$@"
+}
 
 if [ -n "$FROM" ]; then
   printf '%s\n' "${STEPS[@]}" | grep -qx "$FROM" || fail "no step $FROM: ${STEPS[*]}"
@@ -80,18 +83,16 @@ step_preflight() {
   git fetch -q origin main --tags
   git merge-base --is-ancestor origin/main HEAD || fail "origin/main has commits this checkout lacks: pull first"
   ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || fail "the tag $TAG exists already"
-  local was
-  was=$(git describe --tags --abbrev=0 2>/dev/null || echo none)
-  echo "  last release $was, this one $VERSION"
+  echo "  last release $(git describe --tags --abbrev=0 2>/dev/null || echo none), this one $VERSION"
   gh auth status >/dev/null 2>&1 || fail "gh is not logged in"
-  command -v cargo-zigbuild >/dev/null || fail "cargo zigbuild is missing (cargo install cargo-zigbuild)"
-  [ -n "$SITE_SERVER" ] || fail "no $CONF/site.server (root@<kernable.com's address>)"
-  [ -n "$LINUX" ] || fail "no $CONF/check-linux.server"
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$SITE_SERVER" true || fail "cannot reach $SITE_SERVER"
+  [ -n "$LINUX" ] || fail "no $CONF/check-linux.server (root@<address> of the Linux test machine)"
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$LINUX" true || fail "cannot reach $LINUX"
-  [ -d "$SITE_REPO" ] || fail "no kernable.com repository at $SITE_REPO (SITE_REPO=...)"
-  if [ $TOKENS = 1 ]; then
-    for t in crates npm pypi; do [ -s "$CONF/$t.token" ] || fail "--tokens: no $CONF/$t.token"; done
+  if [ $LOCAL = 1 ]; then
+    command -v cargo-zigbuild >/dev/null || fail "cargo zigbuild is missing (cargo install cargo-zigbuild)"
+    [ -n "$RSYNC" ] || fail "GNU rsync is missing (brew install rsync): kernable.com refuses openrsync"
+    [ -f "$KEY" ] && [ -f "$KEY.known_hosts" ] || fail "no $KEY (the key that may rsync into download/ and docs/)"
+    [ -d "$SITE_REPO" ] || fail "no kernable.com repository at $SITE_REPO (SITE_REPO=...)"
+    for t in crates npm pypi; do [ -s "$CONF/$t.token" ] || fail "no $CONF/$t.token"; done
   fi
 }
 
@@ -102,10 +103,10 @@ step_version() {
     echo "  the manifests say $VERSION already"
     return
   fi
-  python3 - "$was" "$VERSION" <<'PY'
+  python3 - "$VERSION" <<'PY'
 import json, re, sys
 from pathlib import Path
-was, new = sys.argv[1], sys.argv[2]
+new = sys.argv[1]
 
 def sub(path, pattern, repl, count=1):
     p = Path(path)
@@ -137,9 +138,9 @@ lock("docs/package-lock.json", "../sdks/typescript")
 PY
   cargo update -q --workspace
   git diff --stat
-  local changed
+  local changed want
   changed=$(git diff --name-only | sort | tr '\n' ' ')
-  local want="Cargo.lock Cargo.toml docs/package-lock.json kits/rust/Cargo.toml kits/typescript/package-lock.json sdks/python/pyproject.toml sdks/rust/Cargo.toml sdks/typescript/package-lock.json sdks/typescript/package.json "
+  want="Cargo.lock Cargo.toml docs/package-lock.json kits/rust/Cargo.toml kits/typescript/package-lock.json sdks/python/pyproject.toml sdks/rust/Cargo.toml sdks/typescript/package-lock.json sdks/typescript/package.json "
   [ "$changed" = "$want" ] || fail "the version change touched other files than expected: $changed"
   git -c user.email=artur.susdorf@gmail.com commit -q -am "$VERSION"
   echo "  committed $(git log --oneline -1)"
@@ -149,10 +150,8 @@ step_tests() {
   [ "$(current)" = "$VERSION" ] || fail "the manifests say $(current)"
   say "make check on Linux and make check here, side by side (logs in $LOGS)"
   "$ROOT/scripts/check-linux.sh" check >"$LOGS/check-linux.log" 2>&1 &
-  local linux=$!
-  local mac=0
+  local linux=$! mac=0 lin=0
   make check >"$LOGS/check.log" 2>&1 || mac=$?
-  local lin=0
   wait $linux || lin=$?
   [ $mac = 0 ] || { tail -40 "$LOGS/check.log"; fail "make check failed here ($LOGS/check.log)"; }
   [ $lin = 0 ] || { tail -40 "$LOGS/check-linux.log"; fail "make check failed on Linux ($LOGS/check-linux.log)"; }
@@ -162,7 +161,56 @@ step_tests() {
   logged flaky-linux env FLAKY=3 "$ROOT/scripts/check-linux.sh" flaky
 }
 
+step_push() {
+  [ "$(current)" = "$VERSION" ] || fail "the manifests say $(current)"
+  git push -q origin main
+  if [ -n "$SUMMARY" ]; then
+    git tag -a "$TAG" -m "kernable $VERSION" -m "$SUMMARY"
+  else
+    git tag -a "$TAG" -m "kernable $VERSION"
+  fi
+  git push -q origin "$TAG"
+  echo "  pushed main and $TAG ($(git rev-parse --short HEAD))"
+}
+
+# The run of the release workflow for the tag (it starts a few seconds after the push).
+workflow_run() {
+  local run=
+  for _ in $(seq 30); do
+    run=$(gh run list -R "$REPO" --workflow release.yml --branch "$TAG" -L 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+    [ -n "$run" ] && break
+    sleep 10
+  done
+  echo "$run"
+}
+
+step_workflow() {
+  say "GitHub's release workflow for $TAG"
+  local run
+  run=$(workflow_run)
+  [ -n "$run" ] || fail "no run of release.yml for $TAG after 5 minutes"
+  echo "  building the binaries and the notes first (about 15 minutes); then it waits for you:"
+  echo
+  echo "  >>> Approve: https://github.com/$REPO/actions/runs/$run"
+  echo "      (Review deployments, tick release, Approve and deploy)"
+  echo
+  gh run watch "$run" -R "$REPO" --exit-status --interval 30 >"$LOGS/workflow.log" 2>&1 || {
+    gh run view "$run" -R "$REPO" --log-failed 2>/dev/null | tail -40
+    fail "the release workflow failed: https://github.com/$REPO/actions/runs/$run
+  Fix it and re-run the failed jobs there (each part done is skipped), then: --from workflow.
+  Or without GitHub's workflow: scripts/release.sh $VERSION --local --from binaries"
+  }
+  echo "  published, deployed and checked on GitHub: https://github.com/$REPO/releases/tag/$TAG"
+}
+
+# --local: what the workflow does, from here.
+
 step_binaries() {
+  # The tag's workflow is not wanted now: it would wait for an approval that never comes.
+  local run
+  run=$(gh run list -R "$REPO" --workflow release.yml --branch "$TAG" -L 1 --json databaseId,status \
+    -q '.[0] | select(.status != "completed") | .databaseId' 2>/dev/null || true)
+  [ -z "$run" ] || { gh run cancel "$run" -R "$REPO" >/dev/null && echo "  cancelled the workflow run $run"; }
   rm -f "$DIST"/kernable-*.tar.gz "$DIST/SHA256SUMS"
   logged binaries "$ROOT/scripts/build-binaries.sh" "$VERSION"
   [ "$(ls "$DIST"/kernable-*.tar.gz | wc -l | tr -d ' ')" = 4 ] || fail "not 4 archives in $DIST"
@@ -170,69 +218,40 @@ step_binaries() {
 }
 
 step_notes() {
-  if [ -s "$DIST/NOTES.md" ]; then
-    grep -q '<what this release brings' "$DIST/NOTES.md" && fail "$DIST/NOTES.md still has the placeholder line"
-    echo "  taking $DIST/NOTES.md as it is"
-    return
-  fi
-  local was
-  was=$(git describe --tags --abbrev=0)
-  {
-    echo "**kernable $VERSION.** <what this release brings, in two or three sentences; what an operator must do: nothing before 1.0>"
-    echo
-    echo "Changes since $was:"
-    echo
-    git log --no-merges --format='- %s' "$was..HEAD" | grep -vx "- $VERSION"
-    echo
-    echo 'Install: `curl -fsSL https://kernable.com/install.sh | sh` · SDKs: `npm install @kernable/sdk`, `pip install kernable-sdk`, `cargo add kernable-sdk`'
-    echo
-    echo "SHA-256:"
-    echo '```'
-    cat "$DIST/SHA256SUMS"
-    echo '```'
-    echo
-    echo "**Full Changelog**: https://github.com/$REPO/compare/$was...$TAG"
-  } > "$DIST/NOTES.md"
-  echo "  drafted $DIST/NOTES.md from the commits since $was."
-  echo "  Read and edit it, then run scripts/release.sh $VERSION again: it goes on from here."
-  exit 3
+  python3 scripts/release-notes.py "$VERSION" --sums "$DIST/SHA256SUMS" \
+    --summary "$(git tag -l --format='%(contents:body)' "$TAG")" > "$DIST/NOTES.md"
+  cat "$DIST/NOTES.md"
 }
 
-step_push() {
-  grep -q '<what this release brings' "$DIST/NOTES.md" && fail "NOTES.md still has the placeholder line"
-  [ "$(current)" = "$VERSION" ] || fail "the manifests say $(current)"
-  git push -q origin main
-  git tag -a "$TAG" -m "kernable $VERSION"
-  git push -q origin "$TAG"
-  echo "  pushed main and $TAG ($(git rev-parse --short HEAD))"
-}
-
-publish_with_tokens() {
-  say "crates.io, from here"
-  (cd crates/kernable-core && ./pack_proto.sh) && (cd sdks/rust && ./pack_kit.sh)
+step_publish() {
+  say "crates.io"
   local missing=
   for crate in kernable-core kernable-sdk-macros kernable-sdk; do
-    curl -fsS -o /dev/null -A 'kernable-release' "https://crates.io/api/v1/crates/$crate/$VERSION" 2>/dev/null \
-      && echo "  $crate is published" || missing="$missing -p $crate"
+    if curl -fsS -o /dev/null -A 'kernable-release' "https://crates.io/api/v1/crates/$crate/$VERSION" 2>/dev/null; then
+      echo "  $crate is published"
+    else
+      missing="$missing -p $crate"
+    fi
   done
   if [ -n "$missing" ]; then
+    (cd crates/kernable-core && ./pack_proto.sh) && (cd sdks/rust && ./pack_kit.sh)
     # shellcheck disable=SC2086
     CARGO_REGISTRY_TOKEN=$(cat "$CONF/crates.token") logged crates cargo publish --allow-dirty $missing
+    git checkout -q -- crates/kernable-core sdks/rust
+    git clean -fdq crates/kernable-core sdks/rust
   fi
-  git checkout -q -- crates/kernable-core sdks/rust 2>/dev/null || true
-  git clean -fdq crates/kernable-core sdks/rust
 
-  say "npm, from here"
+  say "npm"
   if ! npm view "@kernable/sdk@$VERSION" version >/dev/null 2>&1; then
     local rc=$DIST/.npmrc
     (umask 077 && printf '//registry.npmjs.org/:_authToken=%s\n' "$(cat "$CONF/npm.token")" > "$rc")
     (cd sdks/typescript && npm ci --no-audit --no-fund --silent \
-      && npx -y npm@11 publish --access public --provenance=false --userconfig "$rc") >"$LOGS/npm.log" 2>&1 \
+      && NPM_CONFIG_USERCONFIG=$rc npx -y npm@11 publish --access public --provenance=false) >"$LOGS/npm.log" 2>&1 \
       || { rm -f "$rc"; tail -20 "$LOGS/npm.log"; fail "npm publish"; }
     rm -f "$rc"
   fi
 
-  say "PyPI, from here"
+  say "PyPI"
   if ! curl -fsS -o /dev/null "https://pypi.org/pypi/kernable-sdk/$VERSION/json" 2>/dev/null; then
     local venv=$ROOT/target/release-venv
     [ -x "$venv/bin/twine" ] || { python3 -m venv "$venv" && "$venv/bin/pip" install -q build twine; }
@@ -245,42 +264,19 @@ publish_with_tokens() {
   fi
 }
 
-step_publish() {
-  if [ $TOKENS = 1 ]; then
-    publish_with_tokens
-    return
-  fi
-  say "waiting for GitHub's release workflow for $TAG"
-  local run=
-  for _ in $(seq 30); do
-    run=$(gh run list -R "$REPO" --workflow release.yml --branch "$TAG" -L 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
-    [ -n "$run" ] && break
-    sleep 10
-  done
-  [ -n "$run" ] || fail "no run of release.yml for $TAG after 5 minutes"
-  echo
-  echo "  >>> Approve it: https://github.com/$REPO/actions/runs/$run"
-  echo "      (Review deployments, release, Approve and deploy)"
-  echo
-  gh run watch "$run" -R "$REPO" --exit-status --interval 30 >"$LOGS/publish.log" 2>&1 \
-    || { gh run view "$run" -R "$REPO" --log-failed | tail -40; fail "the release workflow failed: https://github.com/$REPO/actions/runs/$run (fix, then --from publish; or --tokens)"; }
-  echo "  the release workflow published the SDKs"
-}
-
 step_downloads() {
-  [ -f "$DIST/SHA256SUMS" ] || fail "no binaries in $DIST"
   (cd "$DIST" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "the archives in $DIST do not match SHA256SUMS"
-  ssh -o BatchMode=yes "$SITE_SERVER" "mkdir -p $WEBROOT/download/$VERSION"
-  rsync -a --chmod=F644 "$DIST"/kernable-*.tar.gz "$DIST/SHA256SUMS" "$SITE_SERVER:$WEBROOT/download/$VERSION/"
-  # Checked as served, then made the latest.
-  local d
-  d=$(mktemp -d)
-  curl -fsSL "https://kernable.com/download/$VERSION/SHA256SUMS" -o "$d/SHA256SUMS"
-  cmp -s "$d/SHA256SUMS" "$DIST/SHA256SUMS" || fail "kernable.com serves another SHA256SUMS"
-  rm -rf "$d"
-  ssh -o BatchMode=yes "$SITE_SERVER" "printf '%s\n' $VERSION > $WEBROOT/download/latest.new && mv $WEBROOT/download/latest.new $WEBROOT/download/latest"
-  # install.sh as in this release.
-  rsync -a --chmod=F644 scripts/install.sh "$SITE_SERVER:$WEBROOT/install.sh"
+  local up
+  up=$(mktemp -d)
+  mkdir "$up/$VERSION"
+  cp "$DIST"/kernable-*.tar.gz "$DIST/SHA256SUMS" "$up/$VERSION/"
+  site_rsync -rt --chmod=D755,F644 "$up/$VERSION" release@kernable.com:download/
+  curl -fsSL "https://kernable.com/download/$VERSION/SHA256SUMS" | cmp -s - "$DIST/SHA256SUMS" \
+    || fail "kernable.com serves another SHA256SUMS"
+  cp scripts/install.sh "$up/install.sh"
+  printf '%s\n' "$VERSION" > "$up/latest"
+  site_rsync -t --chmod=F644 "$up/install.sh" "$up/latest" release@kernable.com:download/
+  rm -rf "$up"
   echo "  https://kernable.com/download/$VERSION/, latest $(curl -fsSL https://kernable.com/download/latest)"
 }
 
@@ -292,11 +288,11 @@ step_github() {
     gh release create "$TAG" -R "$REPO" --verify-tag --latest --title "kernable $VERSION" \
       --notes-file "$DIST/NOTES.md" "$DIST"/kernable-*.tar.gz "$DIST/SHA256SUMS"
   fi
-  echo "  https://github.com/$REPO/releases/tag/$TAG"
+  echo "  https://github.com/$REPO/releases/tag/$TAG (without build provenance: built here)"
 }
 
 step_docs() {
-  logged docs make -C "$SITE_REPO" deploy-docs SERVER="$SITE_SERVER" KERNABLE="$ROOT"
+  logged docs make -C "$SITE_REPO" deploy-docs KERNABLE="$ROOT"
   echo "  https://kernable.com/docs/"
 }
 
@@ -305,7 +301,7 @@ step_verify() {
   [ "${PIPESTATUS[0]}" = 0 ] || fail "the release does not hold as a user gets it ($LOGS/verify.log)"
 }
 
-say "kernable $VERSION"
+say "kernable $VERSION$([ $LOCAL = 1 ] && echo ', all from here')"
 for s in "${STEPS[@]}"; do
   if grep -qx "$s" "$DONE"; then
     echo "   $s: done before"

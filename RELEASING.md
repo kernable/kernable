@@ -1,58 +1,68 @@
 # Releasing
 
-One command releases a version, from the version number to a release checked as a user gets
-it. Running it is the decision to release; nothing else publishes:
+One command releases a version. Running it is the decision to release; nothing else publishes:
 
-    scripts/release.sh <version>
+    scripts/release.sh <version> [--summary "<what this release brings, in a sentence or two>"]
 
-It runs these steps; each must hold before the next starts. A step that held is noted in
-`dist/<version>/.done`, so after a stop the same command goes on where it stopped
-(`--from <step>` repeats from a step on). Logs: `dist/<version>/logs/`.
+Here, on our own machines: the version, every check, the tag. On GitHub, after one approval:
+the build, the registries, the release, the downloads, the docs. Last, here and on GitHub: the
+release checked as a user gets it. A step that held is noted in `dist/<version>/.done`, so after
+a stop the same command goes on where it stopped (`--from <step>` repeats from a step on). Logs:
+`dist/<version>/logs/`.
 
-1. **preflight**: on main, nothing uncommitted, up to date with origin, the tag free, both
-   servers reachable.
+1. **preflight**: on main, nothing uncommitted, up to date with origin, the tag free, the Linux
+   server reachable.
 2. **version**: the number in `Cargo.toml`, `kits/rust`, `sdks/rust` (the `=` pins),
    `sdks/typescript/package.json`, `sdks/python/pyproject.toml` and the lock files, committed.
    Before 1.0 the protocol and the store formats stay version 1 and change in place (no
    migrations).
 3. **tests**: `make check` here and on the Linux server side by side, `make check-packages`, and
    `make flaky` on Linux (`scripts/check-linux.sh`). GitHub's CI only adds to these.
-4. **binaries**: `scripts/build-binaries.sh <version>` (on macOS, with `cargo zigbuild` for
-   Linux): `dist/<version>/kernable-<version>-<target>.tar.gz` for aarch64/x86_64 macOS and Linux
-   (glibc 2.31 and newer) and `SHA256SUMS`; `IMAGE=1` adds the container images (`Dockerfile`)
-   as `image-<arch>.tar`. Windows has no build yet.
-5. **notes**: `dist/<version>/NOTES.md`, the release text. Written beforehand, it is taken as it
-   is; else it is drafted from the commits since the last tag and the script stops for it to be
-   edited. It starts with what the release brings and what an operator must do (nothing before
-   1.0), and ends with the SHA-256 sums.
-6. **push**: main and the annotated tag `v<version>`.
-7. **publish**: the tag starts `.github/workflows/release.yml`, which publishes the crates
-   (`kernable-core`, `kernable-sdk-macros`, `kernable-sdk`, in that order), `@kernable/sdk` on
-   npm and `kernable-sdk` on PyPI through Trusted Publishing: no token is stored anywhere. It
-   waits for approval in the `release` environment; the script prints the link and waits. A
-   version a registry already has is skipped, so a failed run can run again. Without GitHub:
-   `--tokens` publishes from this machine with the tokens in
-   `~/.config/kernable/{crates,npm,pypi}.token`. The kernel, the store and the tools stay off
-   crates.io.
-8. **downloads**: the archives to `https://kernable.com/download/<version>/`, checked as served,
-   then the version into `download/latest`; `scripts/install.sh` as
-   `https://kernable.com/install.sh`, which checks every archive against `SHA256SUMS`.
-9. **github**: the GitHub release from the tag, with `NOTES.md`, the archives and `SHA256SUMS`.
-10. **docs**: the documentation on kernable.com (`make deploy-docs` in the kernable.com
-    repository, `../kernable.com` or `SITE_REPO=`).
-11. **verify**: `scripts/verify-release.sh <version>`: `install.sh` here and on Linux, the SDKs
-    installed from npm, PyPI and crates.io into fresh projects (imported, their kits copied out,
-    the Rust one built), the GitHub release with its files.
+4. **push**: main and the annotated tag `v<version>`; the summary is the tag's message.
+5. **workflow**: the tag starts `.github/workflows/release.yml`; the script prints where to approve
+   and waits for it.
+   - Without publishing anything: the binaries with `scripts/build-binaries.sh`, both macOS
+     targets on a macOS runner, both Linux targets on a Linux runner with `cargo zigbuild`
+     (glibc 2.31 and newer: Debian 11, Ubuntu 20.04); `SHA256SUMS`; the notes with
+     `scripts/release-notes.py`: the summary, then the commits since the last tag grouped by what
+     they changed (kernel, SDKs and kits, documentation, dependencies), those that change only
+     tests, scripts or CI left out, then install lines, the protocol's state and the sums.
+   - Then it waits for one approval in the `release` environment (Review deployments). After it,
+     side by side: the crates (`kernable-core`, `kernable-sdk-macros`, `kernable-sdk`, in that
+     order), `@kernable/sdk` on npm and `kernable-sdk` on PyPI through Trusted Publishing (no
+     token stored anywhere); the GitHub release with the notes, the archives, `SHA256SUMS` and
+     build provenance for each archive (`gh attestation verify <archive> -R kernable/kernable`);
+     the archives to `https://kernable.com/download/<version>/`, checked as served, then
+     `download/latest` and `download/install.sh` (served as `https://kernable.com/install.sh`);
+     the documentation to `https://kernable.com/docs/`.
+   - Last, `scripts/verify-release.sh` on a Linux and a macOS runner.
+   A part already done is skipped (a version a registry has, a release that exists), so failed
+   jobs can be re-run there; then `--from workflow`.
+6. **verify**: `scripts/verify-release.sh <version>` here and on the Linux server: `install.sh`,
+   the SDKs from npm, PyPI and crates.io in fresh projects (imported, their kits copied out, the
+   Rust one built), the GitHub release with its files.
 
-The servers stay out of this repository: `~/.config/kernable/site.server` (kernable.com) and
-`~/.config/kernable/check-linux.server`, each one line `root@<address>`.
+A trial: Actions, Release, Run workflow (on main) builds the binaries and the notes of the
+version in `Cargo.toml` as the release would, and publishes nothing.
+
+**Without GitHub's workflow**: `scripts/release.sh <version> --local` does its part from here:
+the binaries (`cargo zigbuild` for Linux), the notes, the registries with the tokens in
+`~/.config/kernable/{crates,npm,pypi}.token`, the GitHub release (without build provenance), the
+downloads and the docs (needs GNU rsync: `brew install rsync`). After a failed workflow:
+`--local --from binaries`.
+
+**kernable.com**: the release writes there as the user `release`, which owns only `download/`
+and `docs/` in the web root; its key may only run rsync there (`rrsync`). GitHub has it as the
+`release` environment's secrets `SITE_SSH_KEY` and `SITE_KNOWN_HOSTS`, this machine as
+`~/.config/kernable/release-deploy` (and `.known_hosts`). The server's address is in neither
+repository; the key reaches it as `release@kernable.com`.
 
 Each archive and package carries the MIT license (`LICENSE`); each SDK also carries it for its
 kit, as `kit/LICENSE`.
 
-Not automated yet: the container image (`docker load -i image-<arch>.tar`, tag, push as one
-multi-arch manifest; the registry is not chosen yet), a Windows build, signing the archives
-(beyond SHA256SUMS over HTTPS).
+Not automated yet: the container image (`IMAGE=1 scripts/build-binaries.sh` writes
+`image-<arch>.tar`; the registry is not chosen yet), a Windows build, signing the archives
+beyond build provenance and SHA256SUMS.
 
 ## An example of NOTES.md
 
