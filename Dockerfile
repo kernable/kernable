@@ -1,4 +1,4 @@
-# The kernel's image: the `kernable` binary of a release (scripts/release.sh, IMAGE=1) on a
+# The kernel's image: the `kernable` binary of a release (scripts/build-binaries.sh, IMAGE=1) on a
 # distroless base, as a user without privileges. The store and the keys live in /data. Outside
 # the container the kernel listens with mutual TLS only (plain TCP stays on loopback):
 #   docker run --rm -v kernable:/data kernable:<version> certs new /data/tls app
