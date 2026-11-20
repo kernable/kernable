@@ -1,8 +1,8 @@
 //! The invitation read models.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use indexmap::IndexMap;
 use kernable::{Domain, Listener};
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,7 @@ pub struct InvitationRow {
 }
 
 /// `tenant/invitationId` → the invitation.
-pub type Shared = Arc<RwLock<BTreeMap<String, InvitationRow>>>;
+pub type Shared = Arc<RwLock<IndexMap<String, InvitationRow>>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,13 +53,13 @@ pub struct LinkRow {
 }
 
 /// `tenant/linkId` → the invitation link.
-pub type Links = Arc<RwLock<BTreeMap<String, LinkRow>>>;
+pub type Links = Arc<RwLock<IndexMap<String, LinkRow>>>;
 
 pub fn row_key(tenant: &str, invitation_id: &str) -> String {
     format!("{tenant}/{invitation_id}")
 }
 
-fn update<R>(t: &mut BTreeMap<String, R>, evt: &kernable::StoredEventMeta, f: impl FnOnce(&mut R)) {
+fn update<R>(t: &mut IndexMap<String, R>, evt: &kernable::StoredEventMeta, f: impl FnOnce(&mut R)) {
     if let Some(r) = t.get_mut(&row_key(&evt.tenant, &evt.aggregate_id)) {
         f(r);
     }

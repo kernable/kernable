@@ -5,10 +5,11 @@
 use std::path::{Path, PathBuf};
 
 /// What the copy takes along, relative to the kit's crate: the sources, the example, the
-/// contract's runners, the manifest and the README.
+/// contract's runners, the manifest and the README (not the parity runner, which needs the
+/// repository's test helpers).
 const PARTS: &[&str] = &[
     "src",
-    "examples",
+    "examples/server.rs",
     "tests/fixtures.rs",
     "tests/authorization.rs",
     "Cargo.toml",

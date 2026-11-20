@@ -325,10 +325,13 @@ export class KitApi {
   /** What the browser needs to create a passkey for the signed-in account. */
   async passkeyRegistrationOptions(claims: Claims, userName: string): Promise<PublicKeyCredentialCreationOptionsJSON> {
     const options = await generateRegistrationOptions({
-      rpName: PASSKEYS.rpName, rpID: PASSKEYS.rpId, userName, userID: new TextEncoder().encode(claims.sub),
-      authenticatorSelection: { residentKey: "required", userVerification: "required" },
+      rpName: PASSKEYS.rpName, rpID: PASSKEYS.rpId, userName, userDisplayName: userName, userID: new TextEncoder().encode(claims.sub),
+      authenticatorSelection: { residentKey: "required", userVerification: "required" }, timeout: CHALLENGE_SECONDS * 1000,
     });
     await this.keepChallenge(options.challenge);
+    // The same options in every kit: no library extras (a discoverable key is required anyway).
+    delete options.extensions;
+    delete options.hints;
     return options;
   }
 
@@ -342,7 +345,7 @@ export class KitApi {
 
   /** What the browser needs to sign in with a passkey (or prove one): any of the user's passkeys. */
   async passkeySignInOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
-    const options = await generateAuthenticationOptions({ rpID: PASSKEYS.rpId, userVerification: "required" });
+    const options = await generateAuthenticationOptions({ rpID: PASSKEYS.rpId, userVerification: "required", timeout: CHALLENGE_SECONDS * 1000 });
     await this.keepChallenge(options.challenge);
     return options;
   }

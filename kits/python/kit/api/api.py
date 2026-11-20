@@ -322,9 +322,10 @@ class KitApi:
         """What the browser needs to create a passkey for the signed-in account (JSON for
         `navigator.credentials.create`)."""
         options = generate_registration_options(
-            rp_id=PASSKEYS.rp_id, rp_name=PASSKEYS.rp_name, user_name=user_name, user_id=claims.sub.encode(),
+            rp_id=PASSKEYS.rp_id, rp_name=PASSKEYS.rp_name, user_name=user_name, user_display_name=user_name, user_id=claims.sub.encode(),
             authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.REQUIRED,
-                                                                   user_verification=UserVerificationRequirement.REQUIRED))
+                                                                   user_verification=UserVerificationRequirement.REQUIRED),
+            timeout=CHALLENGE_SECONDS * 1000)
         self._keep(f"challenge:{_b64(options.challenge)}", "1")
         return json.loads(options_to_json(options))
 
@@ -337,9 +338,14 @@ class KitApi:
 
     def passkey_sign_in_options(self) -> dict:
         """What the browser needs to sign in with a passkey (or prove one): any of the user's passkeys."""
-        options = generate_authentication_options(rp_id=PASSKEYS.rp_id, user_verification=UserVerificationRequirement.REQUIRED)
+        options = generate_authentication_options(rp_id=PASSKEYS.rp_id, user_verification=UserVerificationRequirement.REQUIRED,
+                                                   timeout=CHALLENGE_SECONDS * 1000)
         self._keep(f"challenge:{_b64(options.challenge)}", "1")
-        return json.loads(options_to_json(options))
+        out = json.loads(options_to_json(options))
+        # The same options in every kit: no passkeys named means any of the user's.
+        if not out.get("allowCredentials"):
+            out.pop("allowCredentials", None)
+        return out
 
     def sign_in_with_passkey(self, response: dict, ip: str | None = None) -> dict:
         """Signs in with a passkey, without a password: the passkey names its account (its user handle)."""

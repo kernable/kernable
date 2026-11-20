@@ -1,8 +1,8 @@
 //! The group read models.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use indexmap::IndexMap;
 use kernable::{Domain, Listener};
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,7 @@ pub struct GroupRow {
 }
 
 /// `tenant/groupId` → the group.
-pub type Shared = Arc<RwLock<BTreeMap<String, GroupRow>>>;
+pub type Shared = Arc<RwLock<IndexMap<String, GroupRow>>>;
 
 pub fn row_key(tenant: &str, group_id: &str) -> String {
     format!("{tenant}/{group_id}")
@@ -55,7 +55,7 @@ pub fn groups(domain: &Domain) -> (Listener, Shared) {
         }
     });
     on!(l, state, GroupDeleted, |t, _d, evt| t
-        .remove(&row_key(&evt.tenant, &evt.aggregate_id)));
+        .shift_remove(&row_key(&evt.tenant, &evt.aggregate_id)));
     on!(l, state, TenantDeleted, |t, _d, evt| t
         .retain(|_, g| g.tenant != evt.aggregate_id));
     (l, state)

@@ -20,16 +20,19 @@ data-encoding = "2"
 getrandom = "0.3"
 hmac = "0.12"
 sha1 = "0.10"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 ciborium = "0.2"
 p256 = { version = "0.13", features = ["ecdsa"] }
+rsa = { version = "0.9", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
 hickory-resolver = "0.26"
+indexmap = "2"
 tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+rsa = { version = "0.9", features = ["getrandom"] }

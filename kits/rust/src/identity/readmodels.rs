@@ -1,8 +1,9 @@
 //! The identity read models: identities with their memberships and API keys.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use indexmap::IndexMap;
 use kernable::{Domain, Listener};
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +60,7 @@ pub struct ApiKeyRow {
 #[derive(Default)]
 pub struct Identities {
     /// `tenant/identityId`
-    pub rows: BTreeMap<String, IdentityRow>,
+    pub rows: IndexMap<String, IdentityRow>,
     /// keyId → the key
     pub keys: HashMap<String, ApiKeyRow>,
 }
@@ -196,7 +197,7 @@ pub fn identities(domain: &Domain) -> (Listener, Shared) {
     ));
     on!(l, state, IdentityDeleted, |t, _d, evt| t
         .rows
-        .remove(&row_key(&evt.tenant, &evt.aggregate_id)));
+        .shift_remove(&row_key(&evt.tenant, &evt.aggregate_id)));
     on!(l, state, TenantDeleted, |t, _d, evt| t
         .rows
         .retain(|_, r| r.tenant != evt.aggregate_id));

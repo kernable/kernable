@@ -11,7 +11,7 @@ here = Path(__file__).resolve().parent
 kits = here.parent.parent / "kits"
 target = here / "kernable" / "_kit"
 shutil.rmtree(target, ignore_errors=True)
-ignore = shutil.ignore_patterns("__pycache__", ".venv", "e2e_*", "authenticator.py", "oidc_provider.py")
+ignore = shutil.ignore_patterns("__pycache__", ".venv", "e2e_*", "authenticator.py", "oidc_provider.py", "parity.py")
 for part in ("kit", "example", "tests"):
     shutil.copytree(kits / "python" / part, target / part, ignore=ignore)
 for file in ("README.md", "requirements.txt"):

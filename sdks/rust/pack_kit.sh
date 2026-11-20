@@ -5,8 +5,9 @@
 #   ./pack_kit.sh && cargo publish --allow-dirty && rm -rf kit
 set -e
 rm -rf kit
-mkdir -p kit/tests
-cp -R ../../kits/rust/src ../../kits/rust/examples ../../kits/rust/Cargo.toml ../../kits/rust/README.md kit/
+mkdir -p kit/tests kit/examples
+cp -R ../../kits/rust/src ../../kits/rust/Cargo.toml ../../kits/rust/README.md kit/
+cp ../../kits/rust/examples/server.rs kit/examples/
 cp ../../kits/rust/tests/fixtures.rs ../../kits/rust/tests/authorization.rs kit/tests/
 cp -R ../../kits/fixtures kit/fixtures
 cp ../../kits/LICENSE kit/LICENSE
