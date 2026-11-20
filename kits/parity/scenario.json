@@ -1,0 +1,4538 @@
+{
+ "steps": [
+  {
+   "op": "bootstrap",
+   "signUp": {
+    "tenants": "active",
+    "accounts": "open"
+   },
+   "admin": {
+    "email": "admin@example.com",
+    "name": "Admin",
+    "password": "correct horse battery"
+   },
+   "as": "booted"
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "1. register, verify, sign in, open a tenant; groups and relations decide"
+  },
+  {
+   "op": "register",
+   "email": "early@example.com",
+   "name": "Early",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "early@example.com",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "not_verified"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "nobody@example.com",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "register",
+   "email": "alice@example.com",
+   "name": "alice",
+   "password": "correct horse battery",
+   "as": "aliceReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "alice@example.com",
+   "as": "aliceMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$aliceMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "alice@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "aliceIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$aliceIn.accessToken",
+   "as": "alice"
+  },
+  {
+   "op": "register",
+   "email": "bob@example.com",
+   "name": "bob",
+   "password": "correct horse battery",
+   "as": "bobReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "bob@example.com",
+   "as": "bobMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$bobMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "bob@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "bobIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$bobIn.accessToken",
+   "as": "bob"
+  },
+  {
+   "op": "register",
+   "email": "carol@example.com",
+   "name": "carol",
+   "password": "correct horse battery",
+   "as": "carolReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "carol@example.com",
+   "as": "carolMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$carolMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "carol@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "carolIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$carolIn.accessToken",
+   "as": "carol"
+  },
+  {
+   "op": "uuid",
+   "as": "acme"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$alice",
+   "as": "aliceAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$acme",
+   "tenant": "$acme",
+   "context": "$aliceAccount",
+   "data": {
+    "slug": "acme",
+    "name": "Acme",
+    "owner": {
+     "accountId": "$alice.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$alice",
+   "tenant": "$acme",
+   "as": "asAlice"
+  },
+  {
+   "op": "uuid",
+   "as": "other"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$bob",
+   "as": "bobAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$other",
+   "tenant": "$other",
+   "context": "$bobAccount",
+   "data": {
+    "slug": "acme",
+    "name": "Acme 2",
+    "owner": {
+     "accountId": "$bob.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": false
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$other",
+   "tenant": "$other",
+   "context": "$bobAccount",
+   "data": {
+    "slug": "Not A Slug",
+    "name": "Acme 2",
+    "owner": {
+     "accountId": "$bob.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": false,
+    "code": "invalid_slug"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$other",
+   "tenant": "$other",
+   "context": "$bobAccount",
+   "data": {
+    "slug": "admin",
+    "name": "Acme 2",
+    "owner": {
+     "accountId": "$bob.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": false
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$other",
+   "tenant": "$other",
+   "context": "$bobAccount",
+   "data": {
+    "slug": "acme-two",
+    "name": "  ",
+    "owner": {
+     "accountId": "$bob.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": false,
+    "code": "invalid_name"
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "bobInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$bobInvId",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "email": "bob@example.com"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "bob@example.com",
+   "as": "bobInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$bobInvMail.token",
+   "claims": "$carol",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_email"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$bobInvMail.token",
+   "claims": "$bob",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$bobInvMail.token",
+   "claims": "$bob",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "carolInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$carolInvId",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "email": "carol@example.com"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "carol@example.com",
+   "as": "carolInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$carolInvMail.token",
+   "claims": "$carol",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "danaInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$danaInvId",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "email": "dana@example.com"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "dana@example.com",
+   "as": "danaInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "peekInvitation",
+   "token": {
+    "tamper": "$danaInvMail.token",
+    "how": "secret"
+   },
+   "expect": null
+  },
+  {
+   "op": "peekInvitation",
+   "token": "$danaInvMail.token"
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$danaInvMail.token",
+   "name": "Dana",
+   "password": "short",
+   "expect": {
+    "ok": false,
+    "reason": "weak_password"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$danaInvMail.token",
+   "name": "Dana",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "dana@example.com",
+   "password": "correct horse battery",
+   "as": "danaIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$danaIn.accessToken",
+   "as": "dana"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$dana",
+   "tenant": "$acme",
+   "as": "asDana"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$bob",
+   "tenant": "$acme",
+   "as": "asBob"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$carol",
+   "tenant": "$acme",
+   "as": "asCarol"
+  },
+  {
+   "op": "uuid",
+   "as": "eveInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$eveInvId",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "data": {
+    "email": "eve@example.com",
+    "owner": true
+   },
+   "expect": {
+    "committed": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o0",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "expect": {
+    "committed": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "customers"
+  },
+  {
+   "op": "submit",
+   "command": "group.group.CreateGroup",
+   "aggregateId": "$customers",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "name": "Customers",
+    "permissions": [
+     {
+      "pattern": "shop.PlaceOrder"
+     },
+     {
+      "pattern": "shop.CancelOrder",
+      "when": "owner"
+     }
+    ]
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "m1"
+  },
+  {
+   "op": "uuid",
+   "as": "m2"
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.GrantMembership",
+   "aggregateId": "$asBob.senderIdentity",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "membershipId": "$m1",
+    "group": "$customers"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.GrantMembership",
+   "aggregateId": "$asCarol.senderIdentity",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "membershipId": "$m2",
+    "group": "$customers"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o1",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o1",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "expect": {
+    "committed": false,
+    "code": "exists"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.CancelOrder",
+   "aggregateId": "o1",
+   "tenant": "$acme",
+   "context": "$asCarol",
+   "expect": {
+    "committed": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.CancelOrder",
+   "aggregateId": "o1",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "m3"
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.GrantMembership",
+   "aggregateId": "$asCarol.senderIdentity",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "data": {
+    "membershipId": "$m3",
+    "group": "$customers"
+   },
+   "expect": {
+    "committed": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o2",
+   "tenant": "$acme",
+   "context": {},
+   "expect": {
+    "committed": false,
+    "code": "unauthenticated"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o2",
+   "tenant": "$acme",
+   "context": {
+    "merge": [
+     "$asBob",
+     {
+      "senderTenant": "$other"
+     }
+    ]
+   },
+   "expect": {
+    "committed": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$acme",
+   "context": "$asAlice"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$acme",
+   "context": "$asAlice"
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$acme",
+   "context": "$asAlice"
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "tenantId": "$acme"
+   }
+  },
+  {
+   "op": "query",
+   "query": "identity.GetIdentity",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "data": {
+    "identityId": "$asBob.senderIdentity"
+   }
+  },
+  {
+   "op": "signOut",
+   "claims": "$bob"
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o3",
+   "tenant": "$acme",
+   "context": "$asBob",
+   "expect": {
+    "committed": false,
+    "code": "unauthenticated"
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "bobInv2Id"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$bobInv2Id",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "email": "bob@example.com"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "bob@example.com",
+   "as": "bobInv2Mail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$bobInv2Mail.token",
+   "claims": "$bob",
+   "expect": {
+    "ok": false,
+    "reason": "unauthenticated"
+   }
+  },
+  {
+   "op": "query",
+   "query": "account.FindAccountByEmail",
+   "tenant": "platform",
+   "context": "$asAlice",
+   "data": {
+    "email": "alice@example.com"
+   },
+   "expect": {
+    "ok": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "2. suspended and deleted: sessions end at once; a deleted tenant leaves nothing behind"
+  },
+  {
+   "op": "signIn",
+   "email": "admin@example.com",
+   "password": "correct horse battery",
+   "as": "adminIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$adminIn.accessToken",
+   "as": "admin"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$admin",
+   "tenant": "platform",
+   "as": "asAdmin"
+  },
+  {
+   "op": "register",
+   "email": "eve@example.com",
+   "name": "eve",
+   "password": "correct horse battery",
+   "as": "eveReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "eve@example.com",
+   "as": "eveMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$eveMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "eve@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "eveIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$eveIn.accessToken",
+   "as": "eve"
+  },
+  {
+   "op": "submit",
+   "command": "account.account.SuspendAccount",
+   "aggregateId": "$eve.sub",
+   "tenant": "platform",
+   "context": "$asAdmin",
+   "data": {
+    "reason": "abuse"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "evesTenant"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$eve",
+   "as": "eveAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$evesTenant",
+   "tenant": "$evesTenant",
+   "context": "$eveAccount",
+   "data": {
+    "slug": "eves",
+    "name": "Eve's",
+    "owner": {
+     "accountId": "$eve.sub"
+    }
+   },
+   "expect": {
+    "committed": false,
+    "code": "unauthenticated"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "eve@example.com",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "not_active"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "account.account.DeleteAccount",
+   "aggregateId": "$eve.sub",
+   "tenant": "platform",
+   "context": "$asAdmin",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "register",
+   "email": "eve@example.com",
+   "name": "eve",
+   "password": "correct horse battery",
+   "as": "eve2Reg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "eve@example.com",
+   "as": "eve2Mail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$eve2Mail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "eve@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "eve2In",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$eve2In.accessToken",
+   "as": "eve2"
+  },
+  {
+   "op": "uuid",
+   "as": "openInv"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$openInv",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "email": "frank@example.com"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "frank@example.com",
+   "as": "frankInvMail"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.SuspendTenant",
+   "aggregateId": "$acme",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "data": {
+    "reason": "owner_requested"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o4",
+   "tenant": "$acme",
+   "context": "$asAlice",
+   "expect": {
+    "committed": false
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.DeleteTenant",
+   "aggregateId": "$acme",
+   "tenant": "$acme",
+   "context": "$asAdmin",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.DeleteIdentity",
+   "aggregateId": "$asBob.senderIdentity",
+   "tenant": "$acme",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "expect": {
+    "committed": false,
+    "code": "not_found"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.EraseInvitation",
+   "aggregateId": "$openInv",
+   "tenant": "$acme",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "expect": {
+    "committed": false,
+    "code": "not_found"
+   }
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$acme",
+   "context": "$asAdmin",
+   "data": {
+    "tenantId": "$acme"
+   },
+   "expect": {
+    "ok": false,
+    "code": "not_found"
+   }
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$acme",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "expect": {
+    "ok": true,
+    "value": []
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "bob@example.com",
+   "password": "correct horse battery",
+   "as": "bobIn2",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$bobIn2.accessToken",
+   "as": "bob2"
+  },
+  {
+   "op": "uuid",
+   "as": "reuse"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$bob2",
+   "as": "bob2Account"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$reuse",
+   "tenant": "$reuse",
+   "context": "$bob2Account",
+   "data": {
+    "slug": "acme",
+    "name": "Acme again",
+    "owner": {
+     "accountId": "$bob2.sub"
+    }
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "3. the host restarts; the middleware decides as before"
+  },
+  {
+   "op": "register",
+   "email": "grace@example.com",
+   "name": "grace",
+   "password": "correct horse battery",
+   "as": "graceReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "grace@example.com",
+   "as": "graceMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$graceMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "grace@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "graceIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$graceIn.accessToken",
+   "as": "grace"
+  },
+  {
+   "op": "uuid",
+   "as": "graces"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$grace",
+   "as": "graceAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$graces",
+   "tenant": "$graces",
+   "context": "$graceAccount",
+   "data": {
+    "slug": "graces",
+    "name": "Grace's",
+    "owner": {
+     "accountId": "$grace.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$grace",
+   "tenant": "$graces",
+   "as": "asGrace"
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "g1",
+   "tenant": "$graces",
+   "context": "$asGrace",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "restartHost"
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "g2",
+   "tenant": "$graces",
+   "context": "$asGrace",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "signOut",
+   "claims": "$grace"
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "g3",
+   "tenant": "$graces",
+   "context": "$asGrace",
+   "expect": {
+    "committed": false,
+    "code": "unauthenticated"
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "4. account flows: refresh and reuse, password change and reset, email change, a taken address"
+  },
+  {
+   "op": "register",
+   "email": "frank@example.com",
+   "name": "frank",
+   "password": "correct horse battery",
+   "as": "frankReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "frank@example.com",
+   "as": "frankMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$frankMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "frankIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$frankIn.accessToken",
+   "as": "frank"
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "correct horse battery",
+   "as": "one",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "correct horse battery",
+   "as": "two",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "correct horse battery",
+   "as": "three",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "refresh",
+   "token": "$one.refreshToken",
+   "as": "oneRefreshed",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$oneRefreshed.accessToken",
+   "expect": {
+    "sid": "$one.sessionId"
+   }
+  },
+  {
+   "op": "refresh",
+   "token": {
+    "concat": [
+     "$one.sessionId",
+     ".1.made-up-secret"
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "reason": "invalid_token"
+   }
+  },
+  {
+   "op": "refresh",
+   "token": {
+    "concat": [
+     "$one.sessionId",
+     ".x.made-up-secret"
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "reason": "invalid_token"
+   }
+  },
+  {
+   "op": "refresh",
+   "token": "$one.refreshToken",
+   "expect": {
+    "ok": false,
+    "reason": "reuse"
+   }
+  },
+  {
+   "op": "refresh",
+   "token": "$oneRefreshed.refreshToken",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "check",
+   "token": "$two.accessToken",
+   "as": "twoClaims"
+  },
+  {
+   "op": "changePassword",
+   "claims": "$twoClaims",
+   "current": "wrong password!",
+   "next": "another horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "changePassword",
+   "claims": "$twoClaims",
+   "current": "correct horse battery",
+   "next": "short",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "changePassword",
+   "claims": "$twoClaims",
+   "current": "correct horse battery",
+   "next": "another horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "refresh",
+   "token": "$two.refreshToken",
+   "as": "twoAgain",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "refresh",
+   "token": "$three.refreshToken",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "another horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mailCount",
+   "as": "before"
+  },
+  {
+   "op": "requestPasswordReset",
+   "email": "nobody@example.com"
+  },
+  {
+   "op": "mailCount",
+   "expect": "$before"
+  },
+  {
+   "op": "requestPasswordReset",
+   "email": "frank@example.com"
+  },
+  {
+   "op": "mail",
+   "to": "frank@example.com",
+   "as": "reset",
+   "expect": {
+    "purpose": "reset"
+   }
+  },
+  {
+   "op": "mailCount",
+   "as": "mailed"
+  },
+  {
+   "op": "requestPasswordReset",
+   "email": "frank@example.com"
+  },
+  {
+   "op": "mailCount",
+   "expect": "$mailed"
+  },
+  {
+   "op": "resetPassword",
+   "token": {
+    "tamper": "$reset.token",
+    "how": "lastChar"
+   },
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "resetPassword",
+   "token": "$reset.token",
+   "next": "third horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "resetPassword",
+   "token": "$reset.token",
+   "next": "fourth horse battery",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "refresh",
+   "token": "$twoAgain.refreshToken",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "another horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "third horse battery",
+   "as": "four",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$four.accessToken",
+   "as": "fourClaims"
+  },
+  {
+   "op": "requestEmailChange",
+   "claims": "$fourClaims",
+   "email": "alice@example.com",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "requestEmailChange",
+   "claims": "$fourClaims",
+   "email": "frank@new.example",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "frank@new.example",
+   "as": "change",
+   "expect": {
+    "purpose": "email_change"
+   }
+  },
+  {
+   "op": "confirmEmailChange",
+   "token": "$change.token",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "confirmEmailChange",
+   "token": "$change.token",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "frank@new.example",
+   "password": "third horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "frank@example.com",
+   "password": "third horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "register",
+   "email": "frank@new.example",
+   "name": "Not Frank",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "frank@new.example",
+   "expect": {
+    "purpose": "account_exists"
+   }
+  },
+  {
+   "op": "mailCount",
+   "as": "told"
+  },
+  {
+   "op": "register",
+   "email": "frank@new.example",
+   "name": "Not Frank",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mailCount",
+   "expect": "$told"
+  },
+  {
+   "op": "register",
+   "email": "not an address",
+   "name": "X",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "register",
+   "email": "weak@example.com",
+   "name": "Weak",
+   "password": "short",
+   "expect": {
+    "ok": false,
+    "reason": "weak_password"
+   }
+  },
+  {
+   "op": "register",
+   "email": "gus@example.com",
+   "name": "gus",
+   "password": "correct horse battery",
+   "as": "gusReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "gus@example.com",
+   "as": "gusMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$gusMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "gus@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "gusIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$gusIn.accessToken",
+   "as": "gus"
+  },
+  {
+   "op": "signIn",
+   "email": "gus@example.com",
+   "password": "wrong horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "gus@example.com",
+   "password": "wrong horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "gus@example.com",
+   "password": "wrong horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "gus@example.com",
+   "password": "wrong horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "gus@example.com",
+   "password": "wrong horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "gus@example.com",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "nobody-at-all@example.com",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "5. TOTP with recovery codes; a service with an API key"
+  },
+  {
+   "op": "register",
+   "email": "henry@example.com",
+   "name": "henry",
+   "password": "correct horse battery",
+   "as": "henryReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "henry@example.com",
+   "as": "henryMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$henryMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "henry@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "henryIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$henryIn.accessToken",
+   "as": "henry"
+  },
+  {
+   "op": "startTotp",
+   "claims": "$henry",
+   "issuer": "Kit",
+   "label": "henry@example.com",
+   "as": "totp",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "totpStep",
+   "as": "step"
+  },
+  {
+   "op": "confirmTotp",
+   "claims": "$henry",
+   "code": {
+    "totp": "$totp.secret",
+    "at": "$step"
+   },
+   "as": "confirmed",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "henry@example.com",
+   "password": "correct horse battery",
+   "as": "henryIn",
+   "expect": {
+    "ok": true,
+    "secondFactor": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$henryIn.accessToken",
+   "as": "henry2"
+  },
+  {
+   "op": "uuid",
+   "as": "henrys"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$henrys",
+   "tenant": "$henrys",
+   "context": {
+    "senderAccount": "$henry2.sub",
+    "senderSession": "$henry2.sid"
+   },
+   "data": {
+    "slug": "henrys",
+    "name": "Henry's",
+    "owner": {
+     "accountId": "$henry2.sub"
+    }
+   },
+   "expect": {
+    "committed": false,
+    "code": "mfa_required"
+   }
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$henry2",
+   "token": {
+    "concat": [
+     "link_",
+     "$henrys",
+     ".l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "reason": "mfa_required"
+   }
+  },
+  {
+   "op": "proveSecondFactor",
+   "claims": "$henry2",
+   "code": {
+    "totp": "$totp.secret",
+    "at": "$step"
+   },
+   "expect": {
+    "ok": false,
+    "reason": "wrong_code"
+   }
+  },
+  {
+   "op": "proveSecondFactor",
+   "claims": "$henry2",
+   "code": "000000",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_code"
+   }
+  },
+  {
+   "op": "proveSecondFactor",
+   "claims": "$henry2",
+   "code": "$confirmed.recoveryCodes.0",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$henrys",
+   "tenant": "$henrys",
+   "context": {
+    "senderAccount": "$henry2.sub",
+    "senderSession": "$henry2.sid"
+   },
+   "data": {
+    "slug": "henrys",
+    "name": "Henry's",
+    "owner": {
+     "accountId": "$henry2.sub"
+    }
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "signIn",
+   "email": "henry@example.com",
+   "password": "correct horse battery",
+   "as": "henryIn3",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$henryIn3.accessToken",
+   "as": "henry3"
+  },
+  {
+   "op": "proveSecondFactor",
+   "claims": "$henry3",
+   "code": {
+    "totp": "$totp.secret",
+    "at": "$step",
+    "plus": 1
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "proveSecondFactor",
+   "claims": "$henry3",
+   "code": "$confirmed.recoveryCodes.0",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_code"
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$henry2",
+   "tenant": "$henrys",
+   "as": "asHenry"
+  },
+  {
+   "op": "uuid",
+   "as": "svc"
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.CreateServiceIdentity",
+   "aggregateId": "$svc",
+   "tenant": "$henrys",
+   "context": "$asHenry",
+   "data": {
+    "displayName": "Billing"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "ordersGroup"
+  },
+  {
+   "op": "submit",
+   "command": "group.group.CreateGroup",
+   "aggregateId": "$ordersGroup",
+   "tenant": "$henrys",
+   "context": "$asHenry",
+   "data": {
+    "name": "Orders",
+    "permissions": [
+     {
+      "pattern": "shop.PlaceOrder"
+     }
+    ]
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.GrantMembership",
+   "aggregateId": "$svc",
+   "tenant": "$henrys",
+   "context": "$asHenry",
+   "data": {
+    "membershipId": "svc",
+    "group": "$ordersGroup"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "createApiKey",
+   "context": "$asHenry",
+   "tenant": "$henrys",
+   "identityId": "$svc",
+   "label": "billing",
+   "as": "apiKey",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "checkApiKey",
+   "key": "$apiKey.key",
+   "as": "asService",
+   "expect": {
+    "senderTenant": "$henrys",
+    "senderIdentity": "$svc",
+    "senderSession": "$apiKey.keyId"
+   }
+  },
+  {
+   "op": "checkApiKey",
+   "key": {
+    "concat": [
+     "$apiKey.key",
+     "x"
+    ]
+   },
+   "expect": null
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "h1",
+   "tenant": "$henrys",
+   "context": "$asService",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "query",
+   "query": "identity.GetIdentity",
+   "tenant": "$henrys",
+   "context": "$asHenry",
+   "data": {
+    "identityId": "$svc"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.RevokeApiKey",
+   "aggregateId": "$svc",
+   "tenant": "$henrys",
+   "context": "$asHenry",
+   "data": {
+    "keyId": "$apiKey.keyId"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "h2",
+   "tenant": "$henrys",
+   "context": "$asService",
+   "expect": {
+    "committed": false,
+    "code": "unauthenticated"
+   }
+  },
+  {
+   "op": "checkApiKey",
+   "key": "$apiKey.key",
+   "note": "cached"
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "6. passkeys: added against an issued challenge, signing in without a password"
+  },
+  {
+   "op": "register",
+   "email": "ivy@example.com",
+   "name": "ivy",
+   "password": "correct horse battery",
+   "as": "ivyReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "ivy@example.com",
+   "as": "ivyMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$ivyMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "ivy@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "ivyIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$ivyIn.accessToken",
+   "as": "ivy"
+  },
+  {
+   "op": "authenticator",
+   "as": "device",
+   "userId": "$ivy.sub"
+  },
+  {
+   "op": "passkeyRegistrationOptions",
+   "claims": "$ivy",
+   "userName": "ivy@example.com",
+   "as": "creation"
+  },
+  {
+   "op": "passkeyRegister",
+   "device": "device",
+   "challenge": "bm90LWlzc3VlZA",
+   "as": "wrongReg"
+  },
+  {
+   "op": "addPasskey",
+   "claims": "$ivy",
+   "response": "$wrongReg",
+   "expect": {
+    "ok": false,
+    "reason": "invalid_challenge"
+   }
+  },
+  {
+   "op": "passkeyRegister",
+   "device": "device",
+   "challenge": "$creation.challenge",
+   "as": "reg"
+  },
+  {
+   "op": "addPasskey",
+   "claims": "$ivy",
+   "response": "$reg",
+   "label": "Laptop",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "passkeySignInOptions",
+   "as": "request"
+  },
+  {
+   "op": "passkeyAssert",
+   "device": "device",
+   "challenge": "$request.challenge",
+   "as": "answer"
+  },
+  {
+   "op": "signInWithPasskey",
+   "response": "$answer",
+   "as": "ivyIn",
+   "expect": {
+    "ok": true,
+    "accountId": "$ivy.sub"
+   }
+  },
+  {
+   "op": "check",
+   "token": "$ivyIn.accessToken",
+   "expect": {
+    "fac": [
+     "passkey"
+    ]
+   }
+  },
+  {
+   "op": "signInWithPasskey",
+   "response": "$answer",
+   "expect": {
+    "ok": false,
+    "reason": "wrong_password"
+   }
+  },
+  {
+   "op": "passkeySignInOptions",
+   "as": "other"
+  },
+  {
+   "op": "passkeyAssert",
+   "device": "device",
+   "challenge": "$other.challenge",
+   "origin": "http://evil.example",
+   "as": "evil"
+  },
+  {
+   "op": "signInWithPasskey",
+   "response": "$evil",
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "check",
+   "token": "$ivyIn.accessToken",
+   "as": "ivyPk"
+  },
+  {
+   "op": "uuid",
+   "as": "ivys"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$ivys",
+   "tenant": "$ivys",
+   "context": {
+    "senderAccount": "$ivyPk.sub",
+    "senderSession": "$ivyPk.sid"
+   },
+   "data": {
+    "slug": "ivys",
+    "name": "Ivy's",
+    "owner": {
+     "accountId": "$ivyPk.sub"
+    }
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "query",
+   "query": "account.GetAccount",
+   "tenant": "platform",
+   "context": {
+    "senderAccount": "$ivyPk.sub",
+    "senderSession": "$ivyPk.sid"
+   },
+   "data": {
+    "accountId": "$ivyPk.sub"
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "7. OAuth and SSO: a social login registers or signs in, links on request; a tenant's SSO verified by DNS and enforced"
+  },
+  {
+   "op": "oidcProvider",
+   "as": "social"
+  },
+  {
+   "op": "oidcProvider",
+   "as": "company"
+  },
+  {
+   "op": "kitApi",
+   "as": "sso",
+   "providers": {
+    "social": "social"
+   },
+   "redirectUri": "http://localhost:3000/callback"
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "as": "jack1Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$jack1Start.url",
+   "user": {
+    "sub": "s-jack",
+    "email": "jack@example.com",
+    "email_verified": true
+   },
+   "as": "jack1Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$jack1Cb",
+   "as": "jack1",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "as": "jack2Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$jack2Start.url",
+   "user": {
+    "sub": "s-jack",
+    "email": "jack@example.com",
+    "email_verified": true
+   },
+   "as": "jack2Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$jack2Cb",
+   "as": "jack2",
+   "expect": {
+    "ok": true,
+    "accountId": "$jack1.accountId"
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "as": "jack3Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$jack3Start.url",
+   "user": {
+    "sub": "s-jack",
+    "email": "jack@example.com",
+    "email_verified": true
+   },
+   "as": "jack3Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$jack3Cb",
+   "as": "jack3",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$jack3Cb",
+   "expect": {
+    "ok": false,
+    "reason": "invalid_state"
+   }
+  },
+  {
+   "op": "register",
+   "email": "kate@example.com",
+   "name": "kate",
+   "password": "correct horse battery",
+   "as": "kateReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "kate@example.com",
+   "as": "kateMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$kateMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "kate@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "kateIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$kateIn.accessToken",
+   "as": "kate"
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "as": "kate1Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$kate1Start.url",
+   "user": {
+    "sub": "s-kate",
+    "email": "kate@example.com",
+    "email_verified": true
+   },
+   "as": "kate1Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$kate1Cb",
+   "as": "kate1",
+   "expect": {
+    "ok": false,
+    "reason": "not_linked"
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "link": "$kate",
+   "as": "kate2Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$kate2Start.url",
+   "user": {
+    "sub": "s-kate",
+    "email": "kate@example.com",
+    "email_verified": true
+   },
+   "as": "kate2Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$kate2Cb",
+   "as": "kate2",
+   "expect": {
+    "ok": true,
+    "linked": true
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "as": "kate3Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$kate3Start.url",
+   "user": {
+    "sub": "s-kate",
+    "email": "kate@example.com",
+    "email_verified": true
+   },
+   "as": "kate3Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$kate3Cb",
+   "as": "kate3",
+   "expect": {
+    "ok": true,
+    "accountId": "$kate.sub"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.ChangeSignUpPolicy",
+   "aggregateId": "platform",
+   "tenant": "platform",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "data": {
+    "tenants": "active",
+    "accounts": "off"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "as": "nora1Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$nora1Start.url",
+   "user": {
+    "sub": "s-nora",
+    "email": "nora@example.com",
+    "email_verified": true
+   },
+   "as": "nora1Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$nora1Cb",
+   "as": "nora1",
+   "expect": {
+    "ok": false,
+    "reason": "sign_up_closed"
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "social"
+   },
+   "as": "jack4Start",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "social",
+   "url": "$jack4Start.url",
+   "user": {
+    "sub": "s-jack",
+    "email": "jack@example.com",
+    "email_verified": true
+   },
+   "as": "jack4Cb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$jack4Cb",
+   "as": "jack4",
+   "expect": {
+    "ok": true,
+    "accountId": "$jack1.accountId"
+   }
+  },
+  {
+   "op": "register",
+   "email": "closed@example.com",
+   "name": "Closed",
+   "password": "correct horse battery"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.ChangeSignUpPolicy",
+   "aggregateId": "platform",
+   "tenant": "platform",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "data": {
+    "tenants": "active",
+    "accounts": "open"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "register",
+   "email": "liam@lumen.example",
+   "name": "liam",
+   "password": "correct horse battery",
+   "as": "liamReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "liam@lumen.example",
+   "as": "liamMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$liamMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "liam@lumen.example",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "liamIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$liamIn.accessToken",
+   "as": "liam"
+  },
+  {
+   "op": "uuid",
+   "as": "lumen"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$liam",
+   "as": "liamAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$lumen",
+   "tenant": "$lumen",
+   "context": "$liamAccount",
+   "data": {
+    "slug": "lumen",
+    "name": "Lumen",
+    "owner": {
+     "accountId": "$liam.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$liam",
+   "tenant": "$lumen",
+   "as": "asLiam"
+  },
+  {
+   "op": "uuid",
+   "as": "ssoId"
+  },
+  {
+   "op": "oidcIssuer",
+   "provider": "company",
+   "as": "companyConfig"
+  },
+  {
+   "op": "submit",
+   "command": "account.sso.CreateSso",
+   "aggregateId": "$ssoId",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "issuer": "$companyConfig.issuer",
+    "clientId": "$companyConfig.clientId",
+    "clientSecret": "$companyConfig.clientSecret"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "account.sso.AddSsoDomain",
+   "aggregateId": "$ssoId",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "domain": "lumen.example"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "verifySsoDomain",
+   "api": "sso",
+   "tenant": "$lumen",
+   "ssoId": "$ssoId",
+   "domain": "lumen.example",
+   "expect": {
+    "ok": false,
+    "reason": "not_verified"
+   }
+  },
+  {
+   "op": "query",
+   "query": "account.GetSso",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "ssoId": "$ssoId"
+   },
+   "expect": {
+    "ok": true
+   },
+   "as": "ssoConfig"
+  },
+  {
+   "op": "setTxt",
+   "name": "_kernable-sso.lumen.example",
+   "value": "$ssoConfig.value.domains.0.txt"
+  },
+  {
+   "op": "verifySsoDomain",
+   "api": "sso",
+   "tenant": "$lumen",
+   "ssoId": "$ssoId",
+   "domain": "lumen.example",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "account.sso.EnforceSso",
+   "aggregateId": "$ssoId",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "enforced": true
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "register",
+   "email": "mia@lumen.example",
+   "name": "mia",
+   "password": "correct horse battery",
+   "as": "miaReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "mia@lumen.example",
+   "as": "miaMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$miaMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "mia@lumen.example",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "miaIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$miaIn.accessToken",
+   "as": "mia"
+  },
+  {
+   "op": "uuid",
+   "as": "miaInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$miaInvId",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "email": "mia@lumen.example"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "mia@lumen.example",
+   "as": "miaInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$miaInvMail.token",
+   "claims": "$mia",
+   "expect": {
+    "ok": false,
+    "reason": "sso_required"
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "email": "mia@lumen.example"
+   },
+   "as": "miaSsoStart",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "company",
+   "url": "$miaSsoStart.url",
+   "user": {
+    "sub": "c-mia",
+    "email": "mia@lumen.example",
+    "email_verified": true
+   },
+   "as": "miaSsoCb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$miaSsoCb",
+   "as": "miaSso",
+   "expect": {
+    "ok": true,
+    "accountId": "$mia.sub"
+   }
+  },
+  {
+   "op": "check",
+   "api": "sso",
+   "token": "$miaSso.accessToken",
+   "as": "miaSsoClaims"
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$miaInvMail.token",
+   "claims": "$miaSsoClaims",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$mia",
+   "tenant": "$lumen",
+   "as": "asMia"
+  },
+  {
+   "op": "query",
+   "query": "identity.GetIdentity",
+   "tenant": "$lumen",
+   "context": "$asMia",
+   "data": {
+    "identityId": "$asMia.senderIdentity"
+   },
+   "expect": {
+    "ok": false,
+    "code": "sso_required"
+   }
+  },
+  {
+   "op": "contextFor",
+   "api": "sso",
+   "claims": "$miaSsoClaims",
+   "tenant": "$lumen",
+   "as": "asMiaSso"
+  },
+  {
+   "op": "query",
+   "query": "identity.GetIdentity",
+   "tenant": "$lumen",
+   "context": "$asMiaSso",
+   "data": {
+    "identityId": "$asMia.senderIdentity"
+   },
+   "expect": {
+    "ok": true,
+    "value": {
+     "id": "$asMia.senderIdentity"
+    }
+   }
+  },
+  {
+   "op": "query",
+   "query": "identity.GetIdentity",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "identityId": "$asLiam.senderIdentity"
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "register",
+   "email": "nils@lumen.example",
+   "name": "nils",
+   "password": "correct horse battery",
+   "as": "nilsReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "nils@lumen.example",
+   "as": "nilsMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$nilsMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "nils@lumen.example",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "nilsIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$nilsIn.accessToken",
+   "as": "nils"
+  },
+  {
+   "op": "uuid",
+   "as": "nilsInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$nilsInvId",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "email": "nils@lumen.example",
+    "owner": true
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "nils@lumen.example",
+   "as": "nilsInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$nilsInvMail.token",
+   "claims": "$nils",
+   "expect": {
+    "ok": true,
+    "accountId": "$nils.sub",
+    "tenant": "$lumen"
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "email": "mia@lumen.example"
+   },
+   "as": "takeoverStart",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "company",
+   "url": "$takeoverStart.url",
+   "user": {
+    "sub": "c-evil",
+    "email": "kate@example.com",
+    "email_verified": true
+   },
+   "as": "takeoverCb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$takeoverCb",
+   "as": "takeover",
+   "expect": {
+    "ok": false,
+    "reason": "email_not_in_domain"
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "email": "mia@lumen.example"
+   },
+   "as": "strangerStart",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "oidcLogin",
+   "provider": "company",
+   "url": "$strangerStart.url",
+   "user": {
+    "sub": "c-zed",
+    "email": "zed@elsewhere.example",
+    "email_verified": true
+   },
+   "as": "strangerCb"
+  },
+  {
+   "op": "oidcFinish",
+   "api": "sso",
+   "callback": "$strangerCb",
+   "as": "stranger",
+   "expect": {
+    "ok": false,
+    "reason": "email_not_in_domain"
+   }
+  },
+  {
+   "op": "serviceContext",
+   "api": "sso",
+   "as": "ssoService"
+  },
+  {
+   "op": "query",
+   "query": "account.FindAccountByEmail",
+   "tenant": "platform",
+   "context": "$ssoService",
+   "data": {
+    "email": "zed@elsewhere.example"
+   },
+   "expect": {
+    "ok": false,
+    "code": "not_found"
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "email": "someone@unknown.example"
+   },
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "oidcStart",
+   "api": "sso",
+   "by": {
+    "provider": "nope"
+   },
+   "expect": {
+    "ok": false
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "8. lists show what one may see; Explain says why"
+  },
+  {
+   "op": "register",
+   "email": "nora@example.com",
+   "name": "nora",
+   "password": "correct horse battery",
+   "as": "noraReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "nora@example.com",
+   "as": "noraMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$noraMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "nora@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "noraIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$noraIn.accessToken",
+   "as": "nora"
+  },
+  {
+   "op": "uuid",
+   "as": "noras"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$nora",
+   "as": "noraAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$noras",
+   "tenant": "$noras",
+   "context": "$noraAccount",
+   "data": {
+    "slug": "noras",
+    "name": "Nora's",
+    "owner": {
+     "accountId": "$nora.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$nora",
+   "tenant": "$noras",
+   "as": "asNora"
+  },
+  {
+   "op": "uuid",
+   "as": "buyers"
+  },
+  {
+   "op": "submit",
+   "command": "group.group.CreateGroup",
+   "aggregateId": "$buyers",
+   "tenant": "$noras",
+   "context": "$asNora",
+   "data": {
+    "name": "Buyers",
+    "permissions": [
+     {
+      "pattern": "shop.PlaceOrder"
+     },
+     {
+      "pattern": "shop.ListOrders"
+     },
+     {
+      "pattern": "shop.GetOrder",
+      "when": "owner"
+     }
+    ]
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "register",
+   "email": "oscar@example.com",
+   "name": "oscar",
+   "password": "correct horse battery",
+   "as": "oscarReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "oscar@example.com",
+   "as": "oscarMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$oscarMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "oscar@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "oscarIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$oscarIn.accessToken",
+   "as": "oscar"
+  },
+  {
+   "op": "uuid",
+   "as": "oscarInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$oscarInvId",
+   "tenant": "$noras",
+   "context": "$asNora",
+   "data": {
+    "email": "oscar@example.com",
+    "groups": [
+     {
+      "group": "$buyers"
+     }
+    ]
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "oscar@example.com",
+   "as": "oscarInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$oscarInvMail.token",
+   "claims": "$oscar",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$oscar",
+   "tenant": "$noras",
+   "as": "asoscar"
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o-oscar",
+   "tenant": "$noras",
+   "context": "$asoscar",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "register",
+   "email": "pia@example.com",
+   "name": "pia",
+   "password": "correct horse battery",
+   "as": "piaReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "pia@example.com",
+   "as": "piaMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$piaMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "pia@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "piaIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$piaIn.accessToken",
+   "as": "pia"
+  },
+  {
+   "op": "uuid",
+   "as": "piaInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$piaInvId",
+   "tenant": "$noras",
+   "context": "$asNora",
+   "data": {
+    "email": "pia@example.com",
+    "groups": [
+     {
+      "group": "$buyers"
+     }
+    ]
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "pia@example.com",
+   "as": "piaInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$piaInvMail.token",
+   "claims": "$pia",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$pia",
+   "tenant": "$noras",
+   "as": "aspia"
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "o-pia",
+   "tenant": "$noras",
+   "context": "$aspia",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "query",
+   "query": "shop.ListOrders",
+   "tenant": "$noras",
+   "context": "$asoscar",
+   "expect": {
+    "ok": true,
+    "value": [
+     "o-oscar"
+    ]
+   }
+  },
+  {
+   "op": "query",
+   "query": "shop.ListOrders",
+   "tenant": "$noras",
+   "context": "$aspia",
+   "expect": {
+    "ok": true,
+    "value": [
+     "o-pia"
+    ]
+   }
+  },
+  {
+   "op": "query",
+   "query": "shop.ListOrders",
+   "tenant": "$noras",
+   "context": "$asNora",
+   "expect": {
+    "ok": true,
+    "value": [
+     "o-oscar",
+     "o-pia"
+    ]
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.Explain",
+   "tenant": "$noras",
+   "context": "$asoscar",
+   "data": {
+    "identityId": "$asoscar.senderIdentity",
+    "type": "shop.GetOrder",
+    "aggregateType": "order",
+    "aggregateId": "o-oscar"
+   },
+   "expect": {
+    "ok": true,
+    "value": {
+     "allowed": true
+    }
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.Explain",
+   "tenant": "$noras",
+   "context": "$asoscar",
+   "data": {
+    "identityId": "$asoscar.senderIdentity",
+    "type": "shop.GetOrder",
+    "aggregateType": "order",
+    "aggregateId": "o-pia"
+   },
+   "expect": {
+    "ok": true,
+    "value": {
+     "allowed": false,
+     "code": "forbidden"
+    }
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.Explain",
+   "tenant": "$noras",
+   "context": "$asNora",
+   "data": {
+    "identityId": "$aspia.senderIdentity",
+    "type": "shop.PlaceOrder"
+   },
+   "expect": {
+    "ok": true,
+    "value": {
+     "allowed": true
+    }
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.Explain",
+   "tenant": "$noras",
+   "context": "$asoscar",
+   "data": {
+    "identityId": "$aspia.senderIdentity",
+    "type": "shop.PlaceOrder"
+   },
+   "expect": {
+    "ok": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$noras",
+   "context": "$asNora"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$noras",
+   "context": "$asNora"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$noras",
+   "context": "$asoscar"
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "9. invitation links; a query about one order is decided on that order"
+  },
+  {
+   "op": "register",
+   "email": "link-olga@example.com",
+   "name": "link-olga",
+   "password": "correct horse battery",
+   "as": "olgaReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "link-olga@example.com",
+   "as": "olgaMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$olgaMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "link-olga@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "olgaIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$olgaIn.accessToken",
+   "as": "olga"
+  },
+  {
+   "op": "uuid",
+   "as": "olgas"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$olga",
+   "as": "olgaAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$olgas",
+   "tenant": "$olgas",
+   "context": "$olgaAccount",
+   "data": {
+    "slug": "olgas-shop",
+    "name": "Olga's shop",
+    "owner": {
+     "accountId": "$olga.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$olga",
+   "tenant": "$olgas",
+   "as": "asOlga"
+  },
+  {
+   "op": "uuid",
+   "as": "olgaCustomers"
+  },
+  {
+   "op": "submit",
+   "command": "group.group.CreateGroup",
+   "aggregateId": "$olgaCustomers",
+   "tenant": "$olgas",
+   "context": "$asOlga",
+   "data": {
+    "name": "Customers",
+    "permissions": [
+     {
+      "pattern": "shop.PlaceOrder"
+     },
+     {
+      "pattern": "shop.GetOrder",
+      "when": "owner"
+     }
+    ]
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "createInvitationLink",
+   "context": "$asOlga",
+   "tenant": "$olgas",
+   "groups": [
+    {
+     "group": "$olgaCustomers"
+    }
+   ],
+   "label": "website",
+   "maxUses": 2,
+   "as": "link",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "peekInvitationLink",
+   "token": "$link.token",
+   "expect": {
+    "tenant": "$olgas",
+    "linkId": "$link.linkId",
+    "label": "website",
+    "usable": true
+   }
+  },
+  {
+   "op": "peekInvitationLink",
+   "token": {
+    "tamper": "$link.token",
+    "how": "lastChar"
+   },
+   "expect": null
+  },
+  {
+   "op": "register",
+   "email": "link-pia@example.com",
+   "name": "link-pia",
+   "password": "correct horse battery",
+   "as": "lpiaReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "link-pia@example.com",
+   "as": "lpiaMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$lpiaMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "link-pia@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "lpiaIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$lpiaIn.accessToken",
+   "as": "lpia"
+  },
+  {
+   "op": "register",
+   "email": "link-quinn@example.com",
+   "name": "link-quinn",
+   "password": "correct horse battery",
+   "as": "lquinnReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "link-quinn@example.com",
+   "as": "lquinnMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$lquinnMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "link-quinn@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "lquinnIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$lquinnIn.accessToken",
+   "as": "lquinn"
+  },
+  {
+   "op": "register",
+   "email": "link-rosa@example.com",
+   "name": "link-rosa",
+   "password": "correct horse battery",
+   "as": "lrosaReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "link-rosa@example.com",
+   "as": "lrosaMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$lrosaMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "link-rosa@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "lrosaIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$lrosaIn.accessToken",
+   "as": "lrosa"
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$lpia",
+   "token": "$link.token",
+   "expect": {
+    "ok": true,
+    "tenant": "$olgas"
+   }
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$lpia",
+   "token": "$link.token",
+   "expect": {
+    "ok": false,
+    "reason": "exists"
+   }
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$lquinn",
+   "token": "$link.token",
+   "expect": {
+    "ok": true,
+    "tenant": "$olgas"
+   }
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$lrosa",
+   "token": "$link.token",
+   "expect": {
+    "ok": false,
+    "reason": "used_up"
+   }
+  },
+  {
+   "op": "register",
+   "email": "link-sven@example.com",
+   "name": "link-sven",
+   "password": "correct horse battery",
+   "as": "lsvenReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "link-sven@example.com",
+   "as": "lsvenMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$lsvenMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "link-sven@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "lsvenIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$lsvenIn.accessToken",
+   "as": "lsven"
+  },
+  {
+   "op": "signOut",
+   "claims": "$lsven"
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$lsven",
+   "token": "$link.token",
+   "expect": {
+    "ok": false,
+    "reason": "unauthenticated"
+   }
+  },
+  {
+   "op": "peekInvitationLink",
+   "token": "$link.token",
+   "expect": {
+    "usable": false
+   }
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$lrosa",
+   "token": {
+    "tamper": "$link.token",
+    "how": "lastChar"
+   },
+   "expect": {
+    "ok": false,
+    "reason": "invalid_token"
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$lpia",
+   "tenant": "$olgas",
+   "as": "asLpia"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$lquinn",
+   "tenant": "$olgas",
+   "as": "asLquinn"
+  },
+  {
+   "op": "submit",
+   "command": "shop.order.PlaceOrder",
+   "aggregateId": "p1",
+   "tenant": "$olgas",
+   "context": "$asLpia",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "query",
+   "query": "shop.GetOrder",
+   "tenant": "$olgas",
+   "context": "$asLpia",
+   "data": {
+    "id": "p1"
+   },
+   "expect": {
+    "ok": true,
+    "value": {
+     "customer": "$asLpia.senderIdentity"
+    }
+   }
+  },
+  {
+   "op": "query",
+   "query": "shop.GetOrder",
+   "tenant": "$olgas",
+   "context": "$asLquinn",
+   "data": {
+    "id": "p1"
+   },
+   "expect": {
+    "ok": false,
+    "code": "forbidden"
+   }
+  },
+  {
+   "op": "query",
+   "query": "shop.GetOrder",
+   "tenant": "$olgas",
+   "context": "$asOlga",
+   "data": {
+    "id": "nope"
+   },
+   "expect": {
+    "ok": false,
+    "code": "not_found"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.Explain",
+   "tenant": "$olgas",
+   "context": "$asOlga",
+   "data": {
+    "identityId": "$asLquinn.senderIdentity",
+    "type": "shop.GetOrder",
+    "aggregateType": "order",
+    "aggregateId": "p1"
+   },
+   "expect": {
+    "ok": true,
+    "value": {
+     "allowed": false
+    }
+   }
+  },
+  {
+   "op": "createInvitationLink",
+   "context": "$asLpia",
+   "tenant": "$olgas",
+   "groups": [
+    {
+     "group": "$olgaCustomers"
+    }
+   ],
+   "expect": {
+    "ok": false,
+    "reason": "forbidden"
+   }
+  },
+  {
+   "op": "createInvitationLink",
+   "context": "$asOlga",
+   "tenant": "$olgas",
+   "groups": [
+    {
+     "group": "$olgaCustomers"
+    }
+   ],
+   "as": "second",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "invitation.link.RevokeInvitationLink",
+   "aggregateId": "$second.linkId",
+   "tenant": "$olgas",
+   "context": "$asOlga",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "peekInvitationLink",
+   "token": "$second.token",
+   "expect": null
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$lrosa",
+   "token": "$second.token",
+   "expect": {
+    "ok": false,
+    "reason": "invalid_token"
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "10. accepting and joining check the tenant too: suspended, a second factor required"
+  },
+  {
+   "op": "register",
+   "email": "join-tara@example.com",
+   "name": "join-tara",
+   "password": "correct horse battery",
+   "as": "taraReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "join-tara@example.com",
+   "as": "taraMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$taraMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "join-tara@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "taraIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$taraIn.accessToken",
+   "as": "tara"
+  },
+  {
+   "op": "uuid",
+   "as": "taras"
+  },
+  {
+   "op": "contextFor",
+   "claims": "$tara",
+   "as": "taraAccount"
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.CreateTenant",
+   "aggregateId": "$taras",
+   "tenant": "$taras",
+   "context": "$taraAccount",
+   "data": {
+    "slug": "taras",
+    "name": "Tara's",
+    "owner": {
+     "accountId": "$tara.sub"
+    },
+    "status": "active"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "contextFor",
+   "claims": "$tara",
+   "tenant": "$taras",
+   "as": "asTara"
+  },
+  {
+   "op": "register",
+   "email": "join-ugo@example.com",
+   "name": "join-ugo",
+   "password": "correct horse battery",
+   "as": "ugoReg",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "join-ugo@example.com",
+   "as": "ugoMail",
+   "expect": {
+    "purpose": "verify"
+   }
+  },
+  {
+   "op": "verifyEmail",
+   "token": "$ugoMail.token",
+   "expect": true
+  },
+  {
+   "op": "signIn",
+   "email": "join-ugo@example.com",
+   "password": "correct horse battery",
+   "ip": "203.0.113.7",
+   "as": "ugoIn",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "check",
+   "token": "$ugoIn.accessToken",
+   "as": "ugo"
+  },
+  {
+   "op": "createInvitationLink",
+   "context": "$asTara",
+   "tenant": "$taras",
+   "groups": [],
+   "as": "taraLink",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "ugoInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$ugoInvId",
+   "tenant": "$taras",
+   "context": "$asTara",
+   "data": {
+    "email": "join-ugo@example.com"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "join-ugo@example.com",
+   "as": "ugoInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.RequireMfa",
+   "aggregateId": "$taras",
+   "tenant": "$taras",
+   "context": "$asTara",
+   "data": {
+    "required": true
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$ugo",
+   "token": "$taraLink.token",
+   "expect": {
+    "ok": false,
+    "reason": "mfa_required"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$ugoInvMail.token",
+   "claims": "$ugo",
+   "expect": {
+    "ok": false,
+    "reason": "mfa_required"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.RequireMfa",
+   "aggregateId": "$taras",
+   "tenant": "$taras",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "data": {
+    "required": false
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "uuid",
+   "as": "veraInvId"
+  },
+  {
+   "op": "submit",
+   "command": "invitation.invitation.CreateInvitation",
+   "aggregateId": "$veraInvId",
+   "tenant": "$taras",
+   "context": "$asTara",
+   "data": {
+    "email": "join-vera@example.com"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "mail",
+   "to": "join-vera@example.com",
+   "as": "veraInvMail",
+   "expect": {
+    "purpose": "invitation"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.SuspendTenant",
+   "aggregateId": "$taras",
+   "tenant": "$taras",
+   "context": "$asTara",
+   "data": {
+    "reason": "owner_requested"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "joinWithInvitationLink",
+   "claims": "$ugo",
+   "token": "$taraLink.token",
+   "expect": {
+    "ok": false,
+    "reason": "tenant_suspended"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$ugoInvMail.token",
+   "claims": "$ugo",
+   "expect": {
+    "ok": false,
+    "reason": "tenant_suspended"
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$veraInvMail.token",
+   "name": "Vera",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": false,
+    "reason": "tenant_not_active"
+   }
+  },
+  {
+   "op": "serviceContext",
+   "as": "apiService"
+  },
+  {
+   "op": "query",
+   "query": "account.FindAccountByEmail",
+   "tenant": "platform",
+   "context": "$apiService",
+   "data": {
+    "email": "join-vera@example.com"
+   },
+   "expect": {
+    "ok": false,
+    "code": "not_found"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "tenancy.tenant.ReactivateTenant",
+   "aggregateId": "$taras",
+   "tenant": "$taras",
+   "context": "$asTara",
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$ugoInvMail.token",
+   "claims": "$ugo",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "acceptInvitation",
+   "token": "$veraInvMail.token",
+   "name": "Vera",
+   "password": "correct horse battery",
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "query",
+   "query": "account.FindAccountByEmail",
+   "tenant": "platform",
+   "context": "$apiService",
+   "data": {
+    "email": "join-vera@example.com"
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "11. a process gets an identity and a key, and acts only with a platform group"
+  },
+  {
+   "op": "processIdentityId",
+   "process": "shop.dispatch",
+   "as": "procId"
+  },
+  {
+   "op": "waitIdentityKey",
+   "identityId": "$procId",
+   "as": "procKey"
+  },
+  {
+   "op": "query",
+   "query": "identity.GetIdentity",
+   "tenant": "platform",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "data": {
+    "identityId": "$procId"
+   },
+   "expect": {
+    "ok": true,
+    "value": {
+     "kind": "process",
+     "displayName": "shop.dispatch",
+     "memberships": []
+    }
+   }
+  },
+  {
+   "op": "submit",
+   "command": "shop.parcel.RequestParcel",
+   "aggregateId": "parcel-1",
+   "tenant": "$graces",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "waitCase",
+   "process": "shop.dispatch",
+   "case": "parcel-1#1",
+   "state": "incident",
+   "expect": {
+    "state": "incident"
+   }
+  },
+  {
+   "op": "submit",
+   "command": "group.group.CreateGroup",
+   "aggregateId": "g-dispatch",
+   "tenant": "platform",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "data": {
+    "name": "Dispatch",
+    "permissions": [
+     {
+      "pattern": "shop.ShipParcel"
+     }
+    ]
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "submit",
+   "command": "identity.identity.GrantMembership",
+   "aggregateId": "$procId",
+   "tenant": "platform",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "data": {
+    "membershipId": "dispatch",
+    "group": "g-dispatch"
+   },
+   "expect": {
+    "committed": true
+   }
+  },
+  {
+   "op": "retryCase",
+   "process": "shop.dispatch",
+   "case": "parcel-1#1",
+   "tenant": "$graces"
+  },
+  {
+   "op": "waitCase",
+   "process": "shop.dispatch",
+   "case": "parcel-1#1",
+   "state": "ended",
+   "expect": {
+    "state": "ended"
+   }
+  },
+  {
+   "op": "processAct",
+   "process": "shop.dispatch",
+   "context": {
+    "senderTenant": "platform",
+    "senderIdentity": "$procId",
+    "senderSession": "$procKey"
+   },
+   "expect": {
+    "changed": false
+   }
+  },
+  {
+   "op": "value",
+   "value": null,
+   "note": "12. the read side at the end"
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$graces",
+   "context": "$asGrace",
+   "data": {
+    "tenantId": "$graces"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$graces",
+   "context": "$asGrace"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$graces",
+   "context": "$asGrace"
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$graces",
+   "context": "$asGrace"
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$henrys",
+   "context": "$asHenry",
+   "data": {
+    "tenantId": "$henrys"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$henrys",
+   "context": "$asHenry"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$henrys",
+   "context": "$asHenry"
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$henrys",
+   "context": "$asHenry"
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$lumen",
+   "context": "$asLiam",
+   "data": {
+    "tenantId": "$lumen"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$lumen",
+   "context": "$asLiam"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$lumen",
+   "context": "$asLiam"
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$lumen",
+   "context": "$asLiam"
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$noras",
+   "context": "$asNora",
+   "data": {
+    "tenantId": "$noras"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$noras",
+   "context": "$asNora"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$noras",
+   "context": "$asNora"
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$noras",
+   "context": "$asNora"
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$olgas",
+   "context": "$asOlga",
+   "data": {
+    "tenantId": "$olgas"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$olgas",
+   "context": "$asOlga"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$olgas",
+   "context": "$asOlga"
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$olgas",
+   "context": "$asOlga"
+  },
+  {
+   "op": "query",
+   "query": "tenancy.GetTenant",
+   "tenant": "$taras",
+   "context": "$asTara",
+   "data": {
+    "tenantId": "$taras"
+   }
+  },
+  {
+   "op": "query",
+   "query": "group.ListGroups",
+   "tenant": "$taras",
+   "context": "$asTara"
+  },
+  {
+   "op": "query",
+   "query": "identity.ListIdentities",
+   "tenant": "$taras",
+   "context": "$asTara"
+  },
+  {
+   "op": "query",
+   "query": "invitation.ListInvitations",
+   "tenant": "$taras",
+   "context": "$asTara"
+  },
+  {
+   "op": "query",
+   "query": "identity.GetIdentity",
+   "tenant": "platform",
+   "context": {
+    "bypassAuthorization": true
+   },
+   "data": {
+    "identityId": "$procId"
+   }
+  }
+ ]
+}

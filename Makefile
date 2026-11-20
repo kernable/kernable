@@ -1,4 +1,4 @@
-.PHONY: test check check-rust check-crash check-sdks check-docs prune py check-packages flaky torture fuzz docs soak
+.PHONY: test check check-rust check-crash check-sdks check-docs prune py parity check-packages flaky torture fuzz docs soak
 # The simple tier: syntax, types and in-process tests, with no kernel or worker process and no
 # real waiting. Runs in about a minute; `make check` runs everything.
 test: py
@@ -41,6 +41,17 @@ check-sdks: prune py
 	cd sdks/python && .venv/bin/python -m unittest discover tests
 	cd kits/typescript && npm install --no-audit --no-fund --silent && npm run -s check
 	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t . -p 'e2e_*.py'
+	$(MAKE) parity
+
+# Kit parity: one scenario through the TypeScript, Python and Rust kits, the kit's domains hosted
+# in one language and driven through another's KitApi, every pair; every run's results, mails and
+# stored events must equal the TypeScript/TypeScript run's (kits/parity/README.md).
+parity: py
+	cargo build -p kernable-kernel
+	cargo build -p kernable-kit --example parity
+	cd kits/typescript && npm install --no-audit --no-fund --silent
+	node kits/parity/scenario.ts
+	node --conditions=source --no-warnings kits/parity/run.ts
 
 # The documentation: generated reference up to date, the site builds, every example runs.
 check-docs: prune py
