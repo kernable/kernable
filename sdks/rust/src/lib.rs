@@ -276,7 +276,10 @@ impl From<PathBuf> for Options {
 /// current one; one that answers `UNAVAILABLE` (a standby says `not_primary`) or cannot be
 /// reached hands over to the next.
 pub(crate) struct Channels {
-    all: Vec<Channel>,
+    all: Vec<std::sync::Mutex<Channel>>,
+    /// Each channel's address and how to connect to it again (see [`Client::ended`]).
+    addresses: Vec<String>,
+    tls: Option<Tls>,
     current: std::sync::atomic::AtomicUsize,
     /// The newest position this client's own commands committed at on these kernels (one
     /// partition): its queries wait for it, on whichever copy answers (read your writes).
@@ -417,6 +420,7 @@ impl Client {
                     .iter()
                     .map(|a| {
                         transport::connect_lazy_among(a, self.parts.tls.as_ref(), own.len() > 1)
+                            .map(std::sync::Mutex::new)
                             .map_err(|e| {
                                 tonic::Status::internal(format!("partition {name}, {a}: {e}"))
                             })
@@ -424,6 +428,8 @@ impl Client {
                     .collect::<Result<Vec<_>, _>>()?;
                 let channels = Arc::new(Channels {
                     all,
+                    addresses: own.iter().map(|a| a.to_string()).collect(),
+                    tls: self.parts.tls.clone(),
                     current: Default::default(),
                     seen: Default::default(),
                 });
@@ -504,12 +510,23 @@ impl Client {
             .channels
             .current
             .load(std::sync::atomic::Ordering::SeqCst);
-        (at, self.channels.all[at].clone())
+        (at, self.channels.all[at].lock().unwrap().clone())
     }
 
     /// A call or stream on channel `at` ended with `status`: a kernel that is not the primary,
-    /// or cannot be reached, hands over to the next address.
+    /// or cannot be reached, hands over to the next address. A refusal that a damaged
+    /// connection can cause (see [`stale_connection`]) replaces the channel's connection, so the
+    /// next call starts on a new one.
     pub(crate) fn ended(&self, at: usize, status: &tonic::Status) -> bool {
+        if stale_connection(status)
+            && let Ok(fresh) = transport::connect_lazy_among(
+                &self.channels.addresses[at],
+                self.channels.tls.as_ref(),
+                self.channels.all.len() > 1,
+            )
+        {
+            *self.channels.all[at].lock().unwrap() = fresh;
+        }
         let n = self.channels.all.len();
         let away = status.code() == tonic::Code::Unavailable || not_connected(status);
         if n > 1 && away {
@@ -680,16 +697,21 @@ impl Kernable {
         let grant_file = explicit
             .clone()
             .unwrap_or_else(|| key_file.with_extension("grant"));
-        let grant =
-            if explicit.is_some() || grant_file.exists() {
-                let hex = std::fs::read_to_string(&grant_file)
-                    .map_err(|e| Error::Config(format!("grant {}: {e}", grant_file.display())))?;
-                Some(hex.trim().parse().map_err(|_| {
-                    Error::Config(format!("grant {} is not hex", grant_file.display()))
-                })?)
-            } else {
-                None
-            };
+        let grant = if explicit.is_some() || grant_file.exists() {
+            let hex = std::fs::read_to_string(&grant_file)
+                .map_err(|e| Error::Config(format!("grant {}: {e}", grant_file.display())))?;
+            let mut grant: MetadataValue<tonic::metadata::Ascii> = hex
+                .trim()
+                .parse()
+                .map_err(|_| Error::Config(format!("grant {} is not hex", grant_file.display())))?;
+            // Sent in full with every request, never kept in HTTP/2's header table: a value
+            // damaged there would be read wrong for every later request on the connection,
+            // and a credential stays out of compression (CRIME-like attacks).
+            grant.set_sensitive(true);
+            Some(grant)
+        } else {
+            None
+        };
         let tls = match options.tls {
             Some(tls) => Some(tls),
             None => tls_from_env()?,
@@ -716,6 +738,7 @@ impl Kernable {
             .iter()
             .map(|u| {
                 transport::connect_lazy_among(u, tls.as_ref(), several)
+                    .map(std::sync::Mutex::new)
                     .map_err(|e| Error::Config(format!("kernel {u}: {e}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -724,6 +747,8 @@ impl Kernable {
         }
         let channels = Arc::new(Channels {
             all,
+            addresses: urls.iter().map(|u| u.to_string()).collect(),
+            tls: tls.clone(),
             current: Default::default(),
             seen: Default::default(),
         });
@@ -1868,6 +1893,22 @@ fn dropped(status: &tonic::Status) -> bool {
         || message.contains("h2 protocol error")
         // hyper: the request never went out, its connection had closed (net-reset in the soak).
         || message.contains("operation was canceled")
+}
+
+/// Whether `status` is a refusal a damaged connection can cause, which then repeats for every
+/// request on it: HTTP/2 keeps headers it saw in a table both sides share, so the grant, the
+/// same in every request, damaged on the way stays wrong there. The credentials refused
+/// (UNAUTHENTICATED, or the grant unreadable or for another key); a right refusal of this kind
+/// costs only a new connection. (UNIMPLEMENTED, a damaged method path, is left out: an older
+/// kernel answers it for good.)
+pub(crate) fn stale_connection(status: &tonic::Status) -> bool {
+    match status.code() {
+        tonic::Code::Unauthenticated => true,
+        tonic::Code::InvalidArgument | tonic::Code::PermissionDenied => {
+            status.message().contains("grant")
+        }
+        _ => false,
+    }
 }
 
 fn not_connected(status: &tonic::Status) -> bool {

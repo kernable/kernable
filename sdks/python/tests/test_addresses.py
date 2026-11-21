@@ -59,7 +59,36 @@ class SeveralAddresses(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10, "the client turned to the other address too late")
 
 
-def _freezable_proxy(to: str) -> tuple[str, threading.Event]:
+class Connections(unittest.TestCase):
+    def test_a_refused_grant_is_not_tried_again_on_the_same_connection(self):
+        """HTTP/2 keeps headers in a table both sides share, so a header damaged on the way (the
+        grant) stays wrong there for every later request: the next call opens a new connection."""
+        kernel = TestKernel(["counters.*"])
+        kernel.start()
+        self.addCleanup(kernel.dispose)
+        proxied, _, accepted = _counting_proxy(kernel.url.removeprefix("unix:"))
+        # Hex, but no Grant: the kernel refuses it as unreadable.
+        grant = os.path.join(kernel.dir, "damaged.grant")
+        with open(grant, "w") as f:
+            f.write("ff00ff00")
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
+            k = Kernable(proxied, kernel.app_key, grant=grant, timeout_s=10)
+        self.addCleanup(k.close)
+        for i in range(3):
+            with self.assertRaises(Exception) as refused:
+                k.submit("counters", "Counter", f"c{i}", "Increment", {"by": 1})
+            self.assertIn("grant", str(refused.exception))
+            self.assertEqual(accepted(), i + 1, f"call {i}")
+
+
+def _counting_proxy(to: str):
+    """`_freezable_proxy` that also counts the connections it accepted."""
+    count = [0]
+    address, frozen = _freezable_proxy(to, lambda: count.__setitem__(0, count[0] + 1))
+    return address, frozen, lambda: count[0]
+
+
+def _freezable_proxy(to: str, on_accept=lambda: None) -> tuple[str, threading.Event]:
     """A TCP proxy to the kernel's socket at `to` that can be frozen, as when the network cuts a
     kernel off without a word (a partition): its address and the switch."""
     frozen = threading.Event()
@@ -84,6 +113,7 @@ def _freezable_proxy(to: str) -> tuple[str, threading.Event]:
     def accept() -> None:
         while True:
             tcp, _ = listener.accept()
+            on_accept()
             unix = socket.socket(socket.AF_UNIX)
             unix.connect(to)
             threading.Thread(target=pump, args=(tcp, unix), daemon=True).start()

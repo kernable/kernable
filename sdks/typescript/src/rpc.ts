@@ -468,6 +468,27 @@ export function moving(err: unknown): boolean {
 /** How long a request waits for its tenant's move to end. */
 const MOVE_WAIT_MS = 30_000;
 
+/**
+ * Whether `err` is a refusal a damaged connection can cause, which then repeats for every
+ * request on it: HTTP/2 keeps headers it saw in a table both sides share, so the grant, the
+ * same in every request, damaged on the way stays wrong there. The credentials refused
+ * (UNAUTHENTICATED, or the grant unreadable or for another key); a right refusal of this kind
+ * costs only a new connection. (UNIMPLEMENTED, a damaged method path, is left out: an older
+ * kernel answers it for good.)
+ */
+export function staleConnection(err: unknown): boolean {
+  const e = err as grpc.ServiceError;
+  switch (e?.code) {
+    case grpc.status.UNAUTHENTICATED:
+      return true;
+    case grpc.status.INVALID_ARGUMENT:
+    case grpc.status.PERMISSION_DENIED:
+      return typeof e.details === "string" && e.details.includes("grant");
+    default:
+      return false;
+  }
+}
+
 /** Whether a kernel refused a request as one for a tenant of another partition. */
 export function wrongPartition(err: unknown): boolean {
   const e = err as grpc.ServiceError;
@@ -676,24 +697,38 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
   const creds = tls
     ? grpc.credentials.createSsl(readFileSync(tls.ca), readFileSync(tls.key), readFileSync(tls.cert))
     : grpc.credentials.createInsecure();
-  const keepalive = urls.length > 1 ? PAIR_KEEPALIVE : KEEPALIVE;
-  const targets = urls.map((u) => ({
-    commands: new v1.CommandService(u, creds, keepalive),
-    workers: new v1.WorkerGateway(u, creds, keepalive),
-    events: new v1.EventService(u, creds, keepalive),
-    listeners: new v1.ListenerService(u, creds, keepalive),
-    queries: new v1.QueryService(u, creds, keepalive),
-    data: new v1.DataService(u, creds, {
-      ...keepalive,
-      "grpc.max_send_message_length": MAX_DATA_MESSAGE,
-      "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
-    }),
-    cache: new v1.CacheService(u, creds, keepalive),
-    memberships: new v1.MembershipService(u, creds, keepalive),
-    processes: new v1.ProcessService(u, creds, keepalive),
-    partitions: new v1.PartitionService(u, creds, keepalive),
-  }));
+  // `kernable.connection` differs for each connection made anew (see `renew`): grpc-js shares
+  // a connection between clients of the same options.
+  let connections = 0;
+  const open = (u: string) => {
+    const keepalive = { ...(urls.length > 1 ? PAIR_KEEPALIVE : KEEPALIVE), "kernable.connection": connections++ };
+    return {
+      commands: new v1.CommandService(u, creds, keepalive),
+      workers: new v1.WorkerGateway(u, creds, keepalive),
+      events: new v1.EventService(u, creds, keepalive),
+      listeners: new v1.ListenerService(u, creds, keepalive),
+      queries: new v1.QueryService(u, creds, keepalive),
+      data: new v1.DataService(u, creds, {
+        ...keepalive,
+        "grpc.max_send_message_length": MAX_DATA_MESSAGE,
+        "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
+      }),
+      cache: new v1.CacheService(u, creds, keepalive),
+      memberships: new v1.MembershipService(u, creds, keepalive),
+      processes: new v1.ProcessService(u, creds, keepalive),
+      partitions: new v1.PartitionService(u, creds, keepalive),
+    };
+  };
+  const targets = urls.map(open);
   type Target = (typeof targets)[number];
+  // A refusal a damaged connection can cause (`staleConnection`) replaces address `at`'s
+  // connection: calls under way on the old one finish, the next ones start on a new one.
+  const renew = (at: number, err: unknown) => {
+    if (!staleConnection(err)) return;
+    const old = targets[at];
+    targets[at] = open(urls[at]);
+    for (const client of Object.values(old)) client.close();
+  };
   let current = 0;
   // The newest position this client's own commands committed at (see `Clients.seen`).
   let seen = 0;
@@ -737,6 +772,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
           client[rpc]({ ...req, protocol: PROTOCOL }, metadata, { deadline }, (err: grpc.ServiceError | null, res: R) => (err ? reject(err) : resolve(res))),
         );
       } catch (err) {
+        renew(at, err);
         if ((err as grpc.ServiceError).code !== grpc.status.UNAVAILABLE || Date.now() >= deadline) throw err;
         if (several) {
           next(at);
@@ -758,6 +794,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     const at = current;
     const call = open(targets[at]);
     call.on("error", (e) => {
+      renew(at, e);
       if (e.code === grpc.status.UNAVAILABLE) next(at);
     });
     return call;

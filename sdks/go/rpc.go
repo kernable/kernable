@@ -60,7 +60,9 @@ type target struct {
 // clients are the clients of one kernel, or of several (a pair): requests go to the current
 // one, and turn to the next on UNAVAILABLE or when it does not connect.
 type clients struct {
-	targets []*target
+	targets []atomic.Pointer[target]
+	// open makes a new connection to address i (see renew).
+	open    func(i int) (*target, error)
 	current atomic.Int64
 	// The newest position a command of this client committed at, on these kernels: its queries
 	// wait for it, on whichever copy answers (read your writes).
@@ -80,6 +82,51 @@ func (c *clients) saw(position uint64) {
 	}
 }
 
+// staleGrace is how long a connection replaced by renew stays open for the calls under way on
+// it (a worker's or listener's session), which then reconnect on the new one.
+const staleGrace = time.Minute
+
+// staleConnection is whether err is a refusal a damaged connection can cause, which then
+// repeats for every request on it: HTTP/2 keeps headers it saw in a table both sides share, so
+// the grant, the same in every request, damaged on the way stays wrong there. The credentials
+// refused (UNAUTHENTICATED, or the grant unreadable or for another key); a right refusal of
+// this kind costs only a new connection. (UNIMPLEMENTED, a damaged method path, is left out: an
+// older kernel answers it for good.)
+func staleConnection(err error) bool {
+	s := status.Convert(err)
+	switch s.Code() {
+	case codes.Unauthenticated:
+		return true
+	case codes.InvalidArgument, codes.PermissionDenied:
+		return strings.Contains(s.Message(), "grant")
+	}
+	return false
+}
+
+// target is address at's current connection.
+func (c *clients) target(at int64) *target { return c.targets[at].Load() }
+
+// renew replaces old, address at's connection, after err if it is a refusal a damaged
+// connection can cause: the next calls start on a new one, the old one closes after staleGrace.
+func (c *clients) renew(at int64, old *target, err error) {
+	if err == nil || !staleConnection(err) {
+		return
+	}
+	fresh, e := c.open(int(at))
+	if e != nil {
+		return
+	}
+	if !c.targets[at].CompareAndSwap(old, fresh) {
+		fresh.conn.Close()
+		fresh.data.Close()
+		return
+	}
+	time.AfterFunc(staleGrace, func() {
+		old.conn.Close()
+		old.data.Close()
+	})
+}
+
 // next turns to the next address, unless another call did so since `from`.
 func (c *clients) next(from int64) {
 	if len(c.targets) > 1 {
@@ -88,7 +135,8 @@ func (c *clients) next(from int64) {
 }
 
 func (c *clients) close() {
-	for _, t := range c.targets {
+	for i := range c.targets {
+		t := c.targets[i].Load()
 		t.conn.Close()
 		t.data.Close()
 	}
@@ -142,8 +190,9 @@ func dial(url string, files *TLSFiles, grant string, timeout time.Duration) (*cl
 			return nil, err
 		}
 	}
-	c := &clients{grant: grant, timeout: timeout}
-	for _, u := range urls {
+	c := &clients{grant: grant, timeout: timeout, targets: make([]atomic.Pointer[target], len(urls))}
+	c.open = func(i int) (*target, error) {
+		u := urls[i]
 		t := strings.TrimPrefix(u, "unix:")
 		if strings.HasPrefix(u, "unix:") {
 			t = "unix:" + t
@@ -158,9 +207,17 @@ func dial(url string, files *TLSFiles, grant string, timeout time.Duration) (*cl
 		data, err := grpc.NewClient(t, append(opts, grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(maxDataMessage), grpc.MaxCallSendMsgSize(maxDataMessage)))...)
 		if err != nil {
+			conn.Close()
 			return nil, err
 		}
-		c.targets = append(c.targets, &target{conn: conn, data: data})
+		return &target{conn: conn, data: data}, nil
+	}
+	for i := range urls {
+		t, err := c.open(i)
+		if err != nil {
+			return nil, err
+		}
+		c.targets[i].Store(t)
 	}
 	return c, nil
 }
@@ -240,7 +297,7 @@ func unary[R any](ctx context.Context, c *clients, timeout time.Duration, idempo
 	several := len(c.targets) > 1
 	for {
 		at := c.current.Load()
-		t := c.targets[at]
+		t := c.target(at)
 		conn := t.conn
 		if data {
 			conn = t.data
@@ -273,6 +330,7 @@ func unary[R any](ctx context.Context, c *clients, timeout time.Duration, idempo
 		if err == nil {
 			return r, nil
 		}
+		c.renew(at, t, err)
 		if status.Code(err) != codes.Unavailable || !time.Now().Before(deadline) {
 			return zero, err
 		}
@@ -304,7 +362,9 @@ func unary[R any](ctx context.Context, c *clients, timeout time.Duration, idempo
 // clients to the next. `failed` reports the stream's end.
 func (c *clients) stream() (conn *grpc.ClientConn, failed func(error)) {
 	at := c.current.Load()
-	return c.targets[at].conn, func(err error) {
+	t := c.target(at)
+	return t.conn, func(err error) {
+		c.renew(at, t, err)
 		if status.Code(err) == codes.Unavailable {
 			c.next(at)
 		}

@@ -1513,6 +1513,119 @@ class _Deadline(grpc.UnaryUnaryClientInterceptor):
         return continuation(details._replace(timeout=timeout, wait_for_ready=True), request)
 
 
+def _stale_connection(err: grpc.RpcError) -> bool:
+    """Whether `err` is a refusal a damaged connection can cause, which then repeats for every
+    request on it: HTTP/2 keeps headers it saw in a table both sides share, so the grant, the
+    same in every request, damaged on the way stays wrong there. The credentials refused
+    (`UNAUTHENTICATED`, or the grant unreadable or for another key); a right refusal of this
+    kind costs only a new connection. (`UNIMPLEMENTED`, a damaged method path, is left out: an
+    older kernel answers it for good.)"""
+    code = err.code() if callable(getattr(err, "code", None)) else None
+    if code == grpc.StatusCode.UNAUTHENTICATED:
+        return True
+    if code in (grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.PERMISSION_DENIED):
+        return "grant" in (err.details() or "")
+    return False
+
+
+class _Renewing(grpc.Channel):
+    """A channel to one address whose connection is replaced after a refusal a damaged
+    connection can cause (`_stale_connection`): the next calls start on a new one. The old one
+    is not closed, which would end the calls under way on it (a worker's session): it closes
+    when the last of them lets it go. `open(n)` makes the `n`th connection."""
+
+    def __init__(self, open):
+        self._open, self._made = open, 0
+        self._lock = threading.Lock()
+        self.raw = open(0)
+
+    def renew(self, err, raw) -> None:
+        if not isinstance(err, grpc.RpcError) or not _stale_connection(err):
+            return
+        with self._lock:
+            if self.raw is not raw:
+                return  # another call renewed it already
+            self._made += 1
+            self.raw = self._open(self._made)
+
+    def _unary(self, kind: str, method: str, *args, **kwargs):
+        renewing = self
+
+        def inner():
+            raw = renewing.raw
+            return raw, getattr(raw, kind)(method, *args, **kwargs)
+
+        class _Call:
+            def _attempt(self, how, request, *a, **kw):
+                raw, call = inner()
+                try:
+                    return getattr(call, how)(request, *a, **kw)
+                except grpc.RpcError as e:
+                    renewing.renew(e, raw)
+                    raise
+
+            def __call__(self, request, *a, **kw):
+                return self._attempt("__call__", request, *a, **kw)
+
+            def with_call(self, request, *a, **kw):
+                return self._attempt("with_call", request, *a, **kw)
+
+            def future(self, request, *a, **kw):
+                raw, call = inner()
+                f = call.future(request, *a, **kw)
+                f.add_done_callback(lambda f: renewing.renew(f.exception(), raw) if f.exception() else None)
+                return f
+
+        return _Call()
+
+    def _stream(self, kind: str, method: str, *args, **kwargs):
+        renewing = self
+
+        class _Iter:
+            def __init__(self, raw, inner):
+                self._raw, self._inner = raw, inner
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                try:
+                    return next(self._inner)
+                except grpc.RpcError as e:
+                    renewing.renew(e, self._raw)
+                    raise
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def call(request, *a, **kw):
+            raw = renewing.raw
+            return _Iter(raw, getattr(raw, kind)(method, *args, **kwargs)(request, *a, **kw))
+
+        return call
+
+    def unary_unary(self, method, *args, **kwargs):
+        return self._unary("unary_unary", method, *args, **kwargs)
+
+    def stream_unary(self, method, *args, **kwargs):
+        return self._unary("stream_unary", method, *args, **kwargs)
+
+    def unary_stream(self, method, *args, **kwargs):
+        return self._stream("unary_stream", method, *args, **kwargs)
+
+    def stream_stream(self, method, *args, **kwargs):
+        return self._stream("stream_stream", method, *args, **kwargs)
+
+    def subscribe(self, callback, try_to_connect=False):
+        self.raw.subscribe(callback, try_to_connect)
+
+    def unsubscribe(self, callback):
+        self.raw.unsubscribe(callback)
+
+    def close(self):
+        self.raw.close()
+
+
 class _Failover(grpc.Channel):
     """The channels to the kernels of a pair (`url` with several addresses): every call goes to
     the current one; on `UNAVAILABLE` (a standby answers `not_primary`, a kernel is gone or
@@ -1545,7 +1658,7 @@ class _Failover(grpc.Channel):
                 at = failover._current
                 left = deadline - time.monotonic()
                 try:
-                    grpc.channel_ready_future(failover._raw[at]).result(
+                    grpc.channel_ready_future(failover._raw[at].raw).result(
                         timeout=max(0.0, min(left, failover._PER_ADDRESS_S)))
                 except grpc.FutureTimeoutError:
                     if time.monotonic() < deadline:
@@ -1611,11 +1724,11 @@ class _Failover(grpc.Channel):
         return self._stream("stream_stream", method, *args, **kwargs)
 
     def subscribe(self, callback, try_to_connect=False):
-        self._raw[self._current].subscribe(callback, try_to_connect)
+        self._raw[self._current].raw.subscribe(callback, try_to_connect)
 
     def unsubscribe(self, callback):
         for c in self._raw:
-            c.unsubscribe(callback)
+            c.raw.unsubscribe(callback)
 
     def close(self):
         for c in self._channels:
@@ -1872,8 +1985,10 @@ class Kernable:
         if not tls and not insecure and not _local(url):
             raise ValueError(f"{given_url} is not on this machine: connect with TLS (tls=...), or pass "
                              "insecure=True to send in plain text")
-        def open_channel(url: str, several: bool = False):
-            options = _PAIR_CHANNEL_OPTIONS if several else _CHANNEL_OPTIONS
+        def open_channel(url: str, several: bool = False, made: int = 0):
+            # `kernable.connection` differs for each connection made anew (`_Renewing`): grpcio
+            # shares a connection between channels of the same options.
+            options = [*(_PAIR_CHANNEL_OPTIONS if several else _CHANNEL_OPTIONS), ("kernable.connection", made)]
             if tls:
                 def read(path: str) -> bytes:
                     with open(path, "rb") as f:
@@ -1899,7 +2014,7 @@ class Kernable:
         def channel_for(addresses: str) -> grpc.Channel:
             """A channel to the kernels at `addresses`, comma-separated (a pair: see `_Failover`)."""
             urls = [re.sub(r"^https?://", "", u.strip()).rstrip("/") for u in addresses.split(",") if u.strip()]
-            raw = [open_channel(u, len(urls) > 1) for u in urls]
+            raw = [_Renewing(lambda made, u=u: open_channel(u, len(urls) > 1, made)) for u in urls]
             channels = []
             for c in raw:
                 if granted is not None:

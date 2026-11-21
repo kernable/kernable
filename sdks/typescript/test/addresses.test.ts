@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createConnection, createServer, type Socket } from "node:net";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -94,6 +95,42 @@ test("a pair client turns to the other kernel within seconds when one is cut off
     kernable.close();
     direct.close();
     proxy.close();
+    await kernel.dispose();
+  }
+});
+
+// HTTP/2 keeps headers in a table both sides share, so a header damaged on the way (the grant)
+// stays wrong there for every later request: a refused grant is not tried again on that
+// connection, the next call opens a new one.
+test("a refused grant is not tried again on the same connection", async () => {
+  const kernel = new TestKernel(["counters.*"]);
+  await kernel.start();
+  const socket = kernel.url.replace(/^unix:/, "");
+  let accepted = 0;
+  const server = createServer((tcp) => {
+    accepted++;
+    const unix = createConnection(socket);
+    tcp.pipe(unix).pipe(tcp);
+    tcp.on("error", () => {});
+    unix.on("error", () => {});
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  // Hex, but no Grant: the kernel refuses it as unreadable.
+  const grant = join(kernel.dir, "damaged.grant");
+  writeFileSync(grant, "ff00ff00");
+  const kernable = new Kernable({ url: `127.0.0.1:${port}`, key: kernel.appKey, grant, timeoutMs: 10_000 });
+  try {
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(
+        kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: `c${i}`, type: "Increment", data: { by: 1 } }),
+        /grant/,
+      );
+      assert.equal(accepted, i + 1, `call ${i}`);
+    }
+  } finally {
+    kernable.close();
+    server.close();
     await kernel.dispose();
   }
 });
