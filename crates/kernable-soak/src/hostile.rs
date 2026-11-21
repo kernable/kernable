@@ -156,8 +156,14 @@ impl Hostile {
                 Err(status) => {
                     this.count(&format!("replay {variant}: refused {:?}", status.code()));
                     if matches!(variant, "unchanged" | "payload-resigned") {
-                        // A replay by the key that sent it is answered, not refused.
-                        if status.code() != tonic::Code::Unavailable {
+                        // A replay by the key that sent it is answered, not refused. A cut
+                        // connection (the faults) is no answer, as in the load.
+                        if !matches!(
+                            status.code(),
+                            tonic::Code::Unavailable
+                                | tonic::Code::Unknown
+                                | tonic::Code::Cancelled
+                        ) {
                             this.found(format!(
                                 "H1 replay {variant} of {} was refused: {status}",
                                 cmd.command_id
