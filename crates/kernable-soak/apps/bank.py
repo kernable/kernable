@@ -2,7 +2,8 @@
 deposits and withdrawals (never below zero); a read model keeps balances in a store; a reactor
 flags every withdrawal of 50 or more, once. An account holds its number as a unique key and,
 while open, the fact open, which a withdrawal sent to an account requires of that account. The
-soak checks all three against the log."""
+soak checks all three against the log. A Note stores its data as it came (edge-case payloads),
+and the read model answers it back."""
 
 import os
 
@@ -43,7 +44,7 @@ def _(s, d):
 def _(s, d):
     if not d.get("amount", 0) > 0:
         raise Rejected("amount must be positive", "invalid")
-    return [{"type": "Deposited", "data": {"amount": d["amount"]}}]
+    return [{"type": "Deposited", "data": {"amount": d["amount"], "by": "py"}}]
 
 
 @account.command("Withdraw", requires=lambda d, s: [Requirement("bank_py", "account", d["to"], "open")]
@@ -74,6 +75,12 @@ def _(s, d):
     return [{"type": "Flagged", "data": {"position": d["position"]}}]
 
 
+# The data as it came: the soak checks it arrives in the log unchanged.
+@account.command("Note")
+def _(s, d):
+    return [{"type": "Noted", "data": d}]
+
+
 balances = bank.read_model("balances-py", store=f"sqlite:{os.environ['SOAK_STORE']}", schema="1")
 
 
@@ -99,9 +106,19 @@ def _(d, evt, ctx):
     ctx.store.set("accounts", evt.aggregate_id, {**r, "flags": r["flags"] + 1})
 
 
+@balances.on("Noted")
+def _(d, evt, ctx):
+    ctx.store.set("notes", evt.aggregate_id, d)
+
+
 @balances.query("GetAccount")
 def _(d, qry, ctx):
     return row(ctx.store, d["id"])
+
+
+@balances.query("GetNote")
+def _(d, qry, ctx):
+    return ctx.store.get("notes", d["id"])
 
 
 k = Kernable()

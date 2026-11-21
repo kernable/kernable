@@ -30,7 +30,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::Rng;
 
-pub const DOMAINS: [&str; 4] = ["bank_ts", "bank_py", "bank_rs", "bank_go"];
+/// One app per SDK, and `bank_x`, whose accounts run on the Rust and Go apps' workers at once.
+pub const DOMAINS: [&str; 5] = ["bank_ts", "bank_py", "bank_rs", "bank_go", "bank_x"];
 pub const ACCOUNTS: u64 = 30;
 /// Account numbers are drawn from `n0` to `n{NUMBERS - 1}`.
 pub const NUMBERS: u64 = 40;
@@ -46,7 +47,7 @@ pub struct Identity {
 }
 
 impl Identity {
-    fn request<T>(&self, message: T) -> tonic::Request<T> {
+    pub fn request<T>(&self, message: T) -> tonic::Request<T> {
         let mut request = tonic::Request::new(message);
         if let Ok(value) = self.grant.parse() {
             request.metadata_mut().insert("kernable-grant", value);
@@ -85,6 +86,8 @@ pub struct Load {
     pub refusals: Arc<Mutex<Vec<Refusal>>>,
     pub stats: Arc<Stats>,
     pub run: String,
+    /// The hostile participants; they replay what the clients sent.
+    pub hostile: crate::hostile::Hostile,
 }
 
 impl Load {
@@ -95,6 +98,7 @@ impl Load {
             refusals: Arc::default(),
             stats: Arc::default(),
             run: run.into(),
+            hostile: crate::hostile::Hostile::default(),
         }
     }
 
@@ -118,6 +122,9 @@ impl Load {
                 let result = load
                     .submit_until_answered(&addr, &me, cmd.clone(), &mut channel)
                     .await;
+                if result.is_some() {
+                    load.hostile.sent(&cmd);
+                }
                 match result.and_then(|r| r.outcome) {
                     Some(Outcome::Committed(c)) if !c.events.is_empty() => {
                         let positions = c.events.iter().map(|e| e.global_position);
@@ -267,9 +274,37 @@ impl Load {
     }
 }
 
+/// The payloads a `Note` carries as its `v`: what JSON parsers and languages tend to change on the
+/// way (integers beyond 2^53 and at the 64-bit limits, floats, negative zero, unicode with
+/// combining marks, line separators and NUL, empty strings and keys, deep nesting, a long
+/// string). Every app writes the note into its event as it came; B8 checks the log and the read
+/// models hold it unchanged.
+pub const NOTES: [&str; 12] = [
+    "9007199254740993",
+    "-9223372036854775808",
+    "18446744073709551615",
+    "123456789012",
+    "0.1",
+    "1e-7",
+    "1.7976931348623157e308",
+    "-0.0",
+    r#""Grüße 👋🏽 e\u0301 \u2028 \"q\" \\ /""#,
+    r#""nul:\u0000:end""#,
+    r#""""#,
+    r#"{"z":1,"a":[[[[{"b":[]}]]]],"ä":{},"":null,"t":true}"#,
+];
+
+/// The payload of a note: `k` names it, `v` is `NOTES[k]`, or a long string for `k` past them.
+pub fn note_payload(k: u64) -> String {
+    let v = NOTES
+        .get(k as usize)
+        .map_or_else(|| format!("\"{}\"", "λ".repeat(4096)), |v| (*v).to_owned());
+    format!(r#"{{"k":{k},"v":{v}}}"#)
+}
+
 /// The `i`th command of client `n`: a deposit (45%) of 1 to 100, a withdrawal (25%) of 1 to 120,
 /// half of them sent `to` another account, a new number (12%: one of `NUMBERS`, or none one time
-/// in ten), an open (9%) or a close (9%).
+/// in ten), an open (9%), a close (6%) or a note (3%).
 fn command(run: &str, n: u32, i: u64, rng: &mut Rng, key: &SigningKey) -> Command {
     let domain = DOMAINS[rng.below(DOMAINS.len() as u64) as usize];
     let a = rng.below(ACCOUNTS);
@@ -293,7 +328,8 @@ fn command(run: &str, n: u32, i: u64, rng: &mut Rng, key: &SigningKey) -> Comman
             ),
         },
         82..91 => ("Open", "{}".to_owned()),
-        _ => ("Close", "{}".to_owned()),
+        91..97 => ("Close", "{}".to_owned()),
+        _ => ("Note", note_payload(rng.below(NOTES.len() as u64 + 1))),
     };
     let mut cmd = Command {
         command_id: format!("{run}-{n}-{i}"),

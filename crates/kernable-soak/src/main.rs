@@ -23,10 +23,17 @@
 //! net-down, net-slow, switchover (with a pair: `kernable switchover` asked of both kernels), and
 //! with `--fill` (a directory on a small file system that also holds `--data`) disk-full, with
 //! `--power-loss-cmd` (run after every process was killed, e.g. to drop a LazyFS cache)
-//! power-loss.
+//! power-loss. Hostile participants (`hostile.rs`): net-corrupt, replay, rogue-worker,
+//! liar-listener.
+//!
+//! The kit cell (`kit.rs`, off with `--kit no`): the kit's domains on a kernel of their own, its
+//! host changing language at every check round, people signing up and in through `KitApi`;
+//! the kernel, app and network faults hit it too.
 
 mod app;
 mod check;
+mod hostile;
+mod kit;
 mod load;
 mod procs;
 mod proxy;
@@ -184,7 +191,7 @@ fn key(path: &Path) -> Result<SigningKey, String> {
     Ok(SigningKey::from_bytes(&secret))
 }
 
-const FAULTS: [&str; 11] = [
+const FAULTS: [&str; 15] = [
     "kernel-kill",
     "kernel-term",
     "kernel-down",
@@ -196,6 +203,10 @@ const FAULTS: [&str; 11] = [
     "disk-full",
     "power-loss",
     "switchover",
+    "net-corrupt",
+    "replay",
+    "rogue-worker",
+    "liar-listener",
 ];
 
 /// Something to do later: restart or resume a process.
@@ -253,6 +264,9 @@ async fn run(a: Args) -> Result<(), String> {
     let _ = LOG.set(dir.join("soak.log"));
     let (kport, pport) = (a.num("kernel-port", 17233)?, a.num("proxy-port", 17234)?);
     let pair = a.get("pair").is_some_and(|p| p == "yes");
+    let kit_on = a.get("kit").is_none_or(|k| k != "no");
+    // The kit cell's kernel and proxy.
+    let (kit_kport, kit_pport) = (kport + 30, pport + 30);
     // With a pair: kernel B, its proxy and the witness.
     let (kport_b, pport_b, wport) = (kport + 10, pport + 10, kport + 20);
     say(&format!(
@@ -262,7 +276,9 @@ async fn run(a: Args) -> Result<(), String> {
     ));
 
     // Keys, a grant for the apps (also used by the soak's clients and audit listener).
-    for name in ["root", "kernel", "app", "kernel-b", "node-a", "node-b"] {
+    for name in [
+        "root", "kernel", "app", "kernel-b", "node-a", "node-b", "kit",
+    ] {
         if !dir.join(format!("{name}.key")).exists() {
             cli(&kernable_bin, &dir, &["keys", "new", name])?;
         }
@@ -281,6 +297,30 @@ async fn run(a: Args) -> Result<(), String> {
     ];
     grant.extend(actions);
     cli(&kernable_bin, &dir, &grant)?;
+    // The kit's key, as the parity runs grant it: its domains, its reserved order, its privileged
+    // follow-ups, processes' identities.
+    let mut kit_grant = vec![
+        "grant",
+        "root.key",
+        "kit.pub",
+        "run=tenancy.*,account.*,identity.*,group.*,invitation.*,shop.*",
+        "privileged=bypass_authorization",
+        "process=*",
+    ];
+    kit_grant.extend([
+        "submit=*",
+        "subscribe=*",
+        "listen=*",
+        "query=*",
+        "answer=*",
+        "check=*",
+        "vault_read=*",
+        "vault_erase=*",
+        "manage=*",
+        "reserved_order=*",
+        "cache=*",
+    ]);
+    cli(&kernable_bin, &dir, &kit_grant)?;
     for node in ["node-a.pub", "node-b.pub"] {
         cli(
             &kernable_bin,
@@ -468,6 +508,47 @@ async fn run(a: Args) -> Result<(), String> {
     for p in &mut procs[1..5] {
         p.start().map_err(|e| e.to_string())?;
     }
+    // The kit cell: its kernel and its host, last in `procs`.
+    let kit_store = store_of("kit")?;
+    let kit_url = format!("http://127.0.0.1:{kit_pport}");
+    let (kit_k, kit_h) = (procs.len(), procs.len() + 1);
+    let mut kit_lang = 0;
+    let kit_proxy = Proxy::start(addr(kit_pport)?, addr(kit_kport)?)
+        .await
+        .map_err(|e| e.to_string())?;
+    if kit_on {
+        // The kit keeps personal data in the vault: its kernel has one.
+        let vault_key = dir.join("kit-vault.key");
+        if !vault_key.exists() {
+            let mut rng = Rng::new(seed ^ 0x7a17);
+            let hex: String = (0..32)
+                .map(|_| format!("{:02x}", rng.step() as u8))
+                .collect();
+            std::fs::write(&vault_key, hex).map_err(|e| e.to_string())?;
+        }
+        let kit_vault = format!("sqlite:{}", data.join("kit-vault.db").display());
+        procs.push(
+            Proc::new("kit-kernel", &kernable_bin, &dir, log("kit-kernel")).args(&[
+                "start",
+                "--vault-key",
+                "kit-vault.key",
+                "--vault-store",
+                &kit_vault,
+                "--root",
+                "root.pub",
+                "--store",
+                &kit_store,
+                "--listen",
+                &format!("127.0.0.1:{kit_kport}"),
+                "--checkpoint-interval-ms",
+                "1000",
+            ]),
+        );
+        procs.push(kit::host(kit::LANGUAGES[0], &repo, &exe, &dir, &kit_url));
+        procs[kit_k].start().map_err(|e| e.to_string())?;
+        wait_for_port(kit_kport, Duration::from_secs(30)).await?;
+        procs[kit_h].start().map_err(|e| e.to_string())?;
+    }
     // The primary's store, and the standby's: by the witness's state.
     let witness_state = dir.join("witness.state");
     let stores = |pair: bool| -> (String, Option<String>) {
@@ -489,6 +570,23 @@ async fn run(a: Args) -> Result<(), String> {
     };
     let load = Load::new(&format!("r{stamp}"));
     load.audit(url.clone(), me.clone());
+    let kit_load = kit::KitLoad::default();
+    if kit_on {
+        kit::drive(
+            kit_load.clone(),
+            kit_url.clone(),
+            dir.clone(),
+            Arc::clone(&load.running),
+            a.num("kit-clients", 2)?,
+            seed,
+            format!("r{stamp}"),
+        );
+    }
+    let mut kit_checked = kit::KitChecked::default();
+    if faults.iter().any(|f| f == "liar-listener") {
+        load.hostile
+            .liar(url.clone(), me.clone(), Arc::clone(&load.observed));
+    }
     // Every listener must be connected before the load starts: a new reactor starts at the
     // newest event, and would miss withdrawals sent before.
     let started = Instant::now();
@@ -501,8 +599,8 @@ async fn run(a: Args) -> Result<(), String> {
         })
         .await
         .unwrap_or(0);
-        // Each app's read model and reactor, and the soak's audit listener.
-        if connected >= 9 {
+        // Each app's read model and reactor, bank_x's, and the soak's audit listener.
+        if connected >= 11 {
             break;
         }
         if started.elapsed() > Duration::from_secs(120) {
@@ -538,17 +636,14 @@ async fn run(a: Args) -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let now = Instant::now();
         // Processes that ended on their own are restarted (and counted).
-        for p in procs.iter_mut() {
+        for (i, p) in procs.iter_mut().enumerate() {
             if let Some(status) = p.exited() {
                 *exits.entry(p.name.clone()).or_default() += 1;
                 say(&format!(
                     "{} exited by itself ({status}); restarting",
                     p.name
                 ));
-                later.push((
-                    now + Duration::from_millis(500),
-                    Later::Start(procs_index(&p.name)),
-                ));
+                later.push((now + Duration::from_millis(500), Later::Start(i)));
             }
         }
         let (due, rest): (Vec<_>, Vec<_>) = later.drain(..).partition(|(at, _)| *at <= now);
@@ -562,7 +657,7 @@ async fn run(a: Args) -> Result<(), String> {
             // The faults end first, then the commands still in flight get their answers: a
             // kernel down until later, or a stopped app, would hold them up otherwise.
             load.running.store(false, Ordering::SeqCst);
-            for proxy in &proxies {
+            for proxy in proxies.iter().chain([&kit_proxy]) {
                 proxy.heal();
             }
             for (_, action) in later.drain(..) {
@@ -603,8 +698,37 @@ async fn run(a: Args) -> Result<(), String> {
                 report.violations.len(),
                 report.took.as_secs_f64()
             ));
+            for line in &report.info {
+                say(&format!("  {line}"));
+            }
             for v in report.violations.iter().take(50) {
                 say(&format!("  VIOLATION {v}"));
+            }
+            let mut report = report;
+            if kit_on {
+                // The kit cell: quiet, checked, then its host changes language.
+                if let Err(e) = kit::quiet(&kit_store, Duration::from_secs(300)).await {
+                    report.violations.push(e);
+                }
+                let kit_violations =
+                    kit::check(&kit_store, &kernel_key_ids, &mut kit_checked, &kit_load).await;
+                say(&format!(
+                    "  kit ({} host): {} violations; {:?}",
+                    kit::LANGUAGES[kit_lang],
+                    kit_violations.len(),
+                    kit_load.stats.lock().unwrap()
+                ));
+                for v in kit_violations.iter().take(50) {
+                    say(&format!("  VIOLATION {v}"));
+                }
+                report.violations.extend(kit_violations);
+                procs[kit_h].terminate(Duration::from_secs(10));
+                kit_lang = (kit_lang + 1) % kit::LANGUAGES.len();
+                procs[kit_h] = kit::host(kit::LANGUAGES[kit_lang], &repo, &exe, &dir, &kit_url);
+                if let Err(e) = procs[kit_h].start() {
+                    say(&format!("kit host: cannot start: {e}"));
+                }
+                say(&format!("kit host now {}", kit::LANGUAGES[kit_lang]));
             }
             let failed = !report.violations.is_empty();
             rounds.push(json!({
@@ -627,10 +751,20 @@ async fn run(a: Args) -> Result<(), String> {
             next_fault = now + rng.ms(2_000, fault_every * 1000);
             let fault = faults[rng.below(faults.len() as u64) as usize].clone();
             *injected.entry(fault.clone()).or_default() += 1;
-            let app = 1 + rng.below(4) as usize;
-            // With a pair, either kernel and either proxy.
-            let k = if pair && rng.below(2) == 1 { 5 } else { 0 };
-            let proxy = &proxies[if k == 5 { 1 } else { 0 }];
+            // One of the apps, or a quarter of the time the kit's host.
+            let app = if kit_on && rng.below(4) == 0 {
+                kit_h
+            } else {
+                1 + rng.below(4) as usize
+            };
+            // With a pair, either kernel and either proxy; a quarter of the time the kit cell's.
+            let (k, proxy) = if kit_on && rng.below(4) == 0 {
+                (kit_k, &kit_proxy)
+            } else if pair && rng.below(2) == 1 {
+                (5, &proxies[1])
+            } else {
+                (0, &proxies[0])
+            };
             match fault.as_str() {
                 "kernel-kill" => {
                     procs[k].kill();
@@ -668,6 +802,13 @@ async fn run(a: Args) -> Result<(), String> {
                         }
                     });
                 }
+                "net-corrupt" => proxy.corrupt(1 + rng.below(3)),
+                "replay" => load.hostile.replay(url.clone(), me.clone(), rng.step()),
+                "rogue-worker" => {
+                    load.hostile
+                        .rogue(url.clone(), me.clone(), rng.step(), rng.ms(5_000, 30_000))
+                }
+                "liar-listener" => load.hostile.lie(),
                 "net-reset" => proxy.reset(),
                 "net-down" => proxy.down(rng.ms(1_000, 20_000)),
                 "net-slow" => proxy.slow(rng.ms(20, 400), rng.ms(10_000, 40_000)),
@@ -722,15 +863,6 @@ async fn run(a: Args) -> Result<(), String> {
         say("no violations");
         Ok(())
     }
-}
-
-fn procs_index(name: &str) -> usize {
-    [
-        "kernel", "app-ts", "app-py", "app-rs", "app-go", "kernel-b", "witness",
-    ]
-    .iter()
-    .position(|n| *n == name)
-    .unwrap_or(0)
 }
 
 fn do_later(action: Later, procs: &mut [Proc]) {

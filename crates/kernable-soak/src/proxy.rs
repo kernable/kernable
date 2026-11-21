@@ -1,6 +1,7 @@
 //! A TCP proxy between every client and the kernel that can fail the network: reset every
-//! connection, stall all traffic for a while (a partition: nothing is lost, it waits), or delay
-//! it.
+//! connection, stall all traffic for a while (a partition: nothing is lost, it waits), delay it,
+//! or flip a byte of what goes to the kernel (a hostile network: signatures and the protocol
+//! must refuse it).
 //!
 //! The proxies run on a runtime of their own: while the harness blocks (reading a store,
 //! stopping a process), the network goes on as it would without the harness, so a stall the
@@ -8,7 +9,10 @@
 
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -44,6 +48,8 @@ enum Net {
 pub struct Proxy {
     net: Arc<Mutex<Net>>,
     connections: Arc<Mutex<Vec<AbortHandle>>>,
+    /// How many chunks on their way to the kernel still get a flipped byte.
+    corrupt: Arc<AtomicU64>,
 }
 
 impl Proxy {
@@ -53,11 +59,13 @@ impl Proxy {
         let proxy = Proxy {
             net: Arc::new(Mutex::new(Net::Up)),
             connections: Arc::default(),
+            corrupt: Arc::default(),
         };
         let p = proxy.clone();
         runtime().spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let net = Arc::clone(&p.net);
+                let corrupt = Arc::clone(&p.corrupt);
                 let task = tokio::spawn(async move {
                     let Ok(server) = TcpStream::connect(target).await else {
                         return;
@@ -67,8 +75,8 @@ impl Proxy {
                     let (cr, cw) = client.into_split();
                     let (sr, sw) = server.into_split();
                     tokio::select! {
-                        _ = pipe(cr, sw, Arc::clone(&net)) => {}
-                        _ = pipe(sr, cw, net) => {}
+                        _ = pipe(cr, sw, Arc::clone(&net), Some(corrupt)) => {}
+                        _ = pipe(sr, cw, net, None) => {}
                     }
                 });
                 let mut connections = p.connections.lock().unwrap();
@@ -94,8 +102,14 @@ impl Proxy {
         *self.net.lock().unwrap() = Net::Slow(delay, Instant::now() + how_long);
     }
 
+    /// Flips one byte in each of the next `chunks` chunks on their way to the kernel.
+    pub fn corrupt(&self, chunks: u64) {
+        self.corrupt.store(chunks, Ordering::SeqCst);
+    }
+
     pub fn heal(&self) {
         *self.net.lock().unwrap() = Net::Up;
+        self.corrupt.store(0, Ordering::SeqCst);
     }
 }
 
@@ -103,6 +117,7 @@ async fn pipe(
     mut from: tokio::net::tcp::OwnedReadHalf,
     mut to: tokio::net::tcp::OwnedWriteHalf,
     net: Arc<Mutex<Net>>,
+    corrupt: Option<Arc<AtomicU64>>,
 ) {
     let mut buf = vec![0u8; 64 << 10];
     loop {
@@ -122,6 +137,15 @@ async fn pipe(
                 }
                 _ => break,
             }
+        }
+        if let Some(c) = &corrupt
+            && c.try_update(Ordering::SeqCst, Ordering::SeqCst, |k| k.checked_sub(1))
+                .is_ok()
+        {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos() as usize);
+            buf[nanos % n] ^= 1 << (nanos % 8);
         }
         if to.write_all(&buf[..n]).await.is_err() {
             return;

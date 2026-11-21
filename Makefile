@@ -119,14 +119,21 @@ torture:
 # The soak: the kernel and an app per SDK under load and random faults for SOAK_MINUTES, every
 # invariant checked every 10 minutes (crates/kernable-soak; more options in its main.rs).
 # SOAK_PAIR=yes runs a pair with a witness instead of one kernel, and fails it over.
+# SOAK_KIT=no leaves out the kit cell (the kit on a kernel of its own, its host changing language
+# every round). Hostile participants (replays, a rogue worker, a lying listener, a corrupting
+# network) are among the faults.
 # scripts/soak-server.sh runs it on a Linux server, with disk-full and power-loss faults.
 SOAK_MINUTES ?= 60
 SOAK_BACKEND ?= sqlite
 SOAK_PAIR ?= no
+SOAK_KIT ?= yes
 soak: py
 	cargo build --release -p kernable-kernel -p kernable-soak
+	cargo build --release -p kernable-kit --example parity
 	cd crates/kernable-soak/apps/bankgo && go build -o $(CURDIR)/target/release/soak-bank-go .
-	target/release/kernable-soak run --minutes $(SOAK_MINUTES) --backend $(SOAK_BACKEND) --pair $(SOAK_PAIR) --dir target/soak-$$(date +%Y%m%d-%H%M%S)
+	cd sdks/go && go build -o $(CURDIR)/target/release/examples/parity-go ./internal/kitparity
+	cd kits/typescript && npm install --no-audit --no-fund --silent
+	target/release/kernable-soak run --minutes $(SOAK_MINUTES) --backend $(SOAK_BACKEND) --pair $(SOAK_PAIR) --kit $(SOAK_KIT) --dir target/soak-$$(date +%Y%m%d-%H%M%S)
 
 # Coverage-guided fuzzing, FUZZ_SECONDS per target (needs nightly Rust and cargo-fuzz).
 # Findings land in fuzz/artifacts/<target>; add them to fuzz/seeds/<target> once fixed.

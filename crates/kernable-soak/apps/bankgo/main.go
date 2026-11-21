@@ -2,7 +2,12 @@
 // deposits and withdrawals (never below zero); a read model keeps balances in a store; a reactor
 // flags every withdrawal of 50 or more, once. An account holds its number as a unique key and,
 // while open, the fact open, which a withdrawal sent to an account requires of that account. The
-// soak checks all three against the log.
+// soak checks all three against the log. A Note stores its data as it came (edge-case payloads),
+// and the read model answers it back.
+//
+// It also runs half of bank_x, the domain two languages share: its accounts on workers here and
+// in the Rust app at once (they take turns as the faults move them, through each other's
+// snapshots), its read model here and its flagger in the Rust app.
 package main
 
 import (
@@ -54,8 +59,10 @@ type (
 	none   = struct{}
 )
 
-func main() {
-	bank := kernable.NewDomain("bank_go")
+// bank is the bank as domain name: its account aggregate, its read model balances-<suffix> (in
+// store) and its flagger flagger-<suffix>. Deposits say by which language decided them.
+func bank(name, suffix, store string) (*kernable.Domain, *kernable.Aggregate[account], *kernable.Listener, *kernable.Listener) {
+	bank := kernable.NewDomain(name)
 	a := kernable.NewAggregate(bank, "account", account{}, kernable.SnapshotEvery(5))
 	kernable.Apply(a, "Deposited", func(_ *ac, s *account, d amount) { s.Balance += d.Amount })
 	kernable.Apply(a, "Withdrawn", func(_ *ac, s *account, d amount) { s.Balance -= d.Amount })
@@ -73,7 +80,7 @@ func main() {
 		if d.Amount <= 0 {
 			return nil, kernable.Reject("invalid", "amount must be positive")
 		}
-		return kernable.Events(kernable.Event("Deposited", amount{d.Amount})), nil
+		return kernable.Events(kernable.Event("Deposited", map[string]any{"amount": d.Amount, "by": "go"})), nil
 	})
 	kernable.Handle(a, "Withdraw", func(_ *cc, s account, d withdrawal) (events, error) {
 		if s.Balance < d.Amount {
@@ -84,7 +91,7 @@ func main() {
 		if d.To == nil || *d.To == "" {
 			return nil
 		}
-		return []kernable.Requirement{{Domain: "bank_go", AggregateType: "account", AggregateID: *d.To, Fact: "open"}}
+		return []kernable.Requirement{{Domain: name, AggregateType: "account", AggregateID: *d.To, Fact: "open"}}
 	}))
 	kernable.Handle(a, "Open", func(_ *cc, _ account, _ none) (events, error) {
 		return kernable.Events(kernable.Event("Opened", none{})), nil
@@ -98,8 +105,12 @@ func main() {
 	kernable.Handle(a, "Flag", func(_ *cc, _ account, d flag) (events, error) {
 		return kernable.Events(kernable.Event("Flagged", flag{d.Position})), nil
 	})
+	// The data as it came, in Go's generic JSON type: the soak checks it arrives unchanged.
+	kernable.Handle(a, "Note", func(_ *cc, _ account, d map[string]any) (events, error) {
+		return kernable.Events(kernable.Event("Noted", d)), nil
+	})
 
-	balances := bank.ReadModel("balances-go", kernable.WithStore("sqlite:"+os.Getenv("SOAK_STORE")), kernable.StoreSchema("1"))
+	balances := bank.ReadModel("balances-"+suffix, kernable.WithStore(store), kernable.StoreSchema("1"))
 	change := func(c *lc, f func(*row)) error {
 		var r row
 		if _, err := c.Store.Get("accounts", c.Event.AggregateID, &r); err != nil {
@@ -111,13 +122,19 @@ func main() {
 	kernable.On(balances, "Deposited", func(c *lc, d amount) error { return change(c, func(r *row) { r.Balance += d.Amount }) })
 	kernable.On(balances, "Withdrawn", func(c *lc, d amount) error { return change(c, func(r *row) { r.Balance -= d.Amount }) })
 	kernable.On(balances, "Flagged", func(c *lc, _ none) error { return change(c, func(r *row) { r.Flags++ }) })
+	kernable.On(balances, "Noted", func(c *lc, d map[string]any) error { return c.Store.Set("notes", c.Event.AggregateID, d) })
 	kernable.Answer(balances, "GetAccount", func(c *kernable.QueryContext, d id) (row, error) {
 		var r row
 		_, err := c.Store.Get("accounts", d.ID, &r)
 		return r, err
 	})
+	kernable.Answer(balances, "GetNote", func(c *kernable.QueryContext, d id) (map[string]any, error) {
+		var note map[string]any
+		_, err := c.Store.Get("notes", d.ID, &note)
+		return note, err
+	})
 
-	flagger := bank.Reactor("flagger-go")
+	flagger := bank.Reactor("flagger-" + suffix)
 	kernable.On(flagger, "Withdrawn", func(c *lc, d amount) error {
 		if d.Amount < 50 {
 			return nil
@@ -128,14 +145,29 @@ func main() {
 			Data: flag{c.Event.Position}, ID: fmt.Sprintf("flag-%d", c.Event.Position), Committed: true})
 		return err
 	})
+	return bank, a, balances, flagger
+}
 
+func connect() *kernable.Client {
 	client, err := kernable.New(kernable.Options{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	app, err := client.App(kernable.AppOptions{Service: "bank-go", Domains: []*kernable.Domain{bank}})
+	return client
+}
+
+func main() {
+	ctx := context.Background()
+	store := os.Getenv("SOAK_STORE")
+	goBank, _, _, _ := bank("bank_go", "go", "sqlite:"+store)
+	// bank_x without a service: its workers here and in the Rust app are both always waited for.
+	_, accountX, balancesX, _ := bank("bank_x", "x", "sqlite:"+store+"-x")
+	shared := connect()
+	go func() { log.Fatal(shared.Worker(accountX).Run(ctx)) }()
+	go func() { log.Fatal(shared.Listener(balancesX).Run(ctx)) }()
+	app, err := connect().App(kernable.AppOptions{Service: "bank-go", Domains: []*kernable.Domain{goBank}})
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Fatal(app.Run(context.Background()))
+	log.Fatal(app.Run(ctx))
 }

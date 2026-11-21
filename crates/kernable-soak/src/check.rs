@@ -18,6 +18,14 @@
 //!   50 or more whose `Flag` was rejected, with that rejection's code (kills, restarts and a
 //!   failing network never park), and a withdrawal that was never flagged was parked, so
 //!   nothing is lost silently.
+//! - B8: payloads arrive as they were sent: every `Noted` event holds the note its command carried
+//!   (integers exactly, floats as the same number, strings to the byte), and every app's read model
+//!   answers the note the log holds.
+//!
+//! H1–H4: what the hostile participants tried changed nothing (see `hostile.rs`).
+//!
+//! `bank_x` runs on workers in Rust and Go at once; each round says which language decided its
+//! deposits, so a run shows both took turns.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,12 +42,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::load::{ACCOUNTS, DOMAINS, Load, Refusal, TENANT};
+use crate::load::{ACCOUNTS, DOMAINS, Load, Refusal, TENANT, note_payload};
 
 pub struct Report {
     pub head: u64,
     pub violations: Vec<String>,
     pub took: Duration,
+    /// What the round saw besides violations, for the log.
+    pub info: Vec<String>,
 }
 
 /// Read from a fresh read-only open: the head, every listener's
@@ -80,7 +90,7 @@ async fn read_log(
 }
 
 /// The stored results of commands `ids`, by ID (`None`: not stored, or pending).
-async fn results_of(
+pub async fn results_of(
     store: &str,
     ids: Vec<String>,
 ) -> Result<BTreeMap<String, Option<kernable_core::proto::CommandResult>>, String> {
@@ -155,6 +165,62 @@ pub struct Checked {
     opens: BTreeMap<Key, History<bool>>,
     /// Refusals checked already (B6): the load's list only grows.
     refusals_checked: usize,
+    /// The last note per account, as the log holds it (B8).
+    notes: BTreeMap<Key, Value>,
+    /// Who decided `bank_x`'s deposits: language, count.
+    by_x: BTreeMap<String, u64>,
+    /// Notes whose integers beyond ±2^53 came back rounded where that is known, per domain.
+    rounded: BTreeMap<String, u64>,
+}
+
+/// Where integers beyond ±2^53 are known to come back rounded to a float (JavaScript's numbers,
+/// Go's generic JSON type): `bank_x` runs on Go workers and answers from a Go read model.
+/// There, such a rounding counts as known, not as a violation; everything else stays exact.
+const ROUNDS_BIG_INTEGERS: [&str; 3] = ["bank_ts", "bank_go", "bank_x"];
+
+/// Whether `actual` differs from `expected` only by integers beyond ±2^53 that became the
+/// nearest float.
+fn only_rounded(expected: &Value, actual: &Value) -> bool {
+    match (expected, actual) {
+        (Value::Number(e), Value::Number(a)) => e.as_f64() == a.as_f64(),
+        (Value::Array(e), Value::Array(a)) => {
+            e.len() == a.len() && e.iter().zip(a).all(|(e, a)| only_rounded(e, a))
+        }
+        (Value::Object(e), Value::Object(a)) => {
+            e.len() == a.len()
+                && e.iter()
+                    .all(|(k, v)| a.get(k).is_some_and(|w| only_rounded(v, w)))
+        }
+        _ => expected == actual,
+    }
+}
+
+/// Whether `actual` is the JSON value `expected`: integers exactly (an integer must stay one),
+/// other numbers as the same float, strings and keys to the byte.
+pub fn same_json(expected: &Value, actual: &Value) -> bool {
+    match (expected, actual) {
+        (Value::Number(e), Value::Number(a)) => {
+            if e.is_i64() || e.is_u64() {
+                let int = |n: &serde_json::Number| {
+                    n.as_i64()
+                        .map(i128::from)
+                        .or_else(|| n.as_u64().map(i128::from))
+                };
+                int(e).is_some() && int(e) == int(a)
+            } else {
+                e.as_f64() == a.as_f64()
+            }
+        }
+        (Value::Array(e), Value::Array(a)) => {
+            e.len() == a.len() && e.iter().zip(a).all(|(e, a)| same_json(e, a))
+        }
+        (Value::Object(e), Value::Object(a)) => {
+            e.len() == a.len()
+                && e.iter()
+                    .all(|(k, v)| a.get(k).is_some_and(|w| same_json(v, w)))
+        }
+        _ => expected == actual,
+    }
 }
 
 pub async fn round(
@@ -185,6 +251,7 @@ pub async fn round(
                 head,
                 violations,
                 took: started.elapsed(),
+                info: Vec::new(),
             };
         }
     };
@@ -227,6 +294,7 @@ pub async fn round(
         }
     }
     bank_rules(&log, checked, &mut violations);
+    hostile_rules(store, &log, load, &mut violations).await;
     parking_rules(store, &log, checked, &mut violations).await;
     let refusals: Vec<Refusal> = {
         let all = load.refusals.lock().unwrap();
@@ -258,10 +326,89 @@ pub async fn round(
             }
         }
     }
+    // B8: every app's read model answers the note the log holds.
+    for ((domain, id), want) in &checked.notes {
+        let query = Query::new(domain, "GetNote")
+            .data(json!({ "id": id }))
+            .min_position(head);
+        match tokio::time::timeout(Duration::from_secs(60), client.query::<Value>(query)).await {
+            Ok(Ok(got)) if same_json(want, &got) => {}
+            Ok(Ok(got)) if ROUNDS_BIG_INTEGERS.contains(domain) && only_rounded(want, &got) => {}
+            Ok(Ok(got)) => violations.push(format!(
+                "B8 read model note: {domain} {id} answers {}, the log holds {}",
+                short(&got),
+                short(want)
+            )),
+            Ok(Err(e)) => violations.push(format!("B8 read model note: {domain} {id}: {e}")),
+            Err(_) => violations.push(format!(
+                "B8 read model note: {domain} {id}: no answer in 60 s"
+            )),
+        }
+    }
+    let info = vec![
+        format!("bank_x deposits decided by {:?}", checked.by_x),
+        format!(
+            "notes with integers beyond 2^53 rounded (known: JavaScript, Go's generic JSON): {:?}",
+            checked.rounded
+        ),
+        format!("hostile: {:?}", load.hostile.stats.lock().unwrap()),
+    ];
     Report {
         head,
         violations,
         took: started.elapsed(),
+        info,
+    }
+}
+
+/// A value for a message: its JSON, at most 200 characters.
+fn short(v: &Value) -> String {
+    let s = v.to_string();
+    if s.chars().count() > 200 {
+        format!("{}…", s.chars().take(200).collect::<String>())
+    } else {
+        s
+    }
+}
+
+/// H1–H4: no rogue event and no event of the attacker's in the log; every replay answered with
+/// the stored outcome of its command; what the hostile participants saw at once.
+async fn hostile_rules(store: &str, log: &Log, load: &Load, violations: &mut Vec<String>) {
+    for e in &log.events {
+        if String::from_utf8_lossy(&e.payload).contains(r#""by":"rogue""#) {
+            violations.push(format!(
+                "H2 rogue worker: its event at {} ({} {} {}) is in the log",
+                e.global_position, e.domain, e.aggregate_id, e.event_type
+            ));
+        }
+        if e.command_id.starts_with("evil-") || e.tenant_id == crate::hostile::EVIL_TENANT {
+            violations.push(format!(
+                "H4 attacker: event at {} of command {} in tenant {}",
+                e.global_position, e.command_id, e.tenant_id
+            ));
+        }
+    }
+    violations.extend(load.hostile.take_found());
+    let replays = load.hostile.take_replays();
+    if replays.is_empty() {
+        return;
+    }
+    let ids = replays.iter().map(|(_, id, _)| id.clone()).collect();
+    match results_of(store, ids).await {
+        Ok(stored) => {
+            for (variant, id, answer) in replays {
+                let want = stored
+                    .get(&id)
+                    .and_then(|r| r.as_ref())
+                    .and_then(crate::hostile::answer_of);
+                if want.as_ref() != Some(&answer) {
+                    violations.push(format!(
+                        "H1 replay {variant} of {id} was answered {answer:?}, its command's stored outcome is {want:?}"
+                    ));
+                }
+            }
+        }
+        Err(e) => violations.push(format!("H1: reading the stored outcomes: {e}")),
     }
 }
 
@@ -276,7 +423,13 @@ fn bank_rules(log: &Log, checked: &mut Checked, violations: &mut Vec<String>) {
         let account = checked.accounts.entry(key.clone()).or_default();
         let amount = data["amount"].as_i64().unwrap_or(0);
         match e.event_type.as_str() {
-            "Deposited" => account.0 += amount,
+            "Deposited" => {
+                account.0 += amount;
+                if *domain == "bank_x" {
+                    let by = data["by"].as_str().unwrap_or("?").to_owned();
+                    *checked.by_x.entry(by).or_default() += 1;
+                }
+            }
             "Withdrawn" => {
                 account.0 -= amount;
                 if account.0 < 0 {
@@ -293,6 +446,34 @@ fn bank_rules(log: &Log, checked: &mut Checked, violations: &mut Vec<String>) {
                 account.1 += 1;
                 let at = data["position"].as_u64().unwrap_or(0);
                 checked.flagged.entry(at).or_default().push(key);
+            }
+            "Noted" => {
+                // B8: the note as its command sent it.
+                let sent = data["k"]
+                    .as_u64()
+                    .and_then(|k| serde_json::from_str::<Value>(&note_payload(k)).ok());
+                match sent {
+                    Some(sent) if same_json(&sent, &data) => {}
+                    Some(sent)
+                        if ROUNDS_BIG_INTEGERS.contains(domain) && only_rounded(&sent, &data) =>
+                    {
+                        *checked.rounded.entry((*domain).to_owned()).or_default() += 1;
+                    }
+                    Some(sent) => violations.push(format!(
+                        "B8 payload unchanged: {domain} {} at {} holds {}, its command sent {}",
+                        e.aggregate_id,
+                        e.global_position,
+                        short(&data),
+                        short(&sent)
+                    )),
+                    None => violations.push(format!(
+                        "B8 payload unchanged: {domain} {} at {} holds {} (no note k)",
+                        e.aggregate_id,
+                        e.global_position,
+                        short(&data)
+                    )),
+                }
+                checked.notes.insert(key, data);
             }
             "Opened" | "Closed" | "Numbered" => {}
             other => violations.push(format!("unexpected event {other} at {}", e.global_position)),

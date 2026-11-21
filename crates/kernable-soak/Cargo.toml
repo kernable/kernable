@@ -14,6 +14,8 @@ test = false
 ed25519-dalek.workspace = true
 kernable = { package = "kernable-sdk", path = "../../sdks/rust" }
 kernable-core = { path = "../kernable-core" }
+# The kit cell drives people through the Rust kit's KitApi.
+kernable_kit = { package = "kernable-kit", path = "../../kits/rust" }
 kernable-store = { path = "../kernable-store" }
 prost.workspace = true
 serde.workspace = true
