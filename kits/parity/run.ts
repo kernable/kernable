@@ -168,7 +168,7 @@ const JWT = /eyJ[\w-]+\.[\w-]+\.[\w-]+/g;
 const RANDOM_RUN = /[A-Za-z0-9_-]{16,}/g;
 /** Fields whose string values are random as a whole. */
 const RANDOM_FIELDS = new Set([
-  "token", "secret", "accessToken", "refreshToken", "challenge", "keyId", "key", "uri", "url", "callback", "recoveryCodes",
+  "token", "secret", "clientSecret", "accessToken", "refreshToken", "challenge", "keyId", "key", "uri", "url", "callback", "recoveryCodes",
   "txt", "linkId", "sessionId", "sid", "jti", "nonce", "state", "credentialId", "publicKey", "codeVerifier", "hash", "tokenId", "rawId", "userHandle", "signature", "authenticatorData", "attestationObject", "clientDataJSON",
 ]);
 
