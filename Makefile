@@ -49,6 +49,7 @@ check-sdks: prune py
 	cargo test -p kernable-kit --test e2e -- --ignored
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check
 	cd sdks/python && .venv/bin/python -m unittest discover tests
+	cd sdks/go && test -z "$$(gofmt -l .)" && go vet ./... && KERNABLE_TEST_KERNEL=$(CURDIR)/target/debug/kernable go test -count=1 ./...
 	cd kits/typescript && npm install --no-audit --no-fund --silent && npm run -s check
 	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t . -p 'e2e_*.py'
 	$(MAKE) parity

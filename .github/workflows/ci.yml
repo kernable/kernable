@@ -56,6 +56,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - if: matrix.part == 'check-sdks'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: sdks/go/go.mod
+          cache-dependency-path: sdks/go/go.sum
       - if: matrix.part == 'check-rust'
         run: podman --version && podman info --format '{{.Host.NetworkBackend}} {{.Host.Pasta.Executable}}' || true
       - if: matrix.part == 'check-rust'
