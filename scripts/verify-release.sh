@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks a published release as a user gets it, outside this repository: the binary from
-# install.sh on this machine, the SDKs from npm, PyPI and crates.io (installed into fresh
-# projects, imported, their kit copied out), and the GitHub release. GitHub's release workflow
+# install.sh on this machine, the SDKs from npm, PyPI, crates.io and the Go module proxy
+# (installed into fresh projects, imported, their kit copied out), and the GitHub release. GitHub's release workflow
 # runs it on a Linux and a macOS runner, scripts/release.sh on this machine; it can run on its
 # own any time.
 #
@@ -66,6 +66,19 @@ cargo new -q --vcs none rs
 (cd rs && cargo add -q "kernable-sdk@=$VERSION" && CARGO_TARGET_DIR="$DIR/rs-target" cargo check -q) \
   || fail "kernable-sdk $VERSION from crates.io does not build"
 ok "crates.io: kernable-sdk $VERSION builds in a new project"
+
+GOMOD=github.com/kernable/kernable/sdks/go
+gomod() { (cd "$DIR" && GOPROXY=https://proxy.golang.org GOFLAGS=-mod=mod go list -m "$GOMOD@v$VERSION"); }
+eventually "$GOMOD@v$VERSION on the Go module proxy" gomod
+mkdir gomod
+(cd gomod && go mod init example.com/verify 2>/dev/null \
+  && go get "$GOMOD@v$VERSION" 2>/dev/null \
+  && go run "$GOMOD/cmd/kernable-sdk@v$VERSION" add kit >/dev/null && [ -f kit/README.md ] \
+  && printf '%s\n' 'package main' '' 'import (' '	kernable "github.com/kernable/kernable/sdks/go"' \
+    '	"example.com/verify/kit"' ')' '' 'func main() { _ = kernable.NewDomain("demo"); _ = kit.KitDomains() }' > main.go \
+  && go mod tidy 2>/dev/null && go vet ./... && go build -o /dev/null .) \
+  || fail "$GOMOD@v$VERSION: get, build or kit"
+ok "Go: $GOMOD v$VERSION builds in a new module, carries its kit"
 
 assets=$(gh release view "v$VERSION" -R kernable/kernable --json assets -q '.assets | length')
 [ "$assets" -ge 5 ] || fail "the GitHub release v$VERSION has $assets files, not the 4 archives and SHA256SUMS"

@@ -18,9 +18,9 @@
 #              machine only
 #   push       main and the annotated tag v<version> (its message: the summary)
 #   workflow   GitHub's release workflow (.github/workflows/release.yml): binaries and notes,
-#              then, after approval in the `release` environment, crates.io, npm, PyPI, the
-#              GitHub release, the downloads and the docs on kernable.com, and its own check on
-#              Linux and macOS. This waits for it and prints where to approve.
+#              then, after approval in the `release` environment, crates.io, npm, PyPI, the Go
+#              module (its tag sdks/go/v<version>), the GitHub release, the downloads and the
+#              docs on kernable.com, and its own check on Linux and macOS. This waits for it and prints where to approve.
 #   verify     scripts/verify-release.sh on this machine (GitHub's workflow checked Linux)
 # With --local, instead of workflow: binaries, notes, publish, downloads, github, docs.
 set -euo pipefail
@@ -45,6 +45,8 @@ else
 fi
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "a version is x.y.z, not $VERSION" >&2; exit 2; }
 TAG=v$VERSION
+# The Go module (sdks/go) is released by a tag of its own on the same commit.
+GO_TAG=sdks/go/v$VERSION
 DIST=$ROOT/dist/$VERSION
 DONE=$DIST/.done
 LOGS=$DIST/logs
@@ -84,7 +86,8 @@ step_preflight() {
   git fetch -q origin main --tags
   git merge-base --is-ancestor origin/main HEAD || fail "origin/main has commits this checkout lacks: pull first"
   ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || fail "the tag $TAG exists already"
-  echo "  last release $(git describe --tags --abbrev=0 2>/dev/null || echo none), this one $VERSION"
+  ! git rev-parse -q --verify "refs/tags/$GO_TAG" >/dev/null || fail "the tag $GO_TAG exists already"
+  echo "  last release $(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo none), this one $VERSION"
   gh auth status >/dev/null 2>&1 || fail "gh is not logged in"
   if [ $LOCAL = 1 ]; then
     command -v cargo-zigbuild >/dev/null || fail "cargo zigbuild is missing (cargo install cargo-zigbuild)"
@@ -270,6 +273,22 @@ step_publish() {
       || { rm -f "$rc"; tail -20 "$LOGS/npm.log"; fail "npm publish"; }
     rm -f "$rc"
   fi
+
+  say "Go module"
+  if ! git ls-remote --exit-code --tags origin "refs/tags/$GO_TAG" >/dev/null; then
+    git rev-parse -q --verify "refs/tags/$GO_TAG" >/dev/null || git tag "$GO_TAG" "$TAG^{commit}"
+    git push -q origin "refs/tags/$GO_TAG"
+  fi
+  local fetched=0
+  for _ in $(seq 20); do
+    if (cd "$DIST" && GOPROXY=https://proxy.golang.org GOFLAGS=-mod=mod go list -m "github.com/kernable/kernable/sdks/go@$TAG" >/dev/null 2>&1); then
+      fetched=1
+      break
+    fi
+    sleep 15
+  done
+  [ $fetched = 1 ] || fail "proxy.golang.org does not have github.com/kernable/kernable/sdks/go@$TAG"
+  echo "  github.com/kernable/kernable/sdks/go@$TAG"
 
   say "PyPI"
   if ! curl -fsS -o /dev/null "https://pypi.org/pypi/kernable-sdk/$VERSION/json" 2>/dev/null; then

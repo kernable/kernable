@@ -22,6 +22,7 @@ REPO = "kernable/kernable"
 INTERNAL = [
     "*/tests/*", "tests/*", "*.test.ts", "scripts/*", ".github/*", "Makefile", "fuzz/*",
     "bench/*", "RELEASING.md", "Dockerfile", "*.lock", "*package-lock.json", "design/*",
+    "*_test.go", "*go.sum", "sdks/go/internal/kitparity/*",
 ]
 # Never decides where a commit goes (it comes along with changes elsewhere).
 NEUTRAL = ["README.md", "CONTRIBUTING.md", "LICENSE", "*/README.md", ".gitignore", "rust-toolchain.toml"]
@@ -62,7 +63,8 @@ def main() -> None:
     ap.add_argument("--summary", default="", help="a paragraph to start with")
     a = ap.parse_args()
     tag = f"v{a.version}"
-    since = a.since or git("describe", "--tags", "--abbrev=0", "--exclude", tag, "HEAD").strip()
+    # Releases only (v0.2.1), not the Go module's tags (sdks/go/v0.3.0) on the same commits.
+    since = a.since or git("describe", "--tags", "--abbrev=0", "--match", "v*", "--exclude", tag, "HEAD").strip()
 
     groups: dict[str, list[str]] = {}
     log = git("log", "--no-merges", "--reverse", "--format=%H%x1f%an%x1f%s", f"{since}..HEAD")
@@ -92,7 +94,7 @@ def main() -> None:
         "Before 1.0 the stored formats stay version 1: nothing to migrate.",
         "",
         "Install: `curl -fsSL https://kernable.com/install.sh | sh` · SDKs: `npm install @kernable/sdk`, "
-        "`pip install kernable-sdk`, `cargo add kernable-sdk`",
+        f"`pip install kernable-sdk`, `cargo add kernable-sdk`, `go get github.com/kernable/kernable/sdks/go@v{a.version}`",
     ]
     if a.sums:
         with open(a.sums) as f:

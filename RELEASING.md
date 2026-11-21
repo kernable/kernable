@@ -31,7 +31,9 @@ a stop the same command goes on where it stopped (`--from <step>` repeats from a
    - Then it waits for one approval in the `release` environment (Review deployments). After it,
      side by side: the crates (`kernable-core`, `kernable-sdk-macros`, `kernable-sdk`, in that
      order), `@kernable/sdk` on npm and `kernable-sdk` on PyPI through Trusted Publishing (no
-     token stored anywhere); the GitHub release with the notes, the archives, `SHA256SUMS` and
+     token stored anywhere); the Go module by its tag `sdks/go/v<version>` on the release's
+     commit (a Go module in a subdirectory is released by such a tag), fetched once by
+     `proxy.golang.org` so `go get` and pkg.go.dev have it; the GitHub release with the notes, the archives, `SHA256SUMS` and
      build provenance for each archive (`gh attestation verify <archive> -R kernable/kernable`);
      the archives to `https://kernable.com/download/<version>/`, checked as served, then
      `download/latest` and `download/install.sh` (served as `https://kernable.com/install.sh`);
@@ -40,15 +42,16 @@ a stop the same command goes on where it stopped (`--from <step>` repeats from a
    A part already done is skipped (a version a registry has, a release that exists), so failed
    jobs can be re-run there; then `--from workflow`.
 6. **verify**: `scripts/verify-release.sh <version>` on this machine: `install.sh`,
-   the SDKs from npm, PyPI and crates.io in fresh projects (imported, their kits copied out, the
-   Rust one built), the GitHub release with its files.
+   the SDKs from npm, PyPI, crates.io and the Go module proxy in fresh projects (imported, their
+   kits copied out, the Rust and Go ones built), the GitHub release with its files.
 
 A trial: Actions, Release, Run workflow (on main) builds the binaries and the notes of the
 version in `Cargo.toml` as the release would, and publishes nothing.
 
 **Without GitHub's workflow**: `scripts/release.sh <version> --local` does its part from here:
 the binaries (`cargo zigbuild` for Linux), the notes, the registries with the tokens in
-`~/.config/kernable/{crates,npm,pypi}.token`, the GitHub release (without build provenance), the
+`~/.config/kernable/{crates,npm,pypi}.token`, the Go module's tag, the GitHub release (without
+build provenance), the
 downloads and the docs (needs GNU rsync: `brew install rsync`). After a failed workflow:
 `--local --from binaries`.
 

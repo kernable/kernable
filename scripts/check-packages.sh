@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the SDK packages (npm tarball, Python wheel), installs them into fresh projects outside
 # the repository and runs a small app against a real kernel: a TypeScript worker writes events,
-# a Python read model reads them. Needs network for the packages' dependencies.
+# a Python read model reads them, a Go program (the Go module as a user's module requires it,
+# here from the repository) asks too. Needs network for the packages' dependencies.
 set -euo pipefail
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 
@@ -80,7 +81,42 @@ await running;
 kernable.close();
 JS
 RESULT=$(node app.js "unix:$DIR/k.sock")
+
+# Go: a module of its own requiring the SDK (from the repository: a Go module is published as its
+# tag), the kit copied in by kernable-sdk, and a query to the Python read model.
+mkdir go && (cd go && go mod init example.com/check >/dev/null 2>&1 \
+  && go mod edit -require github.com/kernable/kernable/sdks/go@v0.0.0 -replace "github.com/kernable/kernable/sdks/go=$ROOT/sdks/go" \
+  && (cd "$ROOT/sdks/go" && go run ./cmd/kernable-sdk add kit "$DIR/go/kit" >/dev/null) && [ -f kit/README.md ] \
+  && cat > main.go <<'GO'
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	kernable "github.com/kernable/kernable/sdks/go"
+	"example.com/check/kit"
+)
+
+func main() {
+	_ = kit.KitDomains()
+	c, err := kernable.New(kernable.Options{URL: os.Args[1], Key: "../app.key"})
+	if err != nil {
+		panic(err)
+	}
+	total, err := c.Query(context.Background(), kernable.Query{Domain: "demo", Type: "GetTotal", Data: map[string]string{"id": "c1"}})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(total))
+}
+GO
+) || { echo "the Go module or its kit did not set up" >&2; exit 1; }
+GO_RESULT=$(cd go && go mod tidy >/dev/null 2>&1 && go vet ./... && go run . "unix:$DIR/k.sock") \
+  || { echo "the Go module, its kit or the query failed" >&2; exit 1; }
 kill $MODEL_PID 2>/dev/null || true
 wait $MODEL_PID 2>/dev/null || true
 [ "$RESULT" = "5" ] || { echo "unexpected answer: $RESULT"; exit 1; }
-echo "packages OK: npm $(ls kernable-sdk-*.tgz), wheel $(ls kernable_sdk-*.whl); TypeScript worker -> Python read model -> TypeScript query: $RESULT"
+[ "$GO_RESULT" = "5" ] || { echo "unexpected answer in Go: $GO_RESULT"; exit 1; }
+echo "packages OK: npm $(ls kernable-sdk-*.tgz), wheel $(ls kernable_sdk-*.whl), the Go module with its kit; TypeScript worker -> Python read model -> TypeScript and Go queries: $RESULT"
