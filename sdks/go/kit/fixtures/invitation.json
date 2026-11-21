@@ -1,0 +1,736 @@
+{
+  "domain": "invitation",
+  "cases": [
+    {
+      "name": "an invitation holds its address while open, its token for 7 days",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateInvitation",
+        "data": {
+          "email": "Bob@Example.com",
+          "groups": [
+            {
+              "group": "g1"
+            }
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "<string>",
+            "token": "<string>",
+            "expiresAt": 605800000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "bob@example.com",
+            "scope": "tenant"
+          }
+        ],
+        "facts": []
+      }
+    },
+    {
+      "name": "the invited address accepts, taking the groups along",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a2",
+          "email": "Bob@Example.com",
+          "newAccount": false
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationAccepted",
+          "data": {
+            "tokenId": "tk",
+            "accountId": "a2",
+            "newAccount": false,
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false
+          }
+        }
+      ],
+      "index": {
+        "keys": [],
+        "facts": []
+      }
+    },
+    {
+      "name": "another address does not accept",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a3",
+          "email": "carol@example.com",
+          "newAccount": false
+        }
+      },
+      "rejected": "wrong_email"
+    },
+    {
+      "name": "a token of another tenant is refused",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t2.i1.tk.sec",
+          "accountId": "a2",
+          "email": "bob@example.com",
+          "newAccount": false
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "an expired invitation is refused",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 500
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a2",
+          "email": "bob@example.com",
+          "newAccount": false
+        }
+      },
+      "rejected": "expired_token"
+    },
+    {
+      "name": "the invited person may decline with the token",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "DeclineInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec"
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationDeclined",
+          "data": {
+            "tokenId": "tk"
+          }
+        }
+      ]
+    },
+    {
+      "name": "erasing an open invitation revokes it first",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "EraseInvitation",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "InvitationRevoked",
+          "data": {
+            "tokenId": "tk"
+          }
+        },
+        {
+          "type": "InvitationErased",
+          "data": {}
+        }
+      ]
+    },
+    {
+      "name": "an invitation link keeps only its token's hash",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateInvitationLink",
+        "data": {
+          "secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "groups": [
+            {
+              "group": "g1"
+            }
+          ],
+          "label": "website",
+          "expiresAt": 2000000,
+          "maxUses": 2
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "a link's secret is long and URL-safe",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateInvitationLink",
+        "data": {
+          "secret": "short",
+          "groups": []
+        }
+      },
+      "rejected": "invalid_secret"
+    },
+    {
+      "name": "a signed-in account joins through the link, taking its groups along",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a1"
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationLinkUsed",
+          "data": {
+            "accountId": "a1",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "an account joins through a link once",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        },
+        {
+          "type": "InvitationLinkUsed",
+          "data": {
+            "accountId": "a1",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ]
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a1"
+        }
+      },
+      "rejected": "exists"
+    },
+    {
+      "name": "a used-up link is refused",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        },
+        {
+          "type": "InvitationLinkUsed",
+          "data": {
+            "accountId": "a1",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ]
+          }
+        },
+        {
+          "type": "InvitationLinkUsed",
+          "data": {
+            "accountId": "a2",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ]
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a3"
+        }
+      },
+      "rejected": "used_up"
+    },
+    {
+      "name": "an expired link is refused",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 2000001,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a1"
+        }
+      },
+      "rejected": "expired_token"
+    },
+    {
+      "name": "another secret for the same link is refused",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+          "accountId": "a1"
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "a link of another tenant is refused",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t2.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a1"
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "a revoked link is refused",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        },
+        {
+          "type": "InvitationLinkRevoked",
+          "data": {}
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a1"
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "accepting requires the tenant active, so a suspended tenant takes nobody in",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": true,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a2",
+          "email": "bob@example.com",
+          "newAccount": true
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationAccepted",
+          "data": {
+            "tokenId": "tk",
+            "accountId": "a2",
+            "newAccount": true,
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": true
+          }
+        }
+      ],
+      "requires": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "aggregateId": "t1",
+          "fact": "active"
+        }
+      ]
+    },
+    {
+      "name": "joining through a link requires the tenant active",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a1"
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationLinkUsed",
+          "data": {
+            "accountId": "a1",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ]
+          }
+        }
+      ],
+      "requires": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "aggregateId": "t1",
+          "fact": "active"
+        }
+      ]
+    }
+  ]
+}

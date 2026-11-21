@@ -1,0 +1,218 @@
+{
+  "domain": "group",
+  "cases": [
+    {
+      "name": "a group's permissions are type patterns, a relation only where given",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateGroup",
+        "data": {
+          "name": " Customers ",
+          "permissions": [
+            {
+              "pattern": "shop.PlaceOrder",
+              "viaParent": true
+            },
+            {
+              "pattern": "shop.CancelOrder",
+              "when": "owner",
+              "viaParent": true
+            }
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "GroupCreated",
+          "data": {
+            "name": "Customers",
+            "description": "",
+            "permissions": [
+              {
+                "pattern": "shop.PlaceOrder"
+              },
+              {
+                "pattern": "shop.CancelOrder",
+                "when": "owner",
+                "viaParent": true
+              }
+            ]
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "name",
+            "value": "customers",
+            "scope": "tenant"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a pattern is *, domain.* or a qualified type",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateGroup",
+        "data": {
+          "name": "X",
+          "permissions": [
+            {
+              "pattern": "shop"
+            }
+          ]
+        }
+      },
+      "rejected": "invalid_permissions"
+    },
+    {
+      "name": "owners is the virtual group's name",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateGroup",
+        "data": {
+          "name": "Owners",
+          "permissions": []
+        }
+      },
+      "rejected": "invalid_name"
+    },
+    {
+      "name": "permissions are set as a whole list",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "GroupCreated",
+          "data": {
+            "name": "Customers",
+            "description": "",
+            "permissions": []
+          }
+        }
+      ],
+      "when": {
+        "type": "SetPermissions",
+        "data": {
+          "permissions": [
+            {
+              "pattern": "shop.*"
+            }
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "GroupPermissionsSet",
+          "data": {
+            "permissions": [
+              {
+                "pattern": "shop.*"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "a group's name has at most 100 characters, counted in code points",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateGroup",
+        "data": {
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀",
+          "permissions": [
+            {
+              "pattern": "shop.PlaceOrder",
+              "viaParent": true
+            },
+            {
+              "pattern": "shop.CancelOrder",
+              "when": "owner",
+              "viaParent": true
+            }
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "GroupCreated",
+          "data": {
+            "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀",
+            "description": "",
+            "permissions": [
+              {
+                "pattern": "shop.PlaceOrder"
+              },
+              {
+                "pattern": "shop.CancelOrder",
+                "when": "owner",
+                "viaParent": true
+              }
+            ]
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "name",
+            "value": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀",
+            "scope": "tenant"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a group's name of 101 characters, counted in code points, is too long",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateGroup",
+        "data": {
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀",
+          "permissions": [
+            {
+              "pattern": "shop.PlaceOrder",
+              "viaParent": true
+            },
+            {
+              "pattern": "shop.CancelOrder",
+              "when": "owner",
+              "viaParent": true
+            }
+          ]
+        }
+      },
+      "rejected": "invalid_name"
+    }
+  ]
+}

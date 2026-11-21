@@ -1,0 +1,342 @@
+{
+  "domain": "identity",
+  "cases": [
+    {
+      "name": "an identity is created for an account, which it holds as a key",
+      "aggregate": "identity",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateIdentity",
+        "data": {
+          "accountId": "a1"
+        }
+      },
+      "then": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "person",
+            "accountId": "a1",
+            "displayName": "",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "account",
+            "value": "a1",
+            "scope": "tenant"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a membership names its group, optionally a scope and an expiry",
+      "aggregate": "identity",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "person",
+            "accountId": "a1",
+            "displayName": "",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "when": {
+        "type": "GrantMembership",
+        "data": {
+          "membershipId": "m1",
+          "group": "g1",
+          "scope": {
+            "type": "shop.order",
+            "id": "o1"
+          },
+          "expiresAt": 2000000
+        }
+      },
+      "then": [
+        {
+          "type": "MembershipGranted",
+          "data": {
+            "membershipId": "m1",
+            "group": "g1",
+            "scope": {
+              "type": "shop.order",
+              "id": "o1"
+            },
+            "expiresAt": 2000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "the same group and scope is granted once",
+      "aggregate": "identity",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "person",
+            "accountId": "a1",
+            "displayName": "",
+            "title": null,
+            "email": null
+          }
+        },
+        {
+          "type": "MembershipGranted",
+          "data": {
+            "membershipId": "m1",
+            "group": "g1",
+            "scope": null,
+            "expiresAt": null
+          }
+        }
+      ],
+      "when": {
+        "type": "GrantMembership",
+        "data": {
+          "membershipId": "m2",
+          "group": "g1"
+        }
+      },
+      "rejected": "exists"
+    },
+    {
+      "name": "a scope is a qualified aggregate type and an ID",
+      "aggregate": "identity",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "person",
+            "accountId": "a1",
+            "displayName": "",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "when": {
+        "type": "GrantMembership",
+        "data": {
+          "membershipId": "m1",
+          "group": "g1",
+          "scope": {
+            "type": "order",
+            "id": "o1"
+          }
+        }
+      },
+      "rejected": "invalid_scope"
+    },
+    {
+      "name": "a person has no API keys",
+      "aggregate": "identity",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "person",
+            "accountId": "a1",
+            "displayName": "",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "when": {
+        "type": "CreateApiKey",
+        "data": {
+          "keyId": "key12345",
+          "secret": "0123456789abcdef0123456789abcdef"
+        }
+      },
+      "rejected": "not_a_service"
+    },
+    {
+      "name": "a service's API key keeps only its hash",
+      "aggregate": "identity",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "service",
+            "accountId": null,
+            "displayName": "Billing",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "when": {
+        "type": "CreateApiKey",
+        "data": {
+          "keyId": "key12345",
+          "secret": "0123456789abcdef0123456789abcdef"
+        }
+      },
+      "then": [
+        {
+          "type": "ApiKeyCreated",
+          "data": {
+            "keyId": "key12345",
+            "hash": "94e9ae63686e76ed4816b6d6f576019d39d2dedd3f6ccca9627275184573cde8",
+            "label": "",
+            "expiresAt": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a deleted identity frees its account key",
+      "aggregate": "identity",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "person",
+            "accountId": "a1",
+            "displayName": "",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "when": {
+        "type": "DeleteIdentity",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "IdentityDeleted",
+          "data": {}
+        }
+      ],
+      "index": {
+        "keys": [],
+        "facts": []
+      }
+    },
+    {
+      "name": "a process gets an identity of its own, which holds the process's name as a key",
+      "aggregate": "identity",
+      "aggregateId": "p1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateProcessIdentity",
+        "data": {
+          "process": "shop.fulfilment"
+        }
+      },
+      "then": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "process",
+            "accountId": null,
+            "displayName": "shop.fulfilment",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "process",
+            "value": "shop.fulfilment",
+            "scope": "tenant"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a process identity needs a qualified process name",
+      "aggregate": "identity",
+      "aggregateId": "p1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateProcessIdentity",
+        "data": {
+          "process": "fulfilment"
+        }
+      },
+      "rejected": "invalid_process"
+    },
+    {
+      "name": "a process's API key keeps only its hash, like a service's",
+      "aggregate": "identity",
+      "aggregateId": "p1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "process",
+            "accountId": null,
+            "displayName": "shop.fulfilment",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "when": {
+        "type": "CreateApiKey",
+        "data": {
+          "keyId": "key12345",
+          "secret": "0123456789abcdef0123456789abcdef"
+        }
+      },
+      "then": [
+        {
+          "type": "ApiKeyCreated",
+          "data": {
+            "keyId": "key12345",
+            "hash": "94e9ae63686e76ed4816b6d6f576019d39d2dedd3f6ccca9627275184573cde8",
+            "label": "",
+            "expiresAt": null
+          }
+        }
+      ]
+    }
+  ]
+}

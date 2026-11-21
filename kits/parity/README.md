@@ -1,11 +1,11 @@
 # Kit parity
 
-The kit exists in TypeScript, Python and Rust. Each passes the shared fixtures (`../fixtures`),
+The kit exists in TypeScript, Python, Rust and Go. Each passes the shared fixtures (`../fixtures`),
 which hold single commands and authorization checks. Parity goes further: a whole application's
 life, run through every pair of languages, must leave exactly the same results, mails and events.
 
 ```sh
-make parity                                              # all nine pairs
+make parity                                              # all sixteen pairs
 node --conditions=source --no-warnings kits/parity/run.ts ts,rs py   # some: host languages, driver languages
 ```
 
@@ -17,7 +17,8 @@ node --conditions=source --no-warnings kits/parity/run.ts ts,rs py   # some: hos
   process's identity, a restart of the app) and read every list at the end. A step may say what it
   must answer (`expect`).
 - Each kit has a runner: `typescript/test/parity.ts`, `python/tests/parity.py`,
-  `rust/examples/parity.rs`. As the **host** it runs the kit's domains and a small shop (orders
+  `rust/examples/parity.rs`, `sdks/go/internal/kitparity` (the Go kit lives in the Go SDK's
+  module, `sdks/go/kit`). As the **host** it runs the kit's domains and a small shop (orders
   with an owner relation, a parcel process) on a kernel, its mails written to a file. As the
   **driver** it runs the steps through its own `KitApi` and SDK, and writes what each step
   answered, in the shapes the TypeScript kit answers in.

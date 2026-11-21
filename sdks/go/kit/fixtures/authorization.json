@@ -1,0 +1,2764 @@
+{
+  "relations": [
+    {
+      "type": "shop.order",
+      "name": "owner",
+      "event": "shop.OrderPlaced",
+      "field": "customer"
+    }
+  ],
+  "world": [
+    {
+      "domain": "tenancy",
+      "aggregateType": "tenant",
+      "type": "TenantCreated",
+      "tenant": "platform",
+      "aggregateId": "platform",
+      "data": {
+        "slug": "platform",
+        "name": "Platform",
+        "owner": {
+          "email": ""
+        },
+        "status": "active"
+      }
+    },
+    {
+      "domain": "tenancy",
+      "aggregateType": "tenant",
+      "type": "SignUpPolicyChanged",
+      "tenant": "platform",
+      "aggregateId": "platform",
+      "data": {
+        "tenants": "active",
+        "accounts": "open"
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "pa",
+      "data": {
+        "email": "pa@example.com",
+        "name": "pa",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-pa",
+      "data": {
+        "accountId": "pa",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "platform",
+      "aggregateId": "i-pa",
+      "data": {
+        "kind": "person",
+        "accountId": "pa",
+        "displayName": "i-pa",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "tenancy",
+      "aggregateType": "tenant",
+      "type": "OwnerAdded",
+      "tenant": "platform",
+      "aggregateId": "platform",
+      "data": {
+        "identityId": "i-pa"
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "ps",
+      "data": {
+        "email": "ps@example.com",
+        "name": "ps",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-ps",
+      "data": {
+        "accountId": "ps",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "platform",
+      "aggregateId": "i-ps",
+      "data": {
+        "kind": "person",
+        "accountId": "ps",
+        "displayName": "i-ps",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "group",
+      "aggregateType": "group",
+      "type": "GroupCreated",
+      "tenant": "platform",
+      "aggregateId": "g-support",
+      "data": {
+        "name": "g-support",
+        "description": "",
+        "permissions": [
+          {
+            "pattern": "shop.*"
+          }
+        ]
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "MembershipGranted",
+      "tenant": "platform",
+      "aggregateId": "i-ps",
+      "data": {
+        "membershipId": "m-ps",
+        "group": "g-support",
+        "scope": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "domain": "tenancy",
+      "aggregateType": "tenant",
+      "type": "TenantCreated",
+      "tenant": "t1",
+      "aggregateId": "t1",
+      "data": {
+        "slug": "acme",
+        "name": "Acme",
+        "owner": {
+          "accountId": "a-own"
+        },
+        "status": "active"
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "a-own",
+      "data": {
+        "email": "a-own@example.com",
+        "name": "a-own",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-own",
+      "data": {
+        "accountId": "a-own",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "t1",
+      "aggregateId": "i-own",
+      "data": {
+        "kind": "person",
+        "accountId": "a-own",
+        "displayName": "i-own",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "tenancy",
+      "aggregateType": "tenant",
+      "type": "OwnerAdded",
+      "tenant": "t1",
+      "aggregateId": "t1",
+      "data": {
+        "identityId": "i-own"
+      }
+    },
+    {
+      "domain": "group",
+      "aggregateType": "group",
+      "type": "GroupCreated",
+      "tenant": "t1",
+      "aggregateId": "g-cust",
+      "data": {
+        "name": "g-cust",
+        "description": "",
+        "permissions": [
+          {
+            "pattern": "shop.PlaceOrder"
+          },
+          {
+            "pattern": "shop.CancelOrder",
+            "when": "owner"
+          }
+        ]
+      }
+    },
+    {
+      "domain": "group",
+      "aggregateType": "group",
+      "type": "GroupCreated",
+      "tenant": "t1",
+      "aggregateId": "g-admin",
+      "data": {
+        "name": "g-admin",
+        "description": "",
+        "permissions": [
+          {
+            "pattern": "identity.GrantMembership"
+          },
+          {
+            "pattern": "group.*"
+          }
+        ]
+      }
+    },
+    {
+      "domain": "group",
+      "aggregateType": "group",
+      "type": "GroupCreated",
+      "tenant": "t1",
+      "aggregateId": "g-inv",
+      "data": {
+        "name": "g-inv",
+        "description": "",
+        "permissions": [
+          {
+            "pattern": "invitation.*"
+          }
+        ]
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "a-mem",
+      "data": {
+        "email": "a-mem@example.com",
+        "name": "a-mem",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-mem",
+      "data": {
+        "accountId": "a-mem",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "t1",
+      "aggregateId": "i-mem",
+      "data": {
+        "kind": "person",
+        "accountId": "a-mem",
+        "displayName": "i-mem",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "MembershipGranted",
+      "tenant": "t1",
+      "aggregateId": "i-mem",
+      "data": {
+        "membershipId": "m1",
+        "group": "g-cust",
+        "scope": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "a-two",
+      "data": {
+        "email": "a-two@example.com",
+        "name": "a-two",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-two",
+      "data": {
+        "accountId": "a-two",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "t1",
+      "aggregateId": "i-two",
+      "data": {
+        "kind": "person",
+        "accountId": "a-two",
+        "displayName": "i-two",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "MembershipGranted",
+      "tenant": "t1",
+      "aggregateId": "i-two",
+      "data": {
+        "membershipId": "m2",
+        "group": "g-cust",
+        "scope": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "a-adm",
+      "data": {
+        "email": "a-adm@example.com",
+        "name": "a-adm",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-adm",
+      "data": {
+        "accountId": "a-adm",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "t1",
+      "aggregateId": "i-adm",
+      "data": {
+        "kind": "person",
+        "accountId": "a-adm",
+        "displayName": "i-adm",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "MembershipGranted",
+      "tenant": "t1",
+      "aggregateId": "i-adm",
+      "data": {
+        "membershipId": "m3",
+        "group": "g-admin",
+        "scope": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "a-inv",
+      "data": {
+        "email": "a-inv@example.com",
+        "name": "a-inv",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-inv",
+      "data": {
+        "accountId": "a-inv",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "t1",
+      "aggregateId": "i-inv",
+      "data": {
+        "kind": "person",
+        "accountId": "a-inv",
+        "displayName": "i-inv",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "MembershipGranted",
+      "tenant": "t1",
+      "aggregateId": "i-inv",
+      "data": {
+        "membershipId": "m4",
+        "group": "g-inv",
+        "scope": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "account",
+      "type": "AccountRegistered",
+      "tenant": "platform",
+      "aggregateId": "a-out",
+      "data": {
+        "email": "a-out@example.com",
+        "name": "a-out",
+        "passwordHash": null,
+        "verified": true,
+        "at": 1
+      }
+    },
+    {
+      "domain": "account",
+      "aggregateType": "session",
+      "type": "SessionOpened",
+      "tenant": "platform",
+      "aggregateId": "s-out",
+      "data": {
+        "accountId": "a-out",
+        "method": "password",
+        "factors": [
+          "password"
+        ],
+        "refreshTokenHash": "h",
+        "ip": null,
+        "userAgent": null,
+        "at": 1
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "IdentityCreated",
+      "tenant": "t1",
+      "aggregateId": "i-svc",
+      "data": {
+        "kind": "service",
+        "accountId": null,
+        "displayName": "i-svc",
+        "title": null,
+        "email": null
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "ApiKeyCreated",
+      "tenant": "t1",
+      "aggregateId": "i-svc",
+      "data": {
+        "keyId": "k1",
+        "hash": "h",
+        "label": "",
+        "expiresAt": null
+      }
+    },
+    {
+      "domain": "identity",
+      "aggregateType": "identity",
+      "type": "MembershipGranted",
+      "tenant": "t1",
+      "aggregateId": "i-svc",
+      "data": {
+        "membershipId": "m5",
+        "group": "g-cust",
+        "scope": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "domain": "shop",
+      "aggregateType": "order",
+      "type": "OrderPlaced",
+      "tenant": "t1",
+      "aggregateId": "o1",
+      "data": {
+        "customer": "i-mem"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "anyone registers while sign-up is open",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "RegisterAccount",
+        "aggregateType": "account",
+        "aggregateId": "a9",
+        "data": {
+          "email": "x@example.com",
+          "name": "X"
+        },
+        "request": {}
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "registration is refused while sign-up is off",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "RegisterAccount",
+        "aggregateType": "account",
+        "aggregateId": "a9",
+        "data": {
+          "email": "x@example.com",
+          "name": "X"
+        },
+        "request": {}
+      },
+      "expect": "sign_up_closed",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "SignUpPolicyChanged",
+          "tenant": "platform",
+          "aggregateId": "platform",
+          "data": {
+            "tenants": "off",
+            "accounts": "off"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a verified registration is the API's, not anyone's",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "RegisterAccount",
+        "aggregateType": "account",
+        "aggregateId": "a9",
+        "data": {
+          "email": "x@example.com",
+          "name": "X",
+          "verified": true
+        },
+        "request": {}
+      },
+      "expect": "unauthenticated"
+    },
+    {
+      "name": "a member of a group places an order",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "without a session, nobody",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "unauthenticated"
+    },
+    {
+      "name": "an ended session is refused at once",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "unauthenticated",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionEnded",
+          "tenant": "platform",
+          "aggregateId": "s-mem",
+          "data": {
+            "reason": "signed_out"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a session is its own account's only",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "unauthenticated"
+    },
+    {
+      "name": "a suspended account is refused at once",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "unauthenticated",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "AccountSuspended",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "reason": "abuse",
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "the owner of an order cancels it (relation)",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "another customer does not cancel it",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-two",
+          "senderSession": "s-two",
+          "senderTenant": "t1",
+          "senderIdentity": "i-two"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "cancelling another customer's scheduled CancelOrder is decided as the command: refused",
+      "check": {
+        "kind": "cancel",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-two",
+          "senderSession": "s-two",
+          "senderTenant": "t1",
+          "senderIdentity": "i-two"
+        },
+        "target": {
+          "type": "shop.order",
+          "id": "o1"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "cancelling one's own scheduled CancelOrder is decided as the command: allowed",
+      "check": {
+        "kind": "cancel",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        },
+        "target": {
+          "type": "shop.order",
+          "id": "o1"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "a relation needs its target: no other order",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o9",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "a service signs in with its API key",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderSession": "k1",
+          "senderTenant": "t1",
+          "senderIdentity": "i-svc"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "a revoked API key is refused at once",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderSession": "k1",
+          "senderTenant": "t1",
+          "senderIdentity": "i-svc"
+        }
+      },
+      "expect": "unauthenticated",
+      "extra": [
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "ApiKeyRevoked",
+          "tenant": "t1",
+          "aggregateId": "i-svc",
+          "data": {
+            "keyId": "k1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an expired API key is refused",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderSession": "k2",
+          "senderTenant": "t1",
+          "senderIdentity": "i-svc"
+        }
+      },
+      "expect": "unauthenticated",
+      "extra": [
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "ApiKeyCreated",
+          "tenant": "t1",
+          "aggregateId": "i-svc",
+          "data": {
+            "keyId": "k2",
+            "hash": "h",
+            "label": "",
+            "expiresAt": 500
+          }
+        }
+      ]
+    },
+    {
+      "name": "a revoked membership stops counting",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "forbidden",
+      "extra": [
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "MembershipRevoked",
+          "tenant": "t1",
+          "aggregateId": "i-mem",
+          "data": {
+            "membershipId": "m1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a suspended membership stops counting",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "forbidden",
+      "extra": [
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "MembershipSuspended",
+          "tenant": "t1",
+          "aggregateId": "i-mem",
+          "data": {
+            "membershipId": "m1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an expired membership stops counting",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-tmp",
+          "senderSession": "s-tmp",
+          "senderTenant": "t1",
+          "senderIdentity": "i-tmp"
+        }
+      },
+      "expect": "forbidden",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "AccountRegistered",
+          "tenant": "platform",
+          "aggregateId": "a-tmp",
+          "data": {
+            "email": "a-tmp@example.com",
+            "name": "a-tmp",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-tmp",
+          "data": {
+            "accountId": "a-tmp",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "IdentityCreated",
+          "tenant": "t1",
+          "aggregateId": "i-tmp",
+          "data": {
+            "kind": "person",
+            "accountId": "a-tmp",
+            "displayName": "i-tmp",
+            "title": null,
+            "email": null
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "MembershipGranted",
+          "tenant": "t1",
+          "aggregateId": "i-tmp",
+          "data": {
+            "membershipId": "m9",
+            "group": "g-cust",
+            "scope": null,
+            "expiresAt": 500
+          }
+        }
+      ]
+    },
+    {
+      "name": "a membership expiring later counts",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-tmp",
+          "senderSession": "s-tmp",
+          "senderTenant": "t1",
+          "senderIdentity": "i-tmp"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "AccountRegistered",
+          "tenant": "platform",
+          "aggregateId": "a-tmp",
+          "data": {
+            "email": "a-tmp@example.com",
+            "name": "a-tmp",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-tmp",
+          "data": {
+            "accountId": "a-tmp",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "IdentityCreated",
+          "tenant": "t1",
+          "aggregateId": "i-tmp",
+          "data": {
+            "kind": "person",
+            "accountId": "a-tmp",
+            "displayName": "i-tmp",
+            "title": null,
+            "email": null
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "MembershipGranted",
+          "tenant": "t1",
+          "aggregateId": "i-tmp",
+          "data": {
+            "membershipId": "m9",
+            "group": "g-cust",
+            "scope": null,
+            "expiresAt": 9000000000000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a deleted group's memberships stop counting",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "forbidden",
+      "extra": [
+        {
+          "domain": "group",
+          "aggregateType": "group",
+          "type": "GroupDeleted",
+          "tenant": "t1",
+          "aggregateId": "g-cust",
+          "data": {}
+        }
+      ]
+    },
+    {
+      "name": "a membership scoped to an aggregate counts there",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o5",
+        "data": {},
+        "request": {
+          "senderAccount": "a-sc",
+          "senderSession": "s-sc",
+          "senderTenant": "t1",
+          "senderIdentity": "i-sc"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "AccountRegistered",
+          "tenant": "platform",
+          "aggregateId": "a-sc",
+          "data": {
+            "email": "a-sc@example.com",
+            "name": "a-sc",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-sc",
+          "data": {
+            "accountId": "a-sc",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "IdentityCreated",
+          "tenant": "t1",
+          "aggregateId": "i-sc",
+          "data": {
+            "kind": "person",
+            "accountId": "a-sc",
+            "displayName": "i-sc",
+            "title": null,
+            "email": null
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "MembershipGranted",
+          "tenant": "t1",
+          "aggregateId": "i-sc",
+          "data": {
+            "membershipId": "m8",
+            "group": "g-cust",
+            "scope": {
+              "type": "shop.order",
+              "id": "o5"
+            },
+            "expiresAt": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "... and nowhere else",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o6",
+        "data": {},
+        "request": {
+          "senderAccount": "a-sc",
+          "senderSession": "s-sc",
+          "senderTenant": "t1",
+          "senderIdentity": "i-sc"
+        }
+      },
+      "expect": "forbidden",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "AccountRegistered",
+          "tenant": "platform",
+          "aggregateId": "a-sc",
+          "data": {
+            "email": "a-sc@example.com",
+            "name": "a-sc",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-sc",
+          "data": {
+            "accountId": "a-sc",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "IdentityCreated",
+          "tenant": "t1",
+          "aggregateId": "i-sc",
+          "data": {
+            "kind": "person",
+            "accountId": "a-sc",
+            "displayName": "i-sc",
+            "title": null,
+            "email": null
+          }
+        },
+        {
+          "domain": "identity",
+          "aggregateType": "identity",
+          "type": "MembershipGranted",
+          "tenant": "t1",
+          "aggregateId": "i-sc",
+          "data": {
+            "membershipId": "m8",
+            "group": "g-cust",
+            "scope": {
+              "type": "shop.order",
+              "id": "o5"
+            },
+            "expiresAt": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "an owner may everything in the tenant",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "an owner does not delete the tenant: the platform does",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "tenancy",
+        "type": "DeleteTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "an owner suspends the tenant for themselves",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "tenancy",
+        "type": "SuspendTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t1",
+        "data": {
+          "reason": "owner_requested"
+        },
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "an owner does not suspend it for another reason",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "tenancy",
+        "type": "SuspendTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t1",
+        "data": {
+          "reason": "unpaid"
+        },
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "a suspended tenant refuses its members",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "tenant_suspended",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "its owner reactivates it after suspending it for themselves",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "tenancy",
+        "type": "ReactivateTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "owner_requested",
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... not after the platform suspended it",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "tenancy",
+        "type": "ReactivateTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "forbidden",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "a platform group acts in every tenant",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "ps",
+          "senderSession": "s-ps",
+          "senderTenant": "platform",
+          "senderIdentity": "i-ps"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "... within its permissions",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "tenancy",
+        "type": "DeleteTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t1",
+        "data": {},
+        "request": {
+          "senderAccount": "ps",
+          "senderSession": "s-ps",
+          "senderTenant": "platform",
+          "senderIdentity": "i-ps"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "a platform owner may everything",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "tenancy",
+        "type": "DeleteTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t1",
+        "data": {},
+        "request": {
+          "senderAccount": "pa",
+          "senderSession": "s-pa",
+          "senderTenant": "platform",
+          "senderIdentity": "i-pa"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "a member of another tenant is refused",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t2",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "a tenant requiring a second factor refuses one-factor sessions",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "mfa_required",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "MfaRequirementChanged",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "required": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... and lets a session with a second factor in",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "MfaRequirementChanged",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "required": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionFactorAdded",
+          "tenant": "platform",
+          "aggregateId": "s-mem",
+          "data": {
+            "factor": "totp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "nobody grants a group with permissions they do not hold",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GrantMembership",
+        "aggregateType": "identity",
+        "aggregateId": "i-two",
+        "data": {
+          "membershipId": "m7",
+          "group": "g-cust"
+        },
+        "request": {
+          "senderAccount": "a-adm",
+          "senderSession": "s-adm",
+          "senderTenant": "t1",
+          "senderIdentity": "i-adm"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "a group whose permissions one holds may be granted",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GrantMembership",
+        "aggregateType": "identity",
+        "aggregateId": "i-two",
+        "data": {
+          "membershipId": "m7",
+          "group": "g-admin"
+        },
+        "request": {
+          "senderAccount": "a-adm",
+          "senderSession": "s-adm",
+          "senderTenant": "t1",
+          "senderIdentity": "i-adm"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "nobody creates a group with permissions they do not hold",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "group",
+        "type": "CreateGroup",
+        "aggregateType": "group",
+        "aggregateId": "g9",
+        "data": {
+          "name": "X",
+          "permissions": [
+            {
+              "pattern": "shop.*"
+            }
+          ]
+        },
+        "request": {
+          "senderAccount": "a-adm",
+          "senderSession": "s-adm",
+          "senderTenant": "t1",
+          "senderIdentity": "i-adm"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "... one with permissions one holds, yes",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "group",
+        "type": "CreateGroup",
+        "aggregateType": "group",
+        "aggregateId": "g9",
+        "data": {
+          "name": "X",
+          "permissions": [
+            {
+              "pattern": "group.CreateGroup"
+            }
+          ]
+        },
+        "request": {
+          "senderAccount": "a-adm",
+          "senderSession": "s-adm",
+          "senderTenant": "t1",
+          "senderIdentity": "i-adm"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "the kit's internal commands are not for people",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "CreateIdentity",
+        "aggregateType": "identity",
+        "aggregateId": "i9",
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "... but for privileged keys",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "CreateIdentity",
+        "aggregateType": "identity",
+        "aggregateId": "i9",
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "bypassAuthorization": true
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "acting on behalf of others is not available yet",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own",
+          "onBehalfOf": "i-mem"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "one reads one's own identity",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-mem"
+        },
+        "data": {
+          "identityId": "i-mem"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "... not someone else's without a permission",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-two"
+        },
+        "data": {
+          "identityId": "i-two"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "members do not hand out owner invitations",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "invitation",
+        "type": "CreateInvitation",
+        "aggregateType": "invitation",
+        "aggregateId": "v1",
+        "data": {
+          "email": "x@example.com",
+          "owner": true
+        },
+        "request": {
+          "senderAccount": "a-inv",
+          "senderSession": "s-inv",
+          "senderTenant": "t1",
+          "senderIdentity": "i-inv"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "... ordinary invitations, yes",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "invitation",
+        "type": "CreateInvitation",
+        "aggregateType": "invitation",
+        "aggregateId": "v1",
+        "data": {
+          "email": "x@example.com"
+        },
+        "request": {
+          "senderAccount": "a-inv",
+          "senderSession": "s-inv",
+          "senderTenant": "t1",
+          "senderIdentity": "i-inv"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "a signed-in account opens a tenant by self-service",
+      "check": {
+        "kind": "command",
+        "tenant": "t5",
+        "domain": "tenancy",
+        "type": "CreateTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t5",
+        "data": {
+          "slug": "new",
+          "name": "New",
+          "owner": {
+            "accountId": "a-out"
+          },
+          "status": "active"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "... only with the status the policy says",
+      "check": {
+        "kind": "command",
+        "tenant": "t5",
+        "domain": "tenancy",
+        "type": "CreateTenant",
+        "aggregateType": "tenant",
+        "aggregateId": "t5",
+        "data": {
+          "slug": "new",
+          "name": "New",
+          "owner": {
+            "accountId": "a-out"
+          },
+          "status": "pending"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "a person suspends their own account for themselves",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "SuspendAccount",
+        "aggregateType": "account",
+        "aggregateId": "a-mem",
+        "data": {
+          "reason": "owner_requested"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "... not for another reason",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "SuspendAccount",
+        "aggregateType": "account",
+        "aggregateId": "a-mem",
+        "data": {
+          "reason": "abuse"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "an account with TOTP on needs it in every session",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "mfa_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... also for its own settings",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "ChangePassword",
+        "aggregateType": "account",
+        "aggregateId": "a-mem",
+        "data": {
+          "new": "x"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem"
+        }
+      },
+      "expect": "mfa_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... but lets a session that proved it in",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionFactorAdded",
+          "tenant": "platform",
+          "aggregateId": "s-mem",
+          "data": {
+            "factor": "totp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "signing out needs no second factor",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "EndSession",
+        "aggregateType": "session",
+        "aggregateId": "s-mem",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "TOTP turned off, one factor is enough again",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpDisabled",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {}
+        }
+      ]
+    },
+    {
+      "name": "a tenant enforcing SSO refuses password sessions",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "sso_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... also reading one's own identity there",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-mem"
+        },
+        "data": {
+          "identityId": "i-mem"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "sso_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... and lets its SSO's sessions in",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem-sso",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-mem-sso",
+          "data": {
+            "accountId": "a-mem",
+            "method": "sso:sso1",
+            "factors": [
+              "sso"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... its owners keep any session, to mend it",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "a disabled SSO is no longer enforced",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoDisabled",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {}
+        }
+      ]
+    },
+    {
+      "name": "one's own identity in a suspended tenant is not readable",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-mem"
+        },
+        "data": {
+          "identityId": "i-mem"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "tenant_suspended",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "oneself in a tenant one joins (no identity there yet): allowed when its checks pass",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "allow",
+      "extra": []
+    },
+    {
+      "name": "... refused while the tenant is suspended",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "tenant_suspended",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... refused with tenant_not_active while the tenant is pending (not yet activated)",
+      "check": {
+        "kind": "query",
+        "tenant": "t-new",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "tenant_not_active",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantCreated",
+          "tenant": "t-new",
+          "aggregateId": "t-new",
+          "data": {
+            "slug": "newco",
+            "name": "Newco",
+            "owner": {
+              "accountId": "a-out"
+            },
+            "status": "pending"
+          }
+        }
+      ]
+    },
+    {
+      "name": "... refused with one factor where the tenant requires a second",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "mfa_required",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "MfaRequirementChanged",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "required": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... allowed with a second factor where the tenant requires one",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "MfaRequirementChanged",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "required": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionFactorAdded",
+          "tenant": "platform",
+          "aggregateId": "s-out",
+          "data": {
+            "factor": "totp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "... refused with a password session where the tenant enforces SSO",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "sso_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... allowed with a session of the tenant's SSO",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out-sso"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-out-sso",
+          "data": {
+            "accountId": "a-out",
+            "method": "sso:sso1",
+            "factors": [
+              "sso"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... refused in a tenant that does not exist",
+      "check": {
+        "kind": "query",
+        "tenant": "t-none",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "forbidden",
+      "extra": []
+    },
+    {
+      "name": "oneself in the platform tenant: another tenant's suspension does not matter",
+      "check": {
+        "kind": "query",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -26,6 +26,10 @@ npm install @node-rs/argon2 @simplewebauthn/server openid-client
 cargo install kernable-sdk
 kernable-sdk add kit     # then add the crate `kit` to your workspace and as a dependency
 ```
+```sh [Go]
+go run github.com/kernable/kernable/sdks/go/cmd/kernable-sdk@latest add kit   # the package shop/kit
+go mod tidy
+```
 :::
 
 Stop the guard from part 6 and the confirmations reactor from part 4: from now on the kit's
@@ -55,6 +59,7 @@ an order, from the shop's own events:
 <<< @/examples/shop/ts/api.ts#relation [api.ts]
 <<< @/examples/shop/py/api.py#relation [api.py]
 <<< @/examples/shop/rs/src/bin/api.rs#relation [api.rs]
+<<< @/examples/shop/go/api/main.go#relation [api/main.go]
 :::
 
 The kit sends mail for email verification, password resets and invitations. In development, the
@@ -64,6 +69,7 @@ API writes each mail to a file in `mail/` instead:
 <<< @/examples/shop/ts/api.ts#mail [api.ts]
 <<< @/examples/shop/py/api.py#mail [api.py]
 <<< @/examples/shop/rs/src/bin/api.rs#mail [api.rs]
+<<< @/examples/shop/go/api/main.go#mail [api/main.go]
 :::
 
 Groups say which *types* someone may send. One rule of the shop is about the data instead: a new
@@ -75,6 +81,7 @@ runs a small middleware of the shop for it. It comes after the kit's (order 0 ag
 <<< @/examples/shop/ts/api.ts#rule [api.ts]
 <<< @/examples/shop/py/api.py#rule [api.py]
 <<< @/examples/shop/rs/src/bin/api.rs#rule [api.rs]
+<<< @/examples/shop/go/api/main.go#rule [api/main.go]
 :::
 
 Like the kit's middleware, it fails closed: while it is away, every `Place` is refused.
@@ -86,10 +93,11 @@ the API's own identity and key) and serves HTTP on port 3000:
 <<< @/examples/shop/ts/api.ts#run [api.ts]
 <<< @/examples/shop/py/api.py#run [api.py]
 <<< @/examples/shop/rs/src/bin/api.rs#run [api.rs]
+<<< @/examples/shop/go/api/main.go#run [api/main.go]
 :::
 
-Start the worker, the read models and the API (`node api.ts`, `.venv/bin/python api.py` or
-`cargo run -q --bin api`). The example server's routes:
+Start the worker, the read models and the API (`node api.ts`, `.venv/bin/python api.py`,
+`cargo run -q --bin api` or `go run ./api`). The example server's routes:
 
 | Route | Does |
 |---|---|
@@ -111,6 +119,7 @@ A small client of the API, for the people of the story:
 <<< @/examples/shop/ts/part9.ts#client [part9.ts]
 <<< @/examples/shop/py/part9.py#client [part9.py]
 <<< @/examples/shop/rs/src/bin/part9.rs#client [part9.rs]
+<<< @/examples/shop/go/part9/main.go#client [part9/main.go]
 :::
 
 Ann opens her shop. A tenant is one customer of your platform, here Ann's shop; Ann is its owner
@@ -122,6 +131,7 @@ that group:
 <<< @/examples/shop/ts/part9.ts#owner [part9.ts]
 <<< @/examples/shop/py/part9.py#owner [part9.py]
 <<< @/examples/shop/rs/src/bin/part9.rs#owner [part9.rs]
+<<< @/examples/shop/go/part9/main.go#owner [part9/main.go]
 :::
 
 Bob and Cleo sign up and join through the link. Bob places an order and works on it; Cleo tries
@@ -131,6 +141,7 @@ to touch it:
 <<< @/examples/shop/ts/part9.ts#customers [part9.ts]
 <<< @/examples/shop/py/part9.py#customers [part9.py]
 <<< @/examples/shop/rs/src/bin/part9.rs#customers [part9.rs]
+<<< @/examples/shop/go/part9/main.go#customers [part9/main.go]
 :::
 
 Bob tries to place an order in Cleo's name:
@@ -139,6 +150,7 @@ Bob tries to place an order in Cleo's name:
 <<< @/examples/shop/ts/part9.ts#rule [part9.ts]
 <<< @/examples/shop/py/part9.py#rule [part9.py]
 <<< @/examples/shop/rs/src/bin/part9.rs#rule [part9.rs]
+<<< @/examples/shop/go/part9/main.go#rule [part9/main.go]
 :::
 
 Finally, `Explain` tells Cleo why she may not read the order, and a request without an access
@@ -148,12 +160,14 @@ token is refused before anything else:
 <<< @/examples/shop/ts/part9.ts#explain [part9.ts]
 <<< @/examples/shop/py/part9.py#explain [part9.py]
 <<< @/examples/shop/rs/src/bin/part9.rs#explain [part9.rs]
+<<< @/examples/shop/go/part9/main.go#explain [part9/main.go]
 :::
 
 ::: code-group
 <<< @/examples/shop/ts/part9.out{text} [TypeScript]
 <<< @/examples/shop/py/part9.out{text} [Python]
 <<< @/examples/shop/rs/part9.out{text} [Rust]
+<<< @/examples/shop/go/part9.out{text} [Go]
 :::
 
 ## What decided

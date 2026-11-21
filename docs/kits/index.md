@@ -5,8 +5,8 @@ customers, people who sign in, their roles, invitations, and a check on every re
 that groundwork as source code: `kernable-sdk add kit` copies it into your project, and from then
 on it is yours. Change fields, rules and flows, or delete what you do not need.
 
-It is written for TypeScript, Python and Rust. All three write the same events and pass the same
-test cases, so an API in TypeScript and a service in Rust work on one log.
+It is written for TypeScript, Python, Rust and Go. All four write the same events and pass the
+same test cases, so an API in TypeScript and a service in Rust or Go work on one log.
 
 ## What is in it
 
@@ -60,7 +60,7 @@ so the kit's audit trail is your log: sign-ins, failed attempts, memberships, in
 
 A newer kit is never installed over yours. To take something from it, copy it into another
 directory and move over what you want. The kit's test cases (`kit/fixtures`, the same JSON for
-all three languages) tell you which of its rules you changed.
+every language) tell you which of its rules you changed.
 
 ## Start here
 

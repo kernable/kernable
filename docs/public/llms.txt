@@ -1,6 +1,6 @@
 # kernable
 
-> kernable is an application kernel for event-sourced applications: one Rust process (the kernel) checks, orders, signs and stores commands and events, and your business logic runs in your own processes, in any language (TypeScript, Python and Rust SDKs). Every command and query goes through the kernel; a submit returns once every listener has processed its events, so the next read sees them.
+> kernable is an application kernel for event-sourced applications: one Rust process (the kernel) checks, orders, signs and stores commands and events, and your business logic runs in your own processes, in any language (TypeScript, Python, Rust and Go SDKs). Every command and query goes through the kernel; a submit returns once every listener has processed its events, so the next read sees them.
 
 **Status:** released and usable in production; before 1.0 the API may still change, and each release says how.
 
@@ -40,6 +40,6 @@ For building on kernable with an agent, start with the guide: [kernable.AGENTS.m
 
 ## Reference
 
-- [TypeScript SDK](https://kernable.com/docs/reference/sdk-typescript), [Python SDK](https://kernable.com/docs/reference/sdk-python), [Rust SDK](https://kernable.com/docs/reference/sdk-rust)
+- [TypeScript SDK](https://kernable.com/docs/reference/sdk-typescript), [Python SDK](https://kernable.com/docs/reference/sdk-python), [Rust SDK](https://kernable.com/docs/reference/sdk-rust), [Go SDK](https://kernable.com/docs/reference/sdk-go)
 - [kernable start](https://kernable.com/docs/reference/configuration), [CLI](https://kernable.com/docs/reference/cli), [Errors](https://kernable.com/docs/reference/errors), [Metrics and health](https://kernable.com/docs/reference/metrics)
 - [Protocol](https://kernable.com/docs/reference/protocol), [Signatures](https://kernable.com/docs/reference/signing)

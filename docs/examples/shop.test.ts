@@ -1,5 +1,5 @@
 // Runs the tutorial "Build a shop" as written: for every part, the shop's processes and the
-// part's script, in TypeScript, Python and Rust and (part 5) mixed, against a real kernel, and
+// part's script, in TypeScript, Python, Rust and Go and (part 5) mixed, against a real kernel, and
 // compares the output with what the tutorial shows.
 
 import assert from "node:assert/strict";
@@ -116,7 +116,7 @@ async function part9(lang: Lang) {
   }
 }
 
-for (const lang of ["ts", "py", "rs"] as const) {
+for (const lang of ["ts", "py", "rs", "go"] as const) {
   test(`part 9 in ${LANGUAGES[lang]}: accounts and sign-in with the kit`, () => part9(lang));
 }
 

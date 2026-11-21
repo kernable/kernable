@@ -1,6 +1,6 @@
 # Kits: the event catalogue
 
-Status: decided, built in TypeScript, Python and Rust; where the build differs from the first catalogue, this file follows the build ("Found while building" at the end). The user documentation is `docs/kits/`, with tables generated from the TypeScript kit. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share; the shared fixtures in `kits/fixtures/` are written by hand from it, and all three kits run them.
+Status: decided, built in TypeScript, Python, Rust and Go (the Go kit in `sdks/go/kit`, 2026-11-21); where the build differs from the first catalogue, this file follows the build ("Found while building" at the end). The user documentation is `docs/kits/`, with tables generated from the TypeScript kit. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share; the shared fixtures in `kits/fixtures/` are written by hand from it, and all three kits run them.
 
 ## Conventions
 

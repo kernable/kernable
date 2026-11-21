@@ -78,8 +78,8 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix and results |
 | `crates/kernable-soak` | The soak: the kernel and an app per SDK under load and random faults (`make soak`) |
 | `sdks/typescript`, `sdks/python`, `sdks/rust`, `sdks/go` | The SDKs |
-| `kits/` | The kits in TypeScript, Python and Rust, and the fixtures all three are tested against |
-| `docs/` | The documentation site and its runnable examples (the tutorial's shop in three languages, tested as written) |
+| `kits/` | The kits in TypeScript, Python and Rust (the Go kit is in `sdks/go/kit`), and the fixtures all four are tested against |
+| `docs/` | The documentation site and its runnable examples (the tutorial's shop in four languages, tested as written) |
 | `fuzz/` | Fuzz targets (cargo-fuzz) |
 | `design/` | Design notes: decisions and the reasons behind them, for contributors |
 | `scripts/` | The install script, release builds, the package check and the soak on a server |

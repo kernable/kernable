@@ -36,11 +36,18 @@ in its `Outcome`, `Query` as an error.
 Documentation: https://kernable.com/docs (the tutorial and the reference show Go next to the
 other languages).
 
+`go run github.com/kernable/kernable/sdks/go/cmd/kernable-sdk@latest add kit` copies the kit
+(tenancy, accounts, identities, groups, invitations and authorization) into your module as code
+you own: see [Kits](https://kernable.com/docs/kits/) and [kit/README.md](kit/README.md).
+
 ## Develop
 
 ```sh
 ./gen.sh            # after a change of proto/kernable/v1/kernable.proto (needs protoc)
-go test ./...       # signing vectors; with target/debug/kernable built (cargo build), against a kernel
+go test ./...       # signing vectors, the kit's fixtures; with target/debug/kernable built (cargo build), against a kernel
 ```
 
-MIT licensed, see [LICENSE](../../LICENSE).
+`kit/` is the Go kit, the same as the other languages' (`make parity` runs it against them);
+`kit/fixtures` is a copy of `kits/fixtures`, which a test keeps equal.
+
+MIT licensed, see [LICENSE](LICENSE).

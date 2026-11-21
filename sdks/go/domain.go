@@ -506,7 +506,8 @@ func Handle[S, D any](a *Aggregate[S], commandType string, fn func(ctx *CommandC
 	a.handlers[commandType] = func(ctx *CommandContext, s S, data any) ([]NewEvent, error) {
 		d, err := into[D](data)
 		if err != nil {
-			return nil, Reject("invalid_data", fmt.Sprintf("%s: %v", commandType, err))
+			// A payload that does not fit fails the command with handler_error, as in the other SDKs.
+			return nil, fmt.Errorf("%s: %w", commandType, err)
 		}
 		return fn(ctx, s, d)
 	}
@@ -676,6 +677,24 @@ func (a *Aggregate[S]) Handle(ctx *CommandContext, state S, commandType string, 
 		return nil, err
 	}
 	return handler(ctx, s, generic)
+}
+
+// Requirements is what a commandType command with data requires of other aggregates in state
+// (Requires), as a worker computes it; no kernel needed, so it suits tests. None without Requires.
+func (a *Aggregate[S]) Requirements(state S, commandType string, data any) ([]Requirement, error) {
+	req, ok := a.requires[commandType]
+	if !ok {
+		return nil, nil
+	}
+	payload, err := encode(data)
+	if err != nil {
+		return nil, err
+	}
+	generic, err := decodeAny(payload)
+	if err != nil {
+		return nil, err
+	}
+	return req(generic, state)
 }
 
 // aggregateDef is an aggregate whatever its state type: what workers and apps need.

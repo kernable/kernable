@@ -13,6 +13,8 @@ test: py
 	cd sdks/python && .venv/bin/python -m unittest discover -s tests/unit -t .
 	cd kits/typescript && npm install --no-audit --no-fund --silent && npm test
 	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t .
+	cd sdks/go && test -z "$$(gofmt -l .)" && go vet ./... && go test -count=1 ./kit/... ./cmd/... \
+		&& go test -count=1 -run '^(TestGeneratedFromCurrentProto|TestTheKitCarriesTheSharedFixtures|TestKeyID|TestMessages|TestDataAndCache|TestMemberships|TestProcesses|TestVault|TestEventHash|TestDerivedIDs|TestIndex)$$' .
 
 # Everything, in four parts that CI runs as parallel jobs and scripts/check.sh side by side here
 # (logs in target/check; after a failure it names the parts to run again).
@@ -54,12 +56,13 @@ check-sdks: prune py
 	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t . -p 'e2e_*.py'
 	$(MAKE) parity
 
-# Kit parity: one scenario through the TypeScript, Python and Rust kits, the kit's domains hosted
+# Kit parity: one scenario through the TypeScript, Python, Rust and Go kits, the kit's domains hosted
 # in one language and driven through another's KitApi, every pair; every run's results, mails and
 # stored events must equal the TypeScript/TypeScript run's (kits/parity/README.md).
 parity: py
 	cargo build --workspace --bin kernable
 	cargo build -p kernable-kit --example parity
+	cd sdks/go && go build -o $(CURDIR)/target/debug/examples/parity-go ./internal/kitparity
 	cd kits/typescript && npm install --no-audit --no-fund --silent
 	node kits/parity/scenario.ts
 	node --conditions=source --no-warnings kits/parity/run.ts

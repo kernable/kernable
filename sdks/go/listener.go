@@ -248,6 +248,11 @@ func (c *ListenerContext) Query(queryType string, data any) (json.RawMessage, er
 	return c.h.c.Query(c, Query{Domain: domain, Type: t, Data: data, Tenant: c.Event.Tenant})
 }
 
+// Client is the listener's client: requests on it with this context as their ctx name the
+// listener, as everything sent from a handler does (Client().Query(ctx, …) for a query with its
+// own tenant and context).
+func (c *ListenerContext) Client() *Client { return c.h.c }
+
 // ProcessAct sets as whom the process name acts (Client.ProcessAct), on the listener's
 // connection: how an authorization kit hands a process its identity.
 func (c *ListenerContext) ProcessAct(name string, request RequestContext) (bool, error) {
@@ -338,6 +343,23 @@ func On[D any](l *Listener, eventType string, fn func(ctx *ListenerContext, data
 		o(h)
 	}
 	l.handlers[l.qualify(eventType)] = h
+}
+
+// AlsoOn adds a handler for eventType that runs after the one the listener has for it (if any),
+// instead of replacing it: how a kit teaches an app's read model what it knows (visibility).
+func AlsoOn[D any](l *Listener, eventType string, fn func(ctx *ListenerContext, data D) error) {
+	first := l.handlers[l.qualify(eventType)]
+	On(l, eventType, fn)
+	if first == nil {
+		return
+	}
+	second := l.handlers[l.qualify(eventType)]
+	l.handlers[l.qualify(eventType)] = &eventHandler{raw: first.raw, fn: func(ctx *ListenerContext, data any) error {
+		if err := first.fn(ctx, data); err != nil {
+			return err
+		}
+		return second.fn(ctx, data)
+	}}
 }
 
 // Answer answers the query type queryType, of the own domain (GetCart) or another one

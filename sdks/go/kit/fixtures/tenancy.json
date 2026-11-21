@@ -1,0 +1,600 @@
+{
+  "domain": "tenancy",
+  "cases": [
+    {
+      "name": "a tenant is created by self-service, active, holding its slug",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "acme",
+          "name": " Acme ",
+          "owner": {
+            "accountId": "a1"
+          }
+        }
+      },
+      "then": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "slug",
+            "value": "acme",
+            "scope": "global"
+          }
+        ],
+        "facts": [
+          "active",
+          "exists"
+        ]
+      }
+    },
+    {
+      "name": "a pending tenant holds its slug but is not active",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "acme",
+          "name": "Acme",
+          "owner": {
+            "email": "Ann@Example.com"
+          },
+          "status": "pending"
+        }
+      },
+      "then": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "email": "ann@example.com"
+            },
+            "status": "pending"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "slug",
+            "value": "acme",
+            "scope": "global"
+          }
+        ],
+        "facts": [
+          "exists"
+        ]
+      }
+    },
+    {
+      "name": "a reserved slug is refused",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "admin",
+          "name": "Admin",
+          "owner": {
+            "accountId": "a1"
+          }
+        }
+      },
+      "rejected": "invalid_slug"
+    },
+    {
+      "name": "a slug is a DNS label",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "-ab",
+          "name": "X",
+          "owner": {
+            "accountId": "a1"
+          }
+        }
+      },
+      "rejected": "invalid_slug"
+    },
+    {
+      "name": "a tenant lives under its own tenant ID",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t2",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "acme",
+          "name": "Acme",
+          "owner": {
+            "accountId": "a1"
+          }
+        }
+      },
+      "rejected": "invalid_tenant"
+    },
+    {
+      "name": "a tenant is created once",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "acme",
+          "name": "Acme",
+          "owner": {
+            "accountId": "a1"
+          }
+        }
+      },
+      "rejected": "exists"
+    },
+    {
+      "name": "an active tenant is suspended with a reason and the time",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "when": {
+        "type": "SuspendTenant",
+        "data": {
+          "reason": "unpaid"
+        }
+      },
+      "then": [
+        {
+          "type": "TenantSuspended",
+          "data": {
+            "reason": "unpaid",
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "slug",
+            "value": "acme",
+            "scope": "global"
+          }
+        ],
+        "facts": [
+          "exists"
+        ]
+      }
+    },
+    {
+      "name": "an active tenant is not rejected",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "when": {
+        "type": "SuspendTenant",
+        "data": {
+          "reason": "rejected"
+        }
+      },
+      "rejected": "invalid_reason"
+    },
+    {
+      "name": "a pending tenant is rejected",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "pending"
+          }
+        }
+      ],
+      "when": {
+        "type": "SuspendTenant",
+        "data": {
+          "reason": "rejected"
+        }
+      },
+      "then": [
+        {
+          "type": "TenantSuspended",
+          "data": {
+            "reason": "rejected",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a rejected tenant is not reactivated",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "pending"
+          }
+        },
+        {
+          "type": "TenantSuspended",
+          "data": {
+            "reason": "rejected",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "ReactivateTenant",
+        "data": {}
+      },
+      "rejected": "invalid_state"
+    },
+    {
+      "name": "only a suspended tenant is deleted",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "when": {
+        "type": "DeleteTenant",
+        "data": {}
+      },
+      "rejected": "invalid_state"
+    },
+    {
+      "name": "a suspended tenant is deleted, freeing its slug",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        },
+        {
+          "type": "TenantSuspended",
+          "data": {
+            "reason": "owner_requested",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "DeleteTenant",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "TenantDeleted",
+          "data": {}
+        }
+      ],
+      "index": {
+        "keys": [],
+        "facts": []
+      }
+    },
+    {
+      "name": "an owner is added and held as a key",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "when": {
+        "type": "AddOwner",
+        "data": {
+          "identityId": "i1"
+        }
+      },
+      "then": [
+        {
+          "type": "OwnerAdded",
+          "data": {
+            "identityId": "i1"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "slug",
+            "value": "acme",
+            "scope": "global"
+          },
+          {
+            "name": "owner",
+            "value": "i1",
+            "scope": "tenant"
+          }
+        ],
+        "facts": [
+          "active",
+          "exists"
+        ]
+      }
+    },
+    {
+      "name": "the last owner is not removed",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        },
+        {
+          "type": "OwnerAdded",
+          "data": {
+            "identityId": "i1"
+          }
+        }
+      ],
+      "when": {
+        "type": "RemoveOwner",
+        "data": {
+          "identityId": "i1"
+        }
+      },
+      "rejected": "last_owner"
+    },
+    {
+      "name": "only the platform tenant has a sign-up policy",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "Acme",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "when": {
+        "type": "ChangeSignUpPolicy",
+        "data": {
+          "tenants": "active",
+          "accounts": "open"
+        }
+      },
+      "rejected": "platform"
+    },
+    {
+      "name": "the platform changes its sign-up policy",
+      "aggregate": "tenant",
+      "aggregateId": "platform",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "platform",
+            "name": "Platform",
+            "owner": {
+              "email": ""
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "when": {
+        "type": "ChangeSignUpPolicy",
+        "data": {
+          "tenants": "pending",
+          "accounts": "open"
+        }
+      },
+      "then": [
+        {
+          "type": "SignUpPolicyChanged",
+          "data": {
+            "tenants": "pending",
+            "accounts": "open"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a tenant's name has at most 200 characters, counted in code points",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "acme",
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀😀",
+          "owner": {
+            "accountId": "a1"
+          }
+        }
+      },
+      "then": [
+        {
+          "type": "TenantCreated",
+          "data": {
+            "slug": "acme",
+            "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀😀",
+            "owner": {
+              "accountId": "a1"
+            },
+            "status": "active"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "slug",
+            "value": "acme",
+            "scope": "global"
+          }
+        ],
+        "facts": [
+          "active",
+          "exists"
+        ]
+      }
+    },
+    {
+      "name": "a tenant's name of 201 characters, counted in code points, is too long",
+      "aggregate": "tenant",
+      "aggregateId": "t1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateTenant",
+        "data": {
+          "slug": "acme",
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀😀😀",
+          "owner": {
+            "accountId": "a1"
+          }
+        }
+      },
+      "rejected": "invalid_name"
+    }
+  ]
+}

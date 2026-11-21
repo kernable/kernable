@@ -22,6 +22,11 @@ cargo install kernable-sdk
 kernable-sdk add kit                # the crate ./kit; or: add kit <dir>
 cargo test -p kit                   # after adding it to your workspace
 ```
+```sh [Go]
+go run github.com/kernable/kernable/sdks/go/cmd/kernable-sdk@latest add kit   # into ./kit, a package of your module; or: add kit <dir>
+go mod tidy
+go test ./kit/...
+```
 :::
 
 The kit comes with the SDK, so its version matches your SDK's. The tests are the kit's
@@ -71,6 +76,21 @@ for d in kit::kit_domains().iter().chain([&shop_domain]) {
 }
 Kernable::new("kit.key")?.app(app)?.run().await?;
 ```
+```go [Go]
+import (
+	kernable "github.com/kernable/kernable/sdks/go"
+	"example.com/shop/kit"
+	"example.com/shop/shop"
+)
+
+// Who stands in which relation to your aggregates, from your events.
+kit.Relation("shop.order", "owner").Set("shop.OrderPlaced", func(e kit.RelationEvent) []string { return kit.IDs(e.Data["customer"]) })
+
+kit.UseAuthorizationStore("sqlite:authorization.db") // the middleware resumes after a restart
+client, err := kernable.New(kernable.Options{Key: "kit.key"})
+app, err := client.App(kernable.AppOptions{Service: "kit", Domains: append(kit.KitDomains(), shop.Domain)})
+err = app.Run(ctx)
+```
 :::
 
 Once, `bootstrap()` creates the platform tenant (where accounts and the platform's
@@ -107,6 +127,13 @@ impl Mailer for Smtp {
 }
 use_mailer(std::sync::Arc::new(Smtp));
 ```
+```go [Go]
+type smtpMailer struct{}
+
+func (smtpMailer) Send(mail kit.Mail) { /* hand mail.To, mail.Subject, mail.Text to your provider */ }
+
+kit.UseMailer(smtpMailer{})
+```
 :::
 
 The texts are in the `reactors` files of `account` and `invitation`. When `send` throws, the
@@ -128,7 +155,8 @@ See [Keys per service](../how-to/keys) for issuing them.
 
 Your API is the one process that sees passwords, tokens and provider answers. `KitApi` holds what
 only it can do; wire it into your HTTP framework (`kit/example/server.ts` shows `node:http`,
-`kit/example/server.py` shows `http.server`, `kit/examples/server.rs` axum):
+`kit/example/server.py` shows `http.server`, `kit/examples/server.rs` axum, `kit/example/server.go`
+`net/http`):
 
 ::: code-group
 ```ts [TypeScript]
@@ -155,10 +183,20 @@ let claims = api.check(&access_token);                               // per requ
 let context = api.context_for(&claims, Some(&tenant_id)).await?;     // sender_account, sender_session, sender_tenant, sender_identity
 kernable.submit(Submit::command(PlaceOrder { .. }, &aggregate_id).tenant(&tenant_id).context(context)).await?;
 ```
+```go [Go]
+api := kit.NewKitAPI(client, keys, booted.APIIdentity, booted.APIKeyID) // keys: kit.SigningKeysFrom("token-signing.pem")
+
+signedIn, err := api.SignIn(ctx, email, password, &ip, nil)          // access and refresh token
+claims := api.Check(accessToken)                                      // per request, without the kernel
+rc, err := api.ContextFor(ctx, claims, tenantID)                      // SenderAccount, SenderSession, SenderTenant, SenderIdentity
+outcome, err := client.Submit(ctx, kernable.Command{Domain: "shop", AggregateType: "order", AggregateID: id, Type: "PlaceOrder", Tenant: tenantID, Context: &rc})
+```
 :::
 
 In Python, `KitApi` blocks like the SDK's client; for FastAPI or another asyncio framework,
-`AsyncKitApi(KitApi(...))` has the same methods, awaited. In Rust, `KitApi` is async.
+`AsyncKitApi(KitApi(...))` has the same methods, awaited. In Rust, `KitApi` is async. In Go,
+`KitAPI` takes a `context.Context` first in every call, and a refusal is a `*kit.Refused`
+(`kit.RefusedCode(err)`).
 
 Access tokens live 15 minutes and are checked by your API alone; the middleware still refuses an
 ended session, a suspended account or a revoked API key at once. Refresh tokens rotate, and using
@@ -188,6 +226,13 @@ CreateGroup { name: "Customers".into(), description: None, permissions: vec![
     Permission { pattern: "shop.PlaceOrder".into(), ..Permission::default() },
     Permission { pattern: "shop.CancelOrder".into(), when: Some("owner".into()), via_parent: None }, // only orders they placed
 ] };
+```
+```go [Go]
+owner := "owner"
+kit.CreateGroup{Name: "Customers", Permissions: []kit.Permission{
+	{Pattern: "shop.PlaceOrder"},
+	{Pattern: "shop.CancelOrder", When: &owner}, // only orders they placed
+}}
 ```
 :::
 

@@ -1,13 +1,14 @@
-// Kit parity: the same scenario through the TypeScript, Python and Rust kits, with the kit's
+// Kit parity: the same scenario through the TypeScript, Python, Rust and Go kits, with the kit's
 // domains hosted in one language and the scenario driven through another's KitApi, every pair.
 // What each run leaves (the step results, the mails, every stored event) is normalized and must
 // be the same as the TypeScript/TypeScript run's, byte for byte. See README.md.
 //
-//   node --conditions=source --no-warnings kits/parity/run.ts [ts,py,rs] [ts,py,rs]
+//   node --conditions=source --no-warnings kits/parity/run.ts [ts,py,rs,go] [ts,py,rs,go]
 //
 // (the first list: host languages, the second: driver languages; default all). `cargo build -p
-// kernable-kernel` and `cargo build -p kernable-kit --example parity` first; the Python SDK's
-// venv (`make sdk-python-venv` or as in the Makefile). Results land in target/parity/.
+// kernable-kernel`, `cargo build -p kernable-kit --example parity` and the Go runner (`go build -o
+// target/debug/examples/parity-go ./internal/kitparity` in sdks/go) first; the Python SDK's venv
+// (`make sdk-python-venv` or as in the Makefile). Results land in target/parity/.
 
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -23,8 +24,8 @@ const SCENARIO = join(KITS, "parity", "scenario.json");
 const KERNABLE = join(ROOT, "target", process.env.KERNABLE_BIN ?? "debug", "kernable");
 const PYTHON = join(ROOT, "sdks", "python", ".venv", "bin", "python");
 
-type Lang = "ts" | "py" | "rs";
-const LANGS: Lang[] = ["ts", "py", "rs"];
+type Lang = "ts" | "py" | "rs" | "go";
+const LANGS: Lang[] = ["ts", "py", "rs", "go"];
 const hosts = (process.argv[2]?.split(",") ?? LANGS) as Lang[];
 const drivers = (process.argv[3]?.split(",") ?? LANGS) as Lang[];
 
@@ -36,6 +37,8 @@ function command(lang: Lang, role: "host" | "driver"): { cmd: string; args: stri
       return { cmd: PYTHON, args: ["-m", "tests.parity", role], cwd: join(KITS, "python"), env: { PYTHONPATH: `${join(ROOT, "sdks", "python")}:${join(KITS, "python")}` } };
     case "rs":
       return { cmd: join(ROOT, "target", "debug", "examples", "parity"), args: [role], cwd: join(KITS, "rust") };
+    case "go":
+      return { cmd: join(ROOT, "target", "debug", "examples", "parity-go"), args: [role], cwd: join(ROOT, "sdks", "go") };
   }
 }
 

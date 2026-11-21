@@ -1,7 +1,7 @@
 // Keeps the code groups of a page on one language: choosing Python in one group switches every
 // group that has a Python tab, and the choice is remembered for the next pages. A tab's language
 // comes from its label: "TypeScript" or a `.ts` file, "Python" or a `.py` file, "Rust" or a
-// `.rs` file.
+// `.rs` file, "Go" or a `.go` file.
 import { inBrowser, onContentUpdated } from "vitepress";
 
 const KEY = "kernable-language";
@@ -9,6 +9,7 @@ const LANGUAGES: [string, RegExp][] = [
   ["ts", /^TypeScript$|\.ts$/],
   ["py", /^Python$|\.py$/],
   ["rs", /^Rust$|\.rs$/],
+  ["go", /^Go$|\.go$/],
 ];
 
 function languageOf(label: string): string | undefined {

@@ -1,7 +1,7 @@
 # Kit fixtures
 
-The contract every language's kit is held to: the TypeScript, Python and Rust kits run these
-same cases. A kit a customer changed may leave them; the kits as shipped pass them all.
+The contract every language's kit is held to: the TypeScript, Python, Rust and Go kits run
+these same cases. A kit a customer changed may leave them; the kits as shipped pass them all.
 
 ## Aggregates: `<domain>.json`
 

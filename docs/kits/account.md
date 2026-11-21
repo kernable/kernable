@@ -113,6 +113,9 @@ kit::use_passkeys(kit::RelyingParty {
     origins: vec!["https://example.com".into()],
 });
 ```
+```go [Go]
+kit.UsePasskeys(kit.RelyingParty{RPID: "example.com", RPName: "Example", Origins: []string{"https://example.com"}})
+```
 :::
 
 ## Other ways to sign in

@@ -144,4 +144,4 @@ Print connection and activity lines to stderr as `HH:MM:SS  what  line`, for exa
 
 1. The signing test vectors pass (step 1).
 2. Port the tutorial's shop (`docs/examples/shop/ts`) to your language, with the same output as the `.out` files.
-3. Run it in [part 5's](../tutorial/shop/5-languages) mix: your worker with the TypeScript read models and the Rust reactor, and every other combination (see `docs/examples/shop.test.ts`). If it works next to the TypeScript, Python and Rust processes, it speaks kernable.
+3. Run it in [part 5's](../tutorial/shop/5-languages) mix: your worker with the TypeScript read models and the Rust reactor, and every other combination (see `docs/examples/shop.test.ts`). If it works next to the TypeScript, Python, Rust and Go processes, it speaks kernable.

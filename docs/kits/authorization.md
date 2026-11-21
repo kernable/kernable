@@ -64,6 +64,17 @@ relation("shop.order", "owner")
     .unset("shop.OrderTransferred", |e| ids(&e.data["from"]))
     .set("shop.OrderTransferred", |e| ids(&e.data["to"]));
 ```
+```go [Go]
+kit.Relation("shop.order", "owner").
+	Set("shop.OrderPlaced", func(e kit.RelationEvent) []string { return kit.IDs(e.Data["customer"]) }).
+	Unset("shop.OrderTransferred", func(e kit.RelationEvent) []string { return kit.IDs(e.Data["from"]) }).
+	Set("shop.OrderTransferred", func(e kit.RelationEvent) []string { return kit.IDs(e.Data["to"]) })
+
+kit.Parent("funds.vehicle").From("funds.VehicleCreated", func(e kit.RelationEvent) *kit.Target {
+	fund, _ := e.Data["fund"].(string)
+	return &kit.Target{Type: "funds.fund", ID: fund}
+})
+```
 :::
 
 For queries, the middleware needs to know which aggregate a query is about. Declare it on the

@@ -5,9 +5,9 @@ Your HTTP API is the one process that sees passwords, tokens and answers from id
 commands, issues and checks tokens, runs passkey and OIDC exchanges, and turns a token or API key
 into the request context your own commands carry.
 
-It is framework-neutral: plain methods you call from Express, FastAPI, axum or anything else.
-`kit/example/server.ts` (`server.py`, `examples/server.rs`) wires it into a small server on the
-standard library; copy its routes into your framework.
+It is framework-neutral: plain methods you call from Express, FastAPI, axum, net/http or anything
+else. `kit/example/server.ts` (`server.py`, `examples/server.rs`, `example/server.go`) wires it
+into a small server on the standard library; copy its routes into your framework.
 
 ## Setting it up
 
@@ -35,7 +35,10 @@ without a verified address signs in only to an account the login is already link
 
 In Python the same is `KitApi(kernable, signing_keys_from(...), service)`; it blocks like the
 SDK's client, and `AsyncKitApi(KitApi(...))` offers the same methods for asyncio. In Rust,
-`KitApi::new(...)` is async. Every method has the same name in snake_case.
+`KitApi::new(...)` is async. Every method has the same name in snake_case. In Go it is
+`kit.NewKitAPI(client, keys, serviceIdentity, serviceKeyID)`; every method takes a
+`context.Context` first, has the same name in Go's style (`SignIn`, `OIDCStart`), and a refusal
+is a `*kit.Refused` with its code (`kit.RefusedCode(err)`).
 
 The API's own identity holds a few permissions the kit needs before anyone is signed in, such as
 finding an account by email or a tenant by slug. `bootstrap()` creates it with the `api` group;

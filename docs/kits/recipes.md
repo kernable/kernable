@@ -1,7 +1,7 @@
 # Recipes
 
-Common changes to the kit, each in a few steps. The examples are TypeScript; the Python and
-Rust kits have the same files and names in their style.
+Common changes to the kit, each in a few steps. The examples are TypeScript; the Python, Rust
+and Go kits have the same files and names in their style.
 
 ## Open registration, or invitations only
 
