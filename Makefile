@@ -95,6 +95,7 @@ FLAKY ?= 5
 flaky: py
 	cargo build -q --workspace
 	cd kits/typescript && npm install --no-audit --no-fund --silent
+	cd sdks/go && go build -o $(CURDIR)/target/debug/examples/parity-go ./internal/kitparity
 	./scripts/flaky.sh $(FLAKY)
 
 # Long robustness runs: every crash point ROUNDS times, KILLS random kills under

@@ -28,6 +28,9 @@ python_kit() {
   (cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t . -p 'e2e_*.py')
 }
 typescript_kit() { (cd kits/typescript && npm run -s check); }
+go_sdk() { (cd sdks/go && KERNABLE_TEST_KERNEL="$ROOT/target/debug/kernable" go test -count=1 ./...); }
+# The Go kit end to end: hosted and driven in Go through the parity scenario, against the baseline.
+go_kit() { node --conditions=source --no-warnings kits/parity/run.ts go go; }
 
 for n in $(seq "$ROUNDS"); do
   echo "== round $n of $ROUNDS, $cpus CPUs busy"
@@ -41,5 +44,7 @@ for n in $(seq "$ROUNDS"); do
   run "Rust kit end to end" cargo test -q -p kernable-kit --test e2e -- --ignored || { echo "== failed in round $n"; exit 1; }
   run "Python kit end to end" python_kit || { echo "== failed in round $n"; exit 1; }
   run "TypeScript kit" typescript_kit || { echo "== failed in round $n"; exit 1; }
+  run "Go SDK" go_sdk || { echo "== failed in round $n"; exit 1; }
+  run "Go kit end to end" go_kit || { echo "== failed in round $n"; exit 1; }
 done
 echo "== $ROUNDS rounds passed"
