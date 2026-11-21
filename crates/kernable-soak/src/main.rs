@@ -1,4 +1,4 @@
-//! The soak: the kernel and an app per SDK (TypeScript, Python, Rust) under continuous load,
+//! The soak: the kernel and an app per SDK (TypeScript, Python, Rust, Go) under continuous load,
 //! while faults hit them at random: kills, graceful restarts, stopped processes, a failing
 //! network, a full disk, power loss. Every few minutes the faults and the load pause and every
 //! invariant is checked (`check.rs`). Ends with a report (`report.json` in the run directory);
@@ -411,6 +411,16 @@ async fn run(a: Args) -> Result<(), String> {
         Proc::new("app-rs", &exe, &dir, log("app-rs")).args(&["app"]),
         "rs",
     ));
+    // The Go app, built next to this binary (`make soak`: apps/bankgo).
+    procs.push(app_env(
+        Proc::new(
+            "app-go",
+            exe.with_file_name("soak-bank-go"),
+            &dir,
+            log("app-go"),
+        ),
+        "go",
+    ));
 
     if pair {
         procs.push(kernel("kernel-b", &store_b, kport_b, pport_b, "-b"));
@@ -444,7 +454,7 @@ async fn run(a: Args) -> Result<(), String> {
                 .await
                 .map_err(|e| e.to_string())?,
         );
-        procs[5].start().map_err(|e| e.to_string())?;
+        procs[6].start().map_err(|e| e.to_string())?;
         wait_for_port(wport, Duration::from_secs(30)).await?;
     }
     procs[0].start().map_err(|e| e.to_string())?;
@@ -452,10 +462,10 @@ async fn run(a: Args) -> Result<(), String> {
     if pair {
         // A asks the witness first and becomes the primary; B follows it.
         tokio::time::sleep(Duration::from_secs(2)).await;
-        procs[4].start().map_err(|e| e.to_string())?;
+        procs[5].start().map_err(|e| e.to_string())?;
         wait_for_port(kport_b, Duration::from_secs(30)).await?;
     }
-    for p in &mut procs[1..4] {
+    for p in &mut procs[1..5] {
         p.start().map_err(|e| e.to_string())?;
     }
     // The primary's store, and the standby's: by the witness's state.
@@ -491,7 +501,8 @@ async fn run(a: Args) -> Result<(), String> {
         })
         .await
         .unwrap_or(0);
-        if connected >= 7 {
+        // Each app's read model and reactor, and the soak's audit listener.
+        if connected >= 9 {
             break;
         }
         if started.elapsed() > Duration::from_secs(120) {
@@ -616,10 +627,10 @@ async fn run(a: Args) -> Result<(), String> {
             next_fault = now + rng.ms(2_000, fault_every * 1000);
             let fault = faults[rng.below(faults.len() as u64) as usize].clone();
             *injected.entry(fault.clone()).or_default() += 1;
-            let app = 1 + rng.below(3) as usize;
+            let app = 1 + rng.below(4) as usize;
             // With a pair, either kernel and either proxy.
-            let k = if pair && rng.below(2) == 1 { 4 } else { 0 };
-            let proxy = &proxies[if k == 4 { 1 } else { 0 }];
+            let k = if pair && rng.below(2) == 1 { 5 } else { 0 };
+            let proxy = &proxies[if k == 5 { 1 } else { 0 }];
             match fault.as_str() {
                 "kernel-kill" => {
                     procs[k].kill();
@@ -715,7 +726,7 @@ async fn run(a: Args) -> Result<(), String> {
 
 fn procs_index(name: &str) -> usize {
     [
-        "kernel", "app-ts", "app-py", "app-rs", "kernel-b", "witness",
+        "kernel", "app-ts", "app-py", "app-rs", "app-go", "kernel-b", "witness",
     ]
     .iter()
     .position(|n| *n == name)

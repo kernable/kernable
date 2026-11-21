@@ -124,6 +124,7 @@ SOAK_BACKEND ?= sqlite
 SOAK_PAIR ?= no
 soak: py
 	cargo build --release -p kernable-kernel -p kernable-soak
+	cd crates/kernable-soak/apps/bankgo && go build -o $(CURDIR)/target/release/soak-bank-go .
 	target/release/kernable-soak run --minutes $(SOAK_MINUTES) --backend $(SOAK_BACKEND) --pair $(SOAK_PAIR) --dir target/soak-$$(date +%Y%m%d-%H%M%S)
 
 # Coverage-guided fuzzing, FUZZ_SECONDS per target (needs nightly Rust and cargo-fuzz).

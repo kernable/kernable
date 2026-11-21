@@ -1,6 +1,6 @@
 //! The load: clients that keep submitting deposits, withdrawals (some sent `to` another account,
 //! which must be open), opens, closes and new account numbers (a unique key; drawn from a small
-//! pool, so they often collide) to the three apps, each command until it has an answer (a
+//! pool, so they often collide) to the four apps, each command until it has an answer (a
 //! resubmit with the same ID returns the stored outcome), and an audit listener on the raw
 //! protocol. Both record what they were told in an [`Observed`]; the clients also record every
 //! `unique_taken` and `requirement_missing` rejection as a [`Refusal`].
@@ -30,7 +30,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::Rng;
 
-pub const DOMAINS: [&str; 3] = ["bank_ts", "bank_py", "bank_rs"];
+pub const DOMAINS: [&str; 4] = ["bank_ts", "bank_py", "bank_rs", "bank_go"];
 pub const ACCOUNTS: u64 = 30;
 /// Account numbers are drawn from `n0` to `n{NUMBERS - 1}`.
 pub const NUMBERS: u64 = 40;
@@ -271,7 +271,7 @@ impl Load {
 /// half of them sent `to` another account, a new number (12%: one of `NUMBERS`, or none one time
 /// in ten), an open (9%) or a close (9%).
 fn command(run: &str, n: u32, i: u64, rng: &mut Rng, key: &SigningKey) -> Command {
-    let domain = DOMAINS[rng.below(3) as usize];
+    let domain = DOMAINS[rng.below(DOMAINS.len() as u64) as usize];
     let a = rng.below(ACCOUNTS);
     let account = format!("a{a}");
     let (command_type, payload) = match rng.below(100) {

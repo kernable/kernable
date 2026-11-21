@@ -20,7 +20,7 @@ const { frontmatter } = useData()
         <div class="container">
           <h2>How it works</h2>
           <FlowDiagram name="hero" loop bare />
-          <p class="kn-credit">TypeScript, Python and Rust logos via Simple Icons; the Rust logo under CC BY-SA 4.0.</p>
+          <p class="kn-credit">TypeScript, Python, Rust and Go logos via Simple Icons; the Rust logo under CC BY-SA 4.0.</p>
         </div>
       </section>
     </template>

@@ -24,6 +24,7 @@ diagrams.hero = {
     g.icon(28, 37, 18, icons.typescript)
     g.icon(56, 37, 18, icons.python)
     g.icon(84, 37, 18, icons.rust)
+    g.icon(112, 37, 18, icons.go)
     g.node('client', { x: 28, y: row(0), w: 264, h: 56, label: 'Client', sub: 'submits commands, asks queries', kind: 'cmd' })
     g.node('worker', { x: 28, y: row(1), w: 264, h: 56, label: 'Worker', sub: 'runs your aggregates: decides', kind: 'cmd' })
     g.node('views', { x: 28, y: row(2), w: 264, h: 56, label: 'Read models · reactors', sub: 'answer queries, react to events', kind: 'qry' })
@@ -79,9 +80,10 @@ diagrams.architecture = {
   build (g) {
     const mid = (i) => 76 + i * 62 // the rows' centers; each side lines up with the other
     g.zone(10, 14, 200, 222, 'Your code')
-    g.icon(118, 22, 16, icons.typescript)
-    g.icon(142, 22, 16, icons.python)
-    g.icon(166, 22, 16, icons.rust)
+    g.icon(102, 22, 16, icons.typescript)
+    g.icon(124, 22, 16, icons.python)
+    g.icon(146, 22, 16, icons.rust)
+    g.icon(168, 22, 16, icons.go)
     const yours = [
       ['clients', 'Clients', 'commands, queries', 'cmd'],
       ['workers', 'Workers', 'run aggregates: decide', 'cmd'],
@@ -144,6 +146,7 @@ diagrams.query = {
     g.icon(28, 37, 18, icons.typescript)
     g.icon(56, 37, 18, icons.python)
     g.icon(84, 37, 18, icons.rust)
+    g.icon(112, 37, 18, icons.go)
     g.node('client', { x: 28, y: row(0), w: 264, h: 56, label: 'Client', sub: 'asks a query', kind: 'qry' })
     // One read model faces both the router and the log: it gets queries and events on one stream.
     g.node('rm', { x: 28, y: row(1), w: 264, h: row(2) + 56 - row(1), label: 'Read model', sub: 'answers from its own state', kind: 'qry' })
