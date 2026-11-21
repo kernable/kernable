@@ -294,7 +294,7 @@ func into[D any](data any) (D, error) {
 	if err != nil {
 		return d, err
 	}
-	err = json.Unmarshal(b, &d)
+	err = unmarshal(b, &d)
 	return d, err
 }
 
@@ -305,7 +305,7 @@ func clone[S any](s S) (S, error) {
 	if err != nil {
 		return out, err
 	}
-	err = json.Unmarshal(b, &out)
+	err = unmarshal(b, &out)
 	return out, err
 }
 
@@ -773,7 +773,7 @@ func (a *Aggregate[S]) execute(x *execution) (*executed, error) {
 		// A fresh value: decoding into a copy of Initial would write into maps it shares.
 		var snap S
 		from = snap
-		if err := json.Unmarshal(x.snapshotState, &from); err != nil {
+		if err := unmarshal(x.snapshotState, &from); err != nil {
 			return nil, Reject("snapshot_stale", fmt.Sprintf("snapshot state: %v", err))
 		}
 	}

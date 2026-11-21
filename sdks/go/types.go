@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"sync"
@@ -313,7 +314,21 @@ func decodeInto(payload []byte, v any) error {
 		*raw = append((*raw)[:0], payload...)
 		return nil
 	}
-	return json.Unmarshal(payload, v)
+	return unmarshal(payload, v)
+}
+
+// unmarshal is json.Unmarshal with numbers in generic values (any, map[string]any) kept exact as
+// json.Number instead of float64, which would round integers beyond 2^53.
+func unmarshal(b []byte, v any) error {
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	if err := d.Decode(v); err != nil {
+		return err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return errors.New("kernable: unexpected data after the JSON value")
+	}
+	return nil
 }
 
 // vaultFields are payload fields kept in the vault instead of the signed log.

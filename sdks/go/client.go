@@ -547,7 +547,7 @@ func QueryAs[T any](ctx context.Context, c *Client, q Query) (T, error) {
 	if err != nil {
 		return out, err
 	}
-	err = json.Unmarshal(raw, &out)
+	err = unmarshal(raw, &out)
 	return out, err
 }
 

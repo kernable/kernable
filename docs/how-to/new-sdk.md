@@ -49,7 +49,7 @@ All of these are unary calls, except `Subscribe`.
 - **`Subscribe`** (`EventService`). Sign `kernable.v1.subscribe` with `after_position`, the event types and `issued_at`. Hand events to the handler one at a time. On any stream end or error, reconnect with `after_position` set to the last handled event, signed again with a new `issued_at`.
 - **Data and cache** (`DataService`, `CacheService`). Sign `kernable.v1.data.<op>` or `kernable.v1.cache.<op>` per call; get and delete sign the hash of empty data.
 
-Payloads are JSON, encoded as UTF-8 bytes; an empty payload reads as `{}`.
+Payloads are JSON, encoded as UTF-8 bytes; an empty payload reads as `{}`. Where the language allows, keep numbers exact: an integer beyond 2^53 must not come back as the nearest float.
 
 ## 4. Workers
 

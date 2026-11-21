@@ -176,7 +176,7 @@ pub struct Checked {
 /// Where integers beyond ±2^53 are known to come back rounded to a float (JavaScript's numbers,
 /// Go's generic JSON type): `bank_x` runs on Go workers and answers from a Go read model.
 /// There, such a rounding counts as known, not as a violation; everything else stays exact.
-const ROUNDS_BIG_INTEGERS: [&str; 3] = ["bank_ts", "bank_go", "bank_x"];
+const ROUNDS_BIG_INTEGERS: [&str; 1] = ["bank_ts"];
 
 /// Whether `actual` differs from `expected` only by integers beyond ±2^53 that became the
 /// nearest float.
@@ -348,7 +348,7 @@ pub async fn round(
     let info = vec![
         format!("bank_x deposits decided by {:?}", checked.by_x),
         format!(
-            "notes with integers beyond 2^53 rounded (known: JavaScript, Go's generic JSON): {:?}",
+            "notes with integers beyond 2^53 rounded (known: JavaScript numbers): {:?}",
             checked.rounded
         ),
         format!("hostile: {:?}", load.hostile.stats.lock().unwrap()),

@@ -107,7 +107,7 @@ func (s *Store) Get(ns, key string, v any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return true, json.Unmarshal([]byte(raw), v)
+	return true, unmarshal([]byte(raw), v)
 }
 
 // Set stores value (as JSON) under key in namespace ns, replacing a value there.

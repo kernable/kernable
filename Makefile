@@ -14,7 +14,7 @@ test: py
 	cd kits/typescript && npm install --no-audit --no-fund --silent && npm test
 	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t .
 	cd sdks/go && test -z "$$(gofmt -l .)" && go vet ./... && go test -count=1 ./kit/... ./cmd/... \
-		&& go test -count=1 -run '^(TestGeneratedFromCurrentProto|TestTheKitCarriesTheSharedFixtures|TestKeyID|TestMessages|TestDataAndCache|TestMemberships|TestProcesses|TestVault|TestEventHash|TestDerivedIDs|TestIndex)$$' .
+		&& go test -count=1 -run '^(TestGeneratedFromCurrentProto|TestTheKitCarriesTheSharedFixtures|TestKeyID|TestMessages|TestDataAndCache|TestMemberships|TestProcesses|TestVault|TestEventHash|TestDerivedIDs|TestIndex|TestExactNumbers)$$' .
 
 # Everything, in four parts that CI runs as parallel jobs and scripts/check.sh side by side here
 # (logs in target/check; after a failure it names the parts to run again).
