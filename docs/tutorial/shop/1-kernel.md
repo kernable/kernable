@@ -43,11 +43,18 @@ cargo add -q kernable-sdk serde_json scrypt
 cargo add -q serde --features derive
 cargo add -q tokio --features macros,rt-multi-thread
 ```
+```sh [Go]
+cd ~/shop
+go mod init shop
+go get github.com/kernable/kernable/sdks/go golang.org/x/crypto
+```
 :::
 
 In Rust, `domain.rs` (part 2) lives in `src/` and `src/lib.rs` shares it; every process and script is a binary in `src/bin/` (run with `cargo run -q --bin worker`):
 
 <<< @/examples/shop/rs/src/lib.rs
+
+In Go, `domain.go` (part 2) is the package `shop` at the top of the module; every process and script is a program in a directory of its own, `worker/main.go` say (run with `go run ./worker`).
 
 ## Connect
 
@@ -62,6 +69,9 @@ k = Kernable()
 ```
 ```rust [Rust]
 let kernable = Kernable::new(Options::default())?;
+```
+```go [Go]
+client, err := kernable.New(kernable.Options{})
 ```
 :::
 

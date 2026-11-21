@@ -10,6 +10,7 @@ The order gets a command and an event for the confirmation, in `domain.ts`:
 <<< @/examples/shop/ts/domain.ts#confirm [domain.ts]
 <<< @/examples/shop/py/domain.py#confirm [domain.py]
 <<< @/examples/shop/rs/src/domain.rs#confirm [domain.rs]
+<<< @/examples/shop/go/domain.go#confirm [domain.go]
 :::
 
 and the orders read model learns about it, in `read-models.ts`:
@@ -18,6 +19,7 @@ and the orders read model learns about it, in `read-models.ts`:
 <<< @/examples/shop/ts/read-models.ts#confirmed [read-models.ts]
 <<< @/examples/shop/py/read_models.py#confirmed [read_models.py]
 <<< @/examples/shop/rs/src/bin/read_models.rs#confirmed [read_models.rs]
+<<< @/examples/shop/go/read-models/main.go#confirmed [read-models/main.go]
 :::
 
 ## The reactor
@@ -26,6 +28,7 @@ and the orders read model learns about it, in `read-models.ts`:
 <<< @/examples/shop/ts/confirmations.ts#reactor [confirmations.ts]
 <<< @/examples/shop/py/confirmations.py#reactor [confirmations.py]
 <<< @/examples/shop/rs/src/bin/confirmations.rs#reactor [confirmations.rs]
+<<< @/examples/shop/go/confirmations/main.go#reactor [confirmations/main.go]
 :::
 
 Three things make it safe:
@@ -38,18 +41,20 @@ If the confirmation is rejected, `ctx.submit` throws, and the reactor **parks** 
 
 Its own submit settles too, but only on the listeners before it: a listener handles one event at a time, so the kernel never makes it wait for itself.
 
-Start it (`node confirmations.ts` or `.venv/bin/python confirmations.py`) and submit an order:
+Start it (`node confirmations.ts`, `.venv/bin/python confirmations.py`, `cargo run -q --bin confirmations` or `go run ./confirmations`) and submit an order:
 
 ::: code-group
 <<< @/examples/shop/ts/part4.ts#try [part4.ts]
 <<< @/examples/shop/py/part4.py#try [part4.py]
 <<< @/examples/shop/rs/src/bin/part4.rs#try [part4.rs]
+<<< @/examples/shop/go/part4/main.go#try [part4/main.go]
 :::
 
 ::: code-group
 <<< @/examples/shop/ts/part4.out{text} [TypeScript]
 <<< @/examples/shop/py/part4.out{text} [Python]
 <<< @/examples/shop/rs/part4.out{text} [Rust]
+<<< @/examples/shop/go/part4.out{text} [Go]
 :::
 
 The `Submit` settled after the reactor, which had confirmed the order by then: the query shows it confirmed.

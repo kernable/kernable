@@ -19,6 +19,7 @@ The shop's fulfilment, from [part 10 of the tutorial](../tutorial/shop/10-proces
 <<< @/examples/shop/ts/domain.ts#process [domain.ts]
 <<< @/examples/shop/py/domain.py#process [domain.py]
 <<< @/examples/shop/rs/src/domain.rs#process [domain.rs]
+<<< @/examples/shop/go/domain.go#process [domain.go]
 :::
 
 The SDK turns this into a **model**, plain JSON, and the kernel runs it. One engine, in the
@@ -40,7 +41,7 @@ kernel, runs the processes of every language; your processes only define and reg
 - **References** say where a value comes from: `aggregateId` and `data.<field>` of the event being
   handled (in `start` and `wait`), `case.<field>` of the case's data, and in a query step `answer`
   or `answer.<field>`. Python and Rust write fields in their own style (`case.order_id`); the
-  SDK converts them. A literal is `value(…)`.
+  SDK converts them. Go writes them as on the wire (`case.orderId`). A literal is `value(…)`.
 - **Conditions** (`decide`) are small expressions on the case's data: references, numbers,
   strings, `true`, `false`, `null`, `== != < <= > >=`, `and`, `or`, `not` and parentheses:
   `case.total > 1000 and not case.trusted`. Anything more is a query to a read model you write.

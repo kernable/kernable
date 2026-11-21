@@ -18,7 +18,7 @@ Starting a project on kernable with an AI assistant or a coding agent? Give it k
 3. Describe your domain to the agent in business terms: what is decided (aggregates, commands, events), what is read (queries), what happens as a consequence (reactors), who may do what (middleware), which data is personal.
 4. Ask it to verify its work the way the file says: unit tests with `fold`, a run against the kernel, the UI.
 
-The file is written for TypeScript, with a table of the Python and Rust spellings; the tutorials show all three in full.
+The file is written for TypeScript, with a table of the Python, Rust and Go spellings; the tutorials show all four in full.
 
 ## The guide
 

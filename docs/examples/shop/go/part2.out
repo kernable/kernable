@@ -1,0 +1,7 @@
+register: committed, version 1
+register again: exists (Customer already registered)
+place: committed, version 1
+add apples: committed, version 2
+same command again: committed, version 2
+submit: committed, version 3
+add after submit: invalid_state (Cannot add items to a submitted order)

@@ -13,6 +13,7 @@ Use this page when a command carries a value that must never be stored: a passwo
 <<< @/examples/shop/ts/domain.ts#vault{7-8} [domain.ts]
 <<< @/examples/shop/py/domain.py#vault{7-8} [domain.py]
 <<< @/examples/shop/rs/src/domain.rs#vault{29-30} [domain.rs]
+<<< @/examples/shop/go/domain.go#vault [domain.go]
 :::
 
 ## What happens to the value

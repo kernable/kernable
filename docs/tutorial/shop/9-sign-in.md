@@ -41,6 +41,7 @@ order. Declare it once, in the domain:
 <<< @/examples/shop/ts/domain.ts#target [domain.ts]
 <<< @/examples/shop/py/domain.py#target [domain.py]
 <<< @/examples/shop/rs/src/domain.rs#target [domain.rs]
+<<< @/examples/shop/go/domain.go#target [domain.go]
 :::
 
 Now a rule can say "only the order's owner may read it", for queries as for commands.

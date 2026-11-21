@@ -38,7 +38,7 @@ Everything you define on the domain object belongs to it:
 | `event(type, …).personal(…)`, `.erases(…)` | which event fields go to the vault, and which event erases a person |
 | `command(type).personal(…)`, `.secret(…)` | which command fields go to the vault |
 
-The names are TypeScript's; Python and Rust spell them `read_model`, and so on ([SDK reference](../reference/)).
+The names are TypeScript's; Python and Rust spell them `read_model`, Go `ReadModel`, and so on ([SDK reference](../reference/)).
 
 Types without a domain are the domain's own: on `shopDomain`, `ItemAdded` means `shop.ItemAdded`. Types of other domains are qualified: `billing.InvoicePaid`, or a whole domain, `billing.*`.
 

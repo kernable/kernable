@@ -6,7 +6,7 @@ Put this file into a project that uses kernable (as `AGENTS.md`, `CLAUDE.md` or 
 
 ## 1. Mental model
 
-- kernable is a **kernel** (one Rust process, `kernable start`) plus **your processes** in any language (TypeScript, Python, Rust SDKs). Your processes hold the business logic; the kernel checks, orders, stores and delivers.
+- kernable is a **kernel** (one Rust process, `kernable start`) plus **your processes** in any language (TypeScript, Python, Rust, Go SDKs). Your processes hold the business logic; the kernel checks, orders, stores and delivers.
 - Business logic is **event-sourced**: a **domain** (`shop`) holds **aggregates** (`cart`). A **command** (`AddItem`) goes to one aggregate; its handler looks at the aggregate's state and returns **events** (`ItemAdded`) or rejects. `apply` folds events into state. Events are stored forever and never changed.
 - **Read models** build views from events and answer **queries** (`GetCart`). **Reactors** react to events with side effects and follow-up commands. A **middleware** is a listener that checks commands and queries.
 - Every command and query goes **through the kernel**, signed with the process's key and allowed by its grant. There are no shortcuts, also not inside one process.
@@ -162,27 +162,27 @@ shopDomain.event("ItemAdded", 2).upcast(1, (d: { sku: string; quantity: number }
 
 Never change or delete stored events. Raise the version and add an upcast from each older one; deploy readers before writers. A new optional field that every reader can ignore needs no new version.
 
-## 4. Python and Rust
+## 4. Python, Rust and Go
 
-Same concepts, same order of arguments. The tested examples in all three languages: https://kernable.com/docs/tutorial/getting-started
+Same concepts, same order of arguments. The tested examples in all four languages: https://kernable.com/docs/tutorial/getting-started
 
-| | TypeScript | Python | Rust |
-|---|---|---|---|
-| domain | `domain("shop")` | `domain("shop")` | `domain("shop")` |
-| aggregate | `.aggregate("cart", initial)` | `.aggregate("cart", initial)` | `.aggregate("cart", Cart::default())` (state: `Clone + Default + Serialize + Deserialize`) |
-| handlers | `.apply(type, fn)`, `.command(type, fn)` | decorators: `@cart.apply("ItemAdded")`, `@cart.command("AddItem")` | `.apply(type, \|state, data: T, evt, ctx\| …)`, `.command(type, \|state, data: T, cmd, ctx\| Ok(vec![NewEvent::new(type, data)]))` |
-| reject | `throw new Rejected(msg, code)` | `raise Rejected(msg, code)` | `Err(Rejected::new(msg).code(code))` |
-| read model | `.readModel("carts")` | `.read_model("carts")` | `.read_model("carts")` |
-| handlers on it | `.on(type, (data, evt, ctx) => …)` | `@carts.on("ItemAdded")` with `(data, evt)` | `.on(type, \|data: T, evt, ctx\| async { Ok(()) })` |
-| query | `.query(type, (data) => …)` | `@carts.query("GetCart")` | `.query(type, \|data: T, qry, ctx\| async { Ok(answer) })` |
-| middleware | `.middleware({ types, order }, fn)` | `@rbac.middleware(["shop.*"], order=0)` | `.middleware(MiddlewareOptions::new(&["shop.*"]), \|check\| async { … })` |
-| client | `new Kernable()` | `Kernable()` | `Kernable::new("app.key")?` |
-| submit | `kernable.submit({ … })` | `k.submit(domain=, aggregate_type=, aggregate_id=, type=, data=, id=, context=)` | `kernable.submit(Submit::new(domain, aggregate_type, id, type).data(json!(…)).id(…).context(…)).await?` |
-| query | `kernable.query({ domain, type, data })` | `k.query(domain=, type=, data=)` | `kernable.query(Query::new(domain, type).data(json!(…))).await?` |
-| app | `kernable.app({ service, version, domains }).run()` | `k.app(service=, version=, domains=[…]).run()` (blocks) | `kernable.app(App::new().service(…).version(…).domain(&d))?.run().await?` |
-| field names | `aggregateId`, `senderIdentity` | `aggregate_id`, `sender_identity` | `aggregate_id`, `sender_identity` |
+| | TypeScript | Python | Rust | Go |
+|---|---|---|---|---|
+| domain | `domain("shop")` | `domain("shop")` | `domain("shop")` | `kernable.NewDomain("shop")` |
+| aggregate | `.aggregate("cart", initial)` | `.aggregate("cart", initial)` | `.aggregate("cart", Cart::default())` (state: `Clone + Default + Serialize + Deserialize`) | `kernable.NewAggregate(d, "cart", Cart{})` (state: a struct with JSON tags) |
+| handlers | `.apply(type, fn)`, `.command(type, fn)` | decorators: `@cart.apply("ItemAdded")`, `@cart.command("AddItem")` | `.apply(type, \|state, data: T, evt, ctx\| …)`, `.command(type, \|state, data: T, cmd, ctx\| Ok(vec![NewEvent::new(type, data)]))` | `kernable.Apply(cart, type, func(ctx *ApplyContext, s *Cart, d T))`, `kernable.Handle(cart, type, func(ctx *CommandContext, s Cart, d T) ([]NewEvent, error))` |
+| reject | `throw new Rejected(msg, code)` | `raise Rejected(msg, code)` | `Err(Rejected::new(msg).code(code))` | `return nil, kernable.Reject(code, msg)` |
+| read model | `.readModel("carts")` | `.read_model("carts")` | `.read_model("carts")` | `d.ReadModel("carts")` |
+| handlers on it | `.on(type, (data, evt, ctx) => …)` | `@carts.on("ItemAdded")` with `(data, evt)` | `.on(type, \|data: T, evt, ctx\| async { Ok(()) })` | `kernable.On(carts, type, func(ctx *ListenerContext, d T) error)` (the event: `ctx.Event`) |
+| query | `.query(type, (data) => …)` | `@carts.query("GetCart")` | `.query(type, \|data: T, qry, ctx\| async { Ok(answer) })` | `kernable.Answer(carts, type, func(ctx *QueryContext, d T) (R, error))` |
+| middleware | `.middleware({ types, order }, fn)` | `@rbac.middleware(["shop.*"], order=0)` | `.middleware(MiddlewareOptions::new(&["shop.*"]), \|check\| async { … })` | `carts.Middleware(kernable.MiddlewareOptions{Types: []string{"shop.*"}}, func(ctx *MiddlewareContext, c Check) error)` |
+| client | `new Kernable()` | `Kernable()` | `Kernable::new("app.key")?` | `kernable.New(kernable.Options{})` |
+| submit | `kernable.submit({ … })` | `k.submit(domain=, aggregate_type=, aggregate_id=, type=, data=, id=, context=)` | `kernable.submit(Submit::new(domain, aggregate_type, id, type).data(json!(…)).id(…).context(…)).await?` | `client.Submit(ctx, kernable.Command{Domain, AggregateType, AggregateID, Type, Data, ID, Context})` |
+| query | `kernable.query({ domain, type, data })` | `k.query(domain=, type=, data=)` | `kernable.query(Query::new(domain, type).data(json!(…))).await?` | `kernable.QueryAs[T](ctx, client, kernable.Query{Domain, Type, Data})` |
+| app | `kernable.app({ service, version, domains }).run()` | `k.app(service=, version=, domains=[…]).run()` (blocks) | `kernable.app(App::new().service(…).version(…).domain(&d))?.run().await?` | `app, _ := client.App(kernable.AppOptions{…}); app.Run(ctx)` (until ctx ends) |
+| field names | `aggregateId`, `senderIdentity` | `aggregate_id`, `sender_identity` | `aggregate_id`, `sender_identity` | `AggregateID`, `SenderIdentity` |
 
-Python runs handlers in threads and `run()` blocks; Rust is async (Tokio) and keeps handler state in `Arc<Mutex<…>>`.
+Python runs handlers in threads and `run()` blocks; Rust is async (Tokio) and keeps handler state in `Arc<Mutex<…>>`; Go takes a `context.Context` first in every call and handler (a listener handles one event at a time; lock state shared across listeners).
 
 ## 5. Rules: always and never
 

@@ -1,8 +1,8 @@
 # Getting started
 
-In this guide you run a kernel, write business logic and a read model in TypeScript, Python or Rust, in the same language or two different ones, and see that a request reads its own writes. Then you run the reference application.
+In this guide you run a kernel, write business logic and a read model in TypeScript, Python, Rust or Go, in the same language or two different ones, and see that a request reads its own writes. Then you run both as one app.
 
-You need Node.js ≥ 22.18 (step 5 submits from TypeScript), and Python ≥ 3.10 or Rust (stable) for the steps you write in them.
+You need Node.js ≥ 22.18, Python ≥ 3.10, Rust (stable) or Go ≥ 1.26 for the steps you write in them.
 
 ## 1. Install the kernel
 
@@ -30,7 +30,7 @@ Leave the kernel running and continue in a second terminal. One kernel per addre
 
 ## 3. Business logic
 
-A shopping cart: commands add items and check it out; events record what happened, and the cart's state is rebuilt from them. Pick TypeScript, Python or Rust; the tabs switch together.
+A shopping cart: commands add items and check it out; events record what happened, and the cart's state is rebuilt from them. Pick TypeScript, Python, Rust or Go; the tabs switch together.
 
 **1. Register the aggregate** with its initial state:
 
@@ -38,6 +38,7 @@ A shopping cart: commands add items and check it out; events record what happene
 <<< @/examples/getting-started/cart.ts#aggregate{ts} [TypeScript]
 <<< @/examples/getting-started/cart.py#aggregate{python} [Python]
 <<< @/examples/getting-started/cart.rs#aggregate{rust} [Rust]
+<<< @/examples/getting-started/go/cart/main.go#aggregate{go} [Go]
 :::
 
 **2. Apply events** to the state:
@@ -46,6 +47,7 @@ A shopping cart: commands add items and check it out; events record what happene
 <<< @/examples/getting-started/cart.ts#events{ts} [TypeScript]
 <<< @/examples/getting-started/cart.py#events{python} [Python]
 <<< @/examples/getting-started/cart.rs#events{rust} [Rust]
+<<< @/examples/getting-started/go/cart/main.go#events{go} [Go]
 :::
 
 **3. Decide commands:** return events, or reject with `Rejected`:
@@ -54,6 +56,7 @@ A shopping cart: commands add items and check it out; events record what happene
 <<< @/examples/getting-started/cart.ts#commands{ts} [TypeScript]
 <<< @/examples/getting-started/cart.py#commands{python} [Python]
 <<< @/examples/getting-started/cart.rs#commands{rust} [Rust]
+<<< @/examples/getting-started/go/cart/main.go#commands{go} [Go]
 :::
 
 **4. Run a worker** that executes the cart's commands:
@@ -62,6 +65,7 @@ A shopping cart: commands add items and check it out; events record what happene
 <<< @/examples/getting-started/cart.ts#worker{ts} [TypeScript]
 <<< @/examples/getting-started/cart.py#worker{python} [Python]
 <<< @/examples/getting-started/cart.rs#worker{rust} [Rust]
+<<< @/examples/getting-started/go/cart/main.go#worker{go} [Go]
 :::
 
 In a second terminal, in `kernable-demo`, set up a project, save the whole file and run it. Leave it running; it prints where it connected and what it runs:
@@ -96,6 +100,13 @@ cargo add tokio --features macros,rt-multi-thread
 cargo run --bin cart
 ```
 
+```sh [Go]
+go mod init demo
+go get github.com/kernable/kernable/sdks/go
+# save cart/main.go, then:
+go run ./cart
+```
+
 :::
 
 :::: details The whole file
@@ -103,6 +114,7 @@ cargo run --bin cart
 <<< @/examples/getting-started/cart.ts#file{ts} [cart.ts]
 <<< @/examples/getting-started/cart.py#file{python} [cart.py]
 <<< @/examples/getting-started/cart.rs#file{rust} [src/bin/cart.rs]
+<<< @/examples/getting-started/go/cart/main.go#file{go} [cart/main.go]
 :::
 ::::
 
@@ -118,6 +130,7 @@ A read model is a **listener**: it builds its own view from the events and answe
 <<< @/examples/getting-started/carts.ts#register{ts} [TypeScript]
 <<< @/examples/getting-started/carts.py#register{python} [Python]
 <<< @/examples/getting-started/carts.rs#register{rust} [Rust]
+<<< @/examples/getting-started/go/carts/main.go#register{go} [Go]
 :::
 
 **2. Handle events** and update the rows:
@@ -126,6 +139,7 @@ A read model is a **listener**: it builds its own view from the events and answe
 <<< @/examples/getting-started/carts.ts#events{ts} [TypeScript]
 <<< @/examples/getting-started/carts.py#events{python} [Python]
 <<< @/examples/getting-started/carts.rs#events{rust} [Rust]
+<<< @/examples/getting-started/go/carts/main.go#events{go} [Go]
 :::
 
 **3. Answer queries** from the rows:
@@ -134,6 +148,7 @@ A read model is a **listener**: it builds its own view from the events and answe
 <<< @/examples/getting-started/carts.ts#queries{ts} [TypeScript]
 <<< @/examples/getting-started/carts.py#queries{python} [Python]
 <<< @/examples/getting-started/carts.rs#queries{rust} [Rust]
+<<< @/examples/getting-started/go/carts/main.go#queries{go} [Go]
 :::
 
 **4. Run it** through the connection, as the worker runs the aggregate. Read models run before reactors (order 0 and 10), so reactors can query them:
@@ -142,6 +157,7 @@ A read model is a **listener**: it builds its own view from the events and answe
 <<< @/examples/getting-started/carts.ts#run{ts} [TypeScript]
 <<< @/examples/getting-started/carts.py#run{python} [Python]
 <<< @/examples/getting-started/carts.rs#run{rust} [Rust]
+<<< @/examples/getting-started/go/carts/main.go#run{go} [Go]
 :::
 
 In a third terminal, in `kernable-demo`, set up the language as in step 3 if it is new to you, save the whole file and run it. It prints where it starts and what it reads and answers:
@@ -164,6 +180,10 @@ py/bin/python carts.py
 cargo run --bin carts             # saved as src/bin/carts.rs
 ```
 
+```sh [Go]
+go run ./carts                    # saved as carts/main.go
+```
+
 :::
 
 :::: details The whole file
@@ -171,6 +191,7 @@ cargo run --bin carts             # saved as src/bin/carts.rs
 <<< @/examples/getting-started/carts.ts#file{ts} [carts.ts]
 <<< @/examples/getting-started/carts.py#file{python} [carts.py]
 <<< @/examples/getting-started/carts.rs#file{rust} [src/bin/carts.rs]
+<<< @/examples/getting-started/go/carts/main.go#file{go} [carts/main.go]
 :::
 ::::
 
@@ -182,6 +203,7 @@ A client submits commands and asks the read model. A command names the aggregate
 <<< @/examples/getting-started/submit.ts{ts} [submit.ts]
 <<< @/examples/getting-started/submit.py{python} [submit.py]
 <<< @/examples/getting-started/submit.rs{rust} [src/bin/submit.rs]
+<<< @/examples/getting-started/go/submit/main.go{go} [submit/main.go]
 :::
 
 In a fourth terminal, in `kernable-demo`, save the file and run it:
@@ -198,6 +220,10 @@ py/bin/python submit.py
 
 ```sh [Rust]
 cargo run --bin submit            # saved as src/bin/submit.rs
+```
+
+```sh [Go]
+go run ./submit                   # saved as submit/main.go
 ```
 
 :::
@@ -233,6 +259,18 @@ let app = kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_
 app.run().await?;
 ```
 
+```go [Go]
+client, err := kernable.New(kernable.Options{Key: "app.key"})
+if err != nil {
+	log.Fatal(err)
+}
+app, err := client.App(kernable.AppOptions{Service: "shop", Version: "1.0.0", Domains: []*kernable.Domain{shopDomain}})
+if err != nil {
+	log.Fatal(err)
+}
+log.Fatal(app.Run(context.Background()))
+```
+
 :::
 
 It prints one overview once everything is connected:
@@ -265,7 +303,7 @@ kernable start --root root.pub
 
 ## Where to go next
 
-- [Build a shop](./shop/) builds an application step by step, in TypeScript, Python and Rust: commands, read models, reactors, an HTTP API with sign-in, operations and a business process. Every part runs as written in the tests (`make check`), in each language and mixed, and with each process killed once.
+- [Build a shop](./shop/) builds an application step by step, in TypeScript, Python, Rust and Go: commands, read models, reactors, an HTTP API with sign-in, operations and a business process. Every part runs as written in the tests (`make check`), in each language and mixed, and with each process killed once.
 - The [reference](../reference/) covers every [kernel flag](../reference/configuration), the [CLI](../reference/cli) (also `kernable certs new` for mutual TLS), the SDKs, [metrics](../reference/metrics), the [protocol](../reference/protocol) and the exact [signed byte layouts](../reference/signing), with test vectors to write an SDK for another language.
 - Rules worth knowing:
   - **Command handlers must be deterministic.** Use `ctx.now()` and `ctx.id()`.

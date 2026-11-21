@@ -1,6 +1,7 @@
 package kernable
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -529,7 +530,12 @@ func (c *Client) Query(ctx context.Context, q Query) (json.RawMessage, error) {
 		}
 		return nil, &Rejected{Code: r.Code, Message: r.Message}
 	case *pb.QueryResult_Response:
-		return orEmpty(x.Response), nil
+		// Compact, whatever the language of the read model that answered.
+		var b bytes.Buffer
+		if err := json.Compact(&b, orEmpty(x.Response)); err != nil {
+			return nil, err
+		}
+		return b.Bytes(), nil
 	}
 	return nil, errors.New("the kernel answered without an outcome")
 }

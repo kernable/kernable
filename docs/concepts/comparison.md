@@ -6,7 +6,7 @@ kernable is an **application kernel**: storage, ordering, trust and delivery in 
 |---|---|---|---|---|---|
 | What it is | kernel and runtime for event-sourced applications | the usual setup: tables, plus events published from them | a database for event streams | a library and server for one platform | a distributed log for messages |
 | Business logic runs | in your processes, any language, driven by the kernel | in your services | in your application, which reads and appends | in your application, on the framework's platform | in your consumers and producers |
-| Languages | any with gRPC; SDKs for TypeScript, Python and Rust share one API | any | clients for several languages | mostly one platform (e.g. the JVM) | clients for many languages |
+| Languages | any with gRPC; SDKs for TypeScript, Python, Rust and Go share one API | any | clients for several languages | mostly one platform (e.g. the JVM) | clients for many languages |
 | One decision per aggregate at a time | yes, the kernel queues commands per aggregate | row locks or optimistic versions, per table, yours | with optimistic concurrency on append; queuing is yours | yes, within the framework | per partition key, if you design for it; concurrency control is yours |
 | Read your own writes | built in: a submit settles after every listener | across services, you build it | you build it, e.g. by waiting on subscriptions | depends on the setup | you build it |
 | Order across listeners | fixed: lower orders first | per consumer, yours | each subscription on its own | depends on the setup | each consumer group on its own |

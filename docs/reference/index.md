@@ -9,6 +9,7 @@ Look things up here; the [concepts](../concepts/) explain why they are so. Most 
 | [TypeScript SDK](./sdk-typescript) | `@kernable/sdk` |
 | [Python SDK](./sdk-python) | `kernable-sdk` on PyPI (`import kernable`) |
 | [Rust SDK](./sdk-rust) | `kernable-sdk` on crates.io (`use kernable`) |
+| [Go SDK](./sdk-go) | `github.com/kernable/kernable/sdks/go` (`import kernable "…"`) |
 | [Protocol](./protocol) | The gRPC services and messages (`kernable.v1`), for writing an SDK |
 | [Signatures](./signing) | Signed byte layouts, the hash chain, vault references, test vectors |
 | [Errors](./errors) | Rejection codes and gRPC statuses, and what a client should do about each |

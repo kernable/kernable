@@ -21,26 +21,31 @@ const expected = (file: string) => {
   const lines = readFileSync(`${HERE}${file}`, "utf8").split("\n").map((l) => l.trim());
   const out: string[] = [];
   lines.forEach((line, i) => {
-    if (!/^(console\.log|print|println!)\(/.test(line)) return;
+    if (!/^(console\.log|print|println!|fmt\.Print(ln|f)?)\(/.test(line)) return;
     for (let j = i + 1; /^(\/\/|#) /.test(lines[j]); j++) out.push(lines[j].replace(/^(\/\/|#) /, ""));
   });
   return out.map((l) => `${l}\n`).join("");
 };
 const uuids = (s: string) => s.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid>");
 
-// The worker (step 3), the read model (step 4) and the client (step 5) come in three languages
-// each; every run below mixes all three, and each language takes each role once.
+// The worker (step 3), the read model (step 4) and the client (step 5) come in four languages
+// each; every run below mixes three, and each language takes each role at least once.
 execFileSync("cargo", ["build", "-q", "--workspace"], { cwd: ROOT, stdio: "inherit" });
+execFileSync("go", ["build", "-o", "bin/", "./..."], { cwd: `${HERE}go`, stdio: "inherit" });
 const PROGRAMS = {
   TypeScript: (name: string) => node(`${name}.ts`),
   Python: (name: string) => [PYTHON, [`${HERE}${name}.py`]] as const,
   Rust: (name: string) => [`${ROOT}target/debug/${name}`, []] as const,
+  Go: (name: string) => [`${HERE}go/bin/${name}`, []] as const,
 };
-const EXTENSIONS = { TypeScript: "ts", Python: "py", Rust: "rs" };
+const SOURCES = { TypeScript: "submit.ts", Python: "submit.py", Rust: "submit.rs", Go: "go/submit/main.go" };
 const RUNS = [
   ["TypeScript", "Python", "Rust"],
   ["Python", "Rust", "TypeScript"],
   ["Rust", "TypeScript", "Python"],
+  ["Go", "Rust", "TypeScript"],
+  ["Python", "Go", "Rust"],
+  ["TypeScript", "Python", "Go"],
 ] as const;
 
 for (const [worker, reader, client] of RUNS) test(`the getting-started tutorial runs as written, worker in ${worker}, read model in ${reader}, client in ${client}`, async () => {
@@ -62,7 +67,7 @@ for (const [worker, reader, client] of RUNS) test(`the getting-started tutorial 
     }
     const [cmd, args] = PROGRAMS[client]("submit");
     const out = execFileSync(cmd, args, { cwd: kernel.dir, env: { ...ENV, KERNABLE_URL: kernel.url }, encoding: "utf8" });
-    assert.equal(uuids(out), uuids(expected(`submit.${EXTENSIONS[client]}`)));
+    assert.equal(uuids(out), uuids(expected(SOURCES[client])));
     assert.match(kernel.verify(), /\nOK\n$/);
   } finally {
     for (const p of processes) p.kill();

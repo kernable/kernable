@@ -593,6 +593,107 @@ The rest of this page is generated from the doc comments in \`sdks/rust/src\`.
 ${body.join("\n")}`;
 }
 
+// ---- Go SDK ----
+
+/** The Go SDK's public API from its doc comments (docs/scripts/goreference, with go/doc). */
+function goReference(): string {
+  const body = execFileSync("go", ["run", ".", join(ROOT, "sdks/go")], { cwd: join(ROOT, "docs/scripts/goreference"), encoding: "utf8" });
+  const version = /^go (\S+)$/m.exec(read("sdks/go/go.mod"))![1].replace(/\.0$/, "");
+  return `${HEADER}# Go SDK
+
+\`\`\`sh
+go get github.com/kernable/kernable/sdks/go
+\`\`\`
+
+Go ${version} or newer; no protoc (the generated protocol code is part of the module). A kernel to connect to: \`kernable start --dev\` (see [Getting started](../tutorial/getting-started)).
+
+A cart aggregate, a read model that answers a query, and a client that submits and reads back, in one process:
+
+\`\`\`go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sync"
+
+	kernable "github.com/kernable/kernable/sdks/go"
+)
+
+type Cart struct {
+	Items int \`json:"items"\`
+}
+
+type Item struct {
+	Qty int \`json:"qty"\`
+}
+
+func main() {
+	ctx := context.Background()
+	shopDomain := kernable.NewDomain("shop")
+
+	cart := kernable.NewAggregate(shopDomain, "cart", Cart{})
+	kernable.Apply(cart, "ItemAdded", func(_ *kernable.ApplyContext, s *Cart, d Item) { s.Items += d.Qty })
+	kernable.Handle(cart, "AddItem", func(_ *kernable.CommandContext, _ Cart, d Item) ([]kernable.NewEvent, error) {
+		if d.Qty == 0 {
+			return nil, kernable.Reject("", "qty must be at least 1")
+		}
+		return kernable.Events(kernable.Event("ItemAdded", d)), nil
+	})
+
+	// A listener handles one event at a time; its queries may run while another listener's
+	// events are handled, so share state across listeners with a lock.
+	var mu sync.Mutex
+	rows := map[string]int{}
+	carts := shopDomain.ReadModel("carts")
+	kernable.On(carts, "ItemAdded", func(ctx *kernable.ListenerContext, d Item) error {
+		mu.Lock()
+		defer mu.Unlock()
+		rows[ctx.Event.AggregateID] += d.Qty
+		return nil
+	})
+	kernable.Answer(carts, "GetCart", func(_ *kernable.QueryContext, q struct{ ID string }) (Cart, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return Cart{Items: rows[q.ID]}, nil
+	})
+
+	client, err := kernable.New(kernable.Options{Key: "app.key"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	app, err := client.App(kernable.AppOptions{Service: "shop", Domains: []*kernable.Domain{shopDomain}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() { log.Fatal(app.Run(ctx)) }()
+	<-app.Ready()
+
+	if _, err := client.Submit(ctx, kernable.Command{Domain: "shop", AggregateType: "cart", AggregateID: "c1", Type: "AddItem", Data: Item{Qty: 2}}); err != nil {
+		log.Fatal(err)
+	}
+	answer, err := client.Query(ctx, kernable.Query{Domain: "shop", Type: "GetCart", Data: map[string]string{"id": "c1"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(string(answer)) // {"items":2}
+}
+\`\`\`
+
+How the SDK works:
+
+- **Context first.** Every call that can block takes a \`context.Context\` first and ends when it is done. Handlers get a kernable context first (\`*CommandContext\`, \`*ListenerContext\`, \`*QueryContext\`, \`*MiddlewareContext\`), each a \`context.Context\`. \`Run\` of a worker, a listener or an app returns once its context ends: run it in a goroutine and wait for \`Ready()\`.
+- **Generics for typed payloads.** Methods cannot have type parameters in Go, so typed handlers are registered with functions: \`Apply\`, \`Handle\`, \`On\` and \`Answer\` decode the data into the type of the handler's parameter (any type \`encoding/json\` reads, \`map[string]any\` or \`json.RawMessage\`). State, events and answers are encoded with \`encoding/json\`.
+- **Definitions panic, calls return errors.** Defining a domain, an aggregate or a listener panics on a programming error (a malformed name, a type defined twice), as \`regexp.MustCompile\` does. Calls to the kernel return an \`error\`.
+- **Errors.** Handlers return \`*Rejected\` (\`Reject(code, message)\`) to refuse; any other error rejects with \`handler_error\`. A rejected command is not an error: \`Submit\` returns it in its \`Outcome\`. A rejected query returns a \`*Rejected\`; \`*NotSettled\` and \`*NotDue\` are errors to check with \`errors.As\`. What the kernel refuses itself comes as a gRPC status ([Errors](./errors)).
+- **Keepalive.** gRPC for Go pings at most every 10 s: with two kernels (a pair), a kernel the network cut off is left within about 12 s, not within 4 s as with the other SDKs.
+
+The rest of this page is generated from the doc comments in \`sdks/go\`.
+
+${body}`;
+}
+
 // ---- errors: hand-written, checked for completeness ----
 
 function errorCodes(): string[] {
@@ -626,6 +727,7 @@ const generated: Record<string, () => string> = {
   "reference/sdk-typescript.md": tsReference,
   "reference/sdk-python.md": pyReference,
   "reference/sdk-rust.md": rustReference,
+  "reference/sdk-go.md": goReference,
   ...Object.fromEntries(KIT_DOMAINS.map((d) => [`kits/generated/${d}.md`, () => kitReference(d)])),
 };
 

@@ -23,6 +23,7 @@ The shop's read models forget an erased customer like this:
 <<< @/examples/shop/ts/read-models.ts#erased [read-models.ts]
 <<< @/examples/shop/py/read_models.py#erased [read_models.py]
 <<< @/examples/shop/rs/src/bin/read_models.rs#erased [read_models.rs]
+<<< @/examples/shop/go/read-models/main.go#erased [read-models/main.go]
 :::
 
 The subject is a string, such as the customer ID `c1`. An erasure deletes every value of that subject in the erasing command's tenant, in every stream and domain; the same subject in another tenant keeps its values. Use one subject per person, unique within the tenant.

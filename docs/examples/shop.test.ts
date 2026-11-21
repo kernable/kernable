@@ -19,16 +19,19 @@ const PYTHON = process.env.KERNABLE_PYTHON ?? `${ROOT}sdks/python/.venv/bin/pyth
 // Without the colors `node --test` forces on its children when run in a terminal.
 const { FORCE_COLOR: _, ...INHERITED } = process.env;
 const ENV = { ...INHERITED, PYTHONPATH: `${ROOT}sdks/python:${ROOT}kits/python` };
-type Lang = "ts" | "py" | "rs";
-const LANGUAGES = { ts: "TypeScript", py: "Python", rs: "Rust" } as const;
+type Lang = "ts" | "py" | "rs" | "go";
+const LANGUAGES = { ts: "TypeScript", py: "Python", rs: "Rust", go: "Go" } as const;
 
-// The Rust shop's binaries (docs/examples/shop/rs), built once like `cargo build` in the tutorial.
+// The Rust shop's binaries (docs/examples/shop/rs), built once like `cargo build` in the tutorial;
+// the Go shop's (docs/examples/shop/go) like `go build`.
 execFileSync("cargo", ["build", "-q", "--workspace"], { cwd: ROOT, stdio: "inherit" });
+execFileSync("go", ["build", "-o", "bin/", "./..."], { cwd: `${HERE}go`, stdio: "inherit" });
 
 /** The command line of a tutorial file; Python and Rust files use underscores. */
 function command(lang: Lang, name: string): [string, string[]] {
   if (lang === "ts") return [process.execPath, ["--conditions=source", "--no-warnings", `${HERE}ts/${name}.ts`]];
   if (lang === "py") return [PYTHON, [`${HERE}py/${name.replace(/-/g, "_")}.py`]];
+  if (lang === "go") return [`${HERE}go/bin/${name}`, []];
   return [`${ROOT}target/debug/${name.replace(/-/g, "_")}`, []];
 }
 
@@ -71,7 +74,7 @@ async function run(part: number, langs: Record<string, Lang>, client: Lang, expe
   }
 }
 
-for (const lang of ["ts", "py", "rs"] as const) {
+for (const lang of ["ts", "py", "rs", "go"] as const) {
   for (const part of [2, 3, 4, 6, 7, 10]) {
     test(`part ${part} in ${LANGUAGES[lang]}`, () => run(part, {}, lang));
   }
@@ -121,6 +124,9 @@ test("part 5: the same shop with every process in any language", async () => {
   await run(4, { worker: "py", "read-models": "ts", confirmations: "rs" }, "ts");
   await run(4, { worker: "rs", "read-models": "py", confirmations: "ts" }, "py");
   await run(4, { worker: "ts", "read-models": "rs", confirmations: "py" }, "rs");
+  await run(4, { worker: "go", "read-models": "py", confirmations: "rs" }, "ts");
+  await run(4, { worker: "ts", "read-models": "go", confirmations: "py" }, "rs");
+  await run(4, { worker: "rs", "read-models": "ts", confirmations: "go" }, "go");
 });
 
 /**
@@ -270,7 +276,7 @@ async function deployed(lang: Lang, production: boolean) {
   }
 }
 
-for (const lang of ["ts", "py", "rs"] as const) {
+for (const lang of ["ts", "py", "rs", "go"] as const) {
   test(`part 1 in ${LANGUAGES[lang]}: the whole shop on the development kernel`, () => deployed(lang, false));
   test(`part 8 in ${LANGUAGES[lang]}: the whole shop on the production kernel, over mutual TLS`, () => deployed(lang, true));
 

@@ -104,6 +104,7 @@ const SIDEBAR = [
       { text: "TypeScript SDK", link: "/reference/sdk-typescript" },
       { text: "Python SDK", link: "/reference/sdk-python" },
       { text: "Rust SDK", link: "/reference/sdk-rust" },
+      { text: "Go SDK", link: "/reference/sdk-go" },
       { text: "Protocol", link: "/reference/protocol" },
       { text: "Signatures", link: "/reference/signing" },
       { text: "Errors", link: "/reference/errors" },

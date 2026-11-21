@@ -102,6 +102,7 @@ A read model in memory reads every event again when it starts. With a **store** 
 <<< @/examples/shop/ts/customers-persistent.ts#persistent [customers-persistent.ts]
 <<< @/examples/shop/py/customers_persistent.py#persistent [customers_persistent.py]
 <<< @/examples/shop/rs/src/bin/customers_persistent.rs#persistent [customers_persistent.rs]
+<<< @/examples/shop/go/customers-persistent/main.go#persistent [customers-persistent/main.go]
 :::
 
 When you change how the handlers store data, raise `schema`: the store is cleared and rebuilt from the first event.

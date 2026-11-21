@@ -2,7 +2,7 @@
 
 Any language with gRPC and Ed25519 can take part. The TypeScript SDK is the reference implementation: `sdks/typescript/src/rpc.ts` (connection), `signing.ts` (byte layouts) and `index.ts` (everything else). Work through the steps in order; each one builds on the one before.
 
-The details live in the reference: [Protocol](../reference/protocol), [Signatures](../reference/signing), [Errors](../reference/errors), and the [TypeScript](../reference/sdk-typescript), [Python](../reference/sdk-python) and [Rust](../reference/sdk-rust) SDKs for names and options.
+The details live in the reference: [Protocol](../reference/protocol), [Signatures](../reference/signing), [Errors](../reference/errors), and the [TypeScript](../reference/sdk-typescript), [Python](../reference/sdk-python), [Rust](../reference/sdk-rust) and [Go](../reference/sdk-go) SDKs for names and options.
 
 ## 1. Signatures first
 

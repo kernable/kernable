@@ -12,6 +12,7 @@ A middleware is a listener with a check: it builds its knowledge from events, li
 <<< @/examples/shop/ts/guard.ts#guard [guard.ts]
 <<< @/examples/shop/py/guard.py#guard [guard.py]
 <<< @/examples/shop/rs/src/bin/guard.rs#guard [guard.rs]
+<<< @/examples/shop/go/guard/main.go#guard [guard/main.go]
 :::
 
 The check sees the command or query, with its data and request context, before the kernel stores or routes it. Throwing `Rejected` refuses it; a refused command is never stored. Middleware runs in a chain by `order`, and the kernel asks a middleware only once it has processed every event committed before, so it never decides on stale knowledge.
@@ -20,18 +21,20 @@ The guard's key needs the `check` action on the types it checks; `app`, which `-
 
 ## Try it
 
-Start the guard (`node guard.ts`, `.venv/bin/python guard.py` or `cargo run -q --bin guard`) and send requests as different customers:
+Start the guard (`node guard.ts`, `.venv/bin/python guard.py`, `cargo run -q --bin guard` or `go run ./guard`) and send requests as different customers:
 
 ::: code-group
 <<< @/examples/shop/ts/part6.ts#try [part6.ts]
 <<< @/examples/shop/py/part6.py#try [part6.py]
 <<< @/examples/shop/rs/src/bin/part6.rs#try [part6.rs]
+<<< @/examples/shop/go/part6/main.go#try [part6/main.go]
 :::
 
 ::: code-group
 <<< @/examples/shop/ts/part6.out{text} [TypeScript]
 <<< @/examples/shop/py/part6.out{text} [Python]
 <<< @/examples/shop/rs/part6.out{text} [Rust]
+<<< @/examples/shop/go/part6.out{text} [Go]
 :::
 
 The reactor still confirms orders: its follow-up commands carry the customer's identity (`ctx.submit` follows the event), and its own queries (`ctx.query`) come from `svc-confirmations`, a service the guard lets read.

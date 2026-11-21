@@ -16,6 +16,7 @@ The order gets three commands and their events, in `domain.ts`:
 <<< @/examples/shop/ts/domain.ts#fulfil [domain.ts]
 <<< @/examples/shop/py/domain.py#fulfil [domain.py]
 <<< @/examples/shop/rs/src/domain.rs#fulfil [domain.rs]
+<<< @/examples/shop/go/domain.go#fulfil [domain.go]
 :::
 
 and the orders read model follows them, in `read-models.ts`:
@@ -24,6 +25,7 @@ and the orders read model follows them, in `read-models.ts`:
 <<< @/examples/shop/ts/read-models.ts#fulfilled [read-models.ts]
 <<< @/examples/shop/py/read_models.py#fulfilled [read_models.py]
 <<< @/examples/shop/rs/src/bin/read_models.rs#fulfilled [read_models.rs]
+<<< @/examples/shop/go/read-models/main.go#fulfilled [read-models/main.go]
 :::
 
 ## The process
@@ -34,6 +36,7 @@ Also in `domain.ts`, next to the aggregates:
 <<< @/examples/shop/ts/domain.ts#process [domain.ts]
 <<< @/examples/shop/py/domain.py#process [domain.py]
 <<< @/examples/shop/rs/src/domain.rs#process [domain.rs]
+<<< @/examples/shop/go/domain.go#process [domain.go]
 :::
 
 Read it from the top:
@@ -61,6 +64,7 @@ refuses anyone who is not the order's customer. Tell it what the process may sen
 <<< @/examples/shop/ts/guard.ts#guard [guard.ts]
 <<< @/examples/shop/py/guard.py#guard [guard.py]
 <<< @/examples/shop/rs/src/bin/guard.rs#guard [guard.rs]
+<<< @/examples/shop/go/guard/main.go#guard [guard/main.go]
 :::
 
 Without it, the first `Ship` would be refused `forbidden`, and the case would stop there as an
@@ -78,13 +82,14 @@ the worker is up:
 <<< @/examples/shop/ts/fulfilment.ts#register [fulfilment.ts]
 <<< @/examples/shop/py/fulfilment.py#register [fulfilment.py]
 <<< @/examples/shop/rs/src/bin/fulfilment.rs#register [fulfilment.rs]
+<<< @/examples/shop/go/fulfilment/main.go#register [fulfilment/main.go]
 :::
 
 Restart the worker, the read models and the guard, then register the process with a short time
 to pay, to see an unpaid order cancelled:
 
 ```sh
-PAY_WITHIN=10s node fulfilment.ts    # or .venv/bin/python fulfilment.py, or cargo run --bin fulfilment
+PAY_WITHIN=10s node fulfilment.ts    # or .venv/bin/python fulfilment.py, cargo run --bin fulfilment, go run ./fulfilment
 ```
 
 It prints `shop.fulfilment version 1`. Registering the same process again changes nothing; a
@@ -98,12 +103,14 @@ Two orders: Ann pays the first, not the second.
 <<< @/examples/shop/ts/part10.ts#try [part10.ts]
 <<< @/examples/shop/py/part10.py#try [part10.py]
 <<< @/examples/shop/rs/src/bin/part10.rs#try [part10.rs]
+<<< @/examples/shop/go/part10/main.go#try [part10/main.go]
 :::
 
 ::: code-group
 <<< @/examples/shop/ts/part10.out{text} [TypeScript]
 <<< @/examples/shop/py/part10.out{text} [Python]
 <<< @/examples/shop/rs/part10.out{text} [Rust]
+<<< @/examples/shop/go/part10.out{text} [Go]
 :::
 
 The script ends after ten seconds: `o2` waited for its payment until its time was up.

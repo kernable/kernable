@@ -23,3 +23,6 @@ __pycache__/
 /crates/kernable-core/proto/
 /sdks/rust/kit/
 *.egg-info/
+
+# Go programs built by the docs tests
+docs/examples/**/go/bin/

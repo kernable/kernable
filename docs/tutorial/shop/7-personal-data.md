@@ -17,6 +17,7 @@ In `domain.ts`, declare per command and event which fields go to the vault, and 
 <<< @/examples/shop/ts/domain.ts#vault [domain.ts]
 <<< @/examples/shop/py/domain.py#vault [domain.py]
 <<< @/examples/shop/rs/src/domain.rs#vault [domain.rs]
+<<< @/examples/shop/go/domain.go#vault [domain.go]
 :::
 
 The handlers do not change: they still see `email` and `password` in clear. The SDK moves the fields to the vault before a command or event is signed, and puts them back for the processes allowed to read them.
@@ -34,6 +35,7 @@ Read models hold values too, so they must forget an erased customer. In `read-mo
 <<< @/examples/shop/ts/read-models.ts#erased [read-models.ts]
 <<< @/examples/shop/py/read_models.py#erased [read_models.py]
 <<< @/examples/shop/rs/src/bin/read_models.rs#erased [read_models.rs]
+<<< @/examples/shop/go/read-models/main.go#erased [read-models/main.go]
 :::
 
 Clients that send commands with personal or secret fields need the declarations: create them with `.use(shopDomain)`, as the reactor in part 4 already does.
@@ -46,12 +48,14 @@ Restart every process, then:
 <<< @/examples/shop/ts/part7.ts#try [part7.ts]
 <<< @/examples/shop/py/part7.py#try [part7.py]
 <<< @/examples/shop/rs/src/bin/part7.rs#try [part7.rs]
+<<< @/examples/shop/go/part7/main.go#try [part7/main.go]
 :::
 
 ::: code-group
 <<< @/examples/shop/ts/part7.out{text} [TypeScript]
 <<< @/examples/shop/py/part7.out{text} [Python]
 <<< @/examples/shop/rs/part7.out{text} [Rust]
+<<< @/examples/shop/go/part7.out{text} [Go]
 :::
 
 After `Erase`, the customer's email and name are gone from the vault, in the customer's stream and in every order's confirmation alike. A read model rebuilt from the log reads `null` where they were. The events themselves stay, and the hash chain still verifies.

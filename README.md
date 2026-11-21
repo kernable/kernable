@@ -16,7 +16,7 @@
 
 **Event sourcing and CQRS with a Rust kernel and business logic in any language.**
 
-The kernel stores commands and events, signs and checks every message, runs commands one at a time per aggregate, and delivers events to listeners in a fixed order. Your services hold the business logic: workers decide, read models answer queries, reactors act, middleware checks. They connect over gRPC; TypeScript, Python and Rust have SDKs with the same API.
+The kernel stores commands and events, signs and checks every message, runs commands one at a time per aggregate, and delivers events to listeners in a fixed order. Your services hold the business logic: workers decide, read models answer queries, reactors act, middleware checks. They connect over gRPC; TypeScript, Python, Rust and Go have SDKs with the same API.
 
 ## What you get
 
@@ -38,7 +38,7 @@ kernable start --dev                                # a kernel on 127.0.0.1:7233
 
 The kernel runs on Linux and macOS (Unix) only; on Windows, run it in WSL.
 
-`--dev` creates the keys in the directory, among them `app.key`, which may do everything. In a second terminal, a worker in TypeScript (`npm install @kernable/sdk`; Python: `pip install kernable-sdk`, Rust: `cargo add kernable-sdk`):
+`--dev` creates the keys in the directory, among them `app.key`, which may do everything. In a second terminal, a worker in TypeScript (`npm install @kernable/sdk`; Python: `pip install kernable-sdk`, Rust: `cargo add kernable-sdk`, Go: `go get github.com/kernable/kernable/sdks/go`):
 
 ```ts
 import { Kernable, Rejected, domain } from "@kernable/sdk";
@@ -53,7 +53,7 @@ cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
 await new Kernable({ key: "app.key" }).worker(cart).run();
 ```
 
-The [getting-started guide](https://kernable.com/docs/tutorial/getting-started) goes on from here: a read model, a query that reads its own writes, and the same in Python and Rust. A container image runs the same kernel, listening with mutual TLS outside the container (see `Dockerfile`).
+The [getting-started guide](https://kernable.com/docs/tutorial/getting-started) goes on from here: a read model, a query that reads its own writes, and the same in Python, Rust and Go. A container image runs the same kernel, listening with mutual TLS outside the container (see `Dockerfile`).
 
 ## Documentation
 
@@ -77,7 +77,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, listeners, vault |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix and results |
 | `crates/kernable-soak` | The soak: the kernel and an app per SDK under load and random faults (`make soak`) |
-| `sdks/typescript`, `sdks/python`, `sdks/rust` | The SDKs |
+| `sdks/typescript`, `sdks/python`, `sdks/rust`, `sdks/go` | The SDKs |
 | `kits/` | The kits in TypeScript, Python and Rust, and the fixtures all three are tested against |
 | `docs/` | The documentation site and its runnable examples (the tutorial's shop in three languages, tested as written) |
 | `fuzz/` | Fuzz targets (cargo-fuzz) |
@@ -91,7 +91,7 @@ make test           # the simple tier: fmt, clippy and in-process tests, no kern
 make check          # everything, in four parts CI runs in parallel (Python ≥ 3.10, cargo-audit):
                     #   check-rust   lints, known vulnerable dependencies, every test on every storage backend
                     #   check-crash  the real kernel aborted at every crash point
-                    #   check-sdks   the TypeScript and Python SDKs against a real kernel
+                    #   check-sdks   the TypeScript, Python and Go SDKs against a real kernel
                     #   check-docs   the documentation builds and every example runs
 make check-packages # builds the npm package and the Python wheel, installs and runs them
 make docs           # the documentation site; `npm run reference` in docs/ regenerates the reference

@@ -21,7 +21,7 @@ kernable splits an application into a **kernel** and **your processes**.
 - **Listeners** receive events in order: **read models** keep views and answer queries, **reactors** cause side effects and follow-up commands, a **middleware** checks requests.
 - **Clients** submit commands and ask queries.
 
-Processes talk to the kernel over gRPC: workers and listeners keep one stream open each, clients make single calls. Any language with gRPC can take part; TypeScript, Python and Rust have SDKs.
+Processes talk to the kernel over gRPC: workers and listeners keep one stream open each, clients make single calls. Any language with gRPC can take part; TypeScript, Python, Rust and Go have SDKs.
 
 ## A command's way
 
