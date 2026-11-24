@@ -568,7 +568,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         for var in env.keys() {
             run.extend(["--env".into(), var.clone()]);
         }
-        harden(&mut run, false, Some(&pod.seccomp));
+        harden(&mut run, false, Some(&pod.seccomp), false);
         limits(&mut run, cpus, memory);
         Spec {
             name: child.into(),
@@ -972,6 +972,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             &mut args,
             svc.writable,
             pod.as_ref().map(|p| p.seccomp.as_path()),
+            true,
         );
         limits(&mut args, &svc.cpus, &svc.memory);
         specs.push(Spec {
@@ -1018,16 +1019,21 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
 /// Most processes a container may have at once.
 const PIDS: u32 = 4096;
 
-/// What every container gets: an init that hands signals on, no capabilities, no way to gain privileges (no
-/// setuid binary works), a cap on its processes, a root filesystem it cannot change unless
-/// `writable` (Podman mounts a tmpfs on `/tmp`, `/var/tmp` and `/run` of a read-only one), and,
-/// in a pod, the node's tightened `seccomp` profile.
-fn harden(args: &mut Vec<String>, writable: bool, seccomp: Option<&Path>) {
+/// What every container gets: no capabilities, no way to gain privileges (no setuid binary
+/// works), a cap on its processes, a root filesystem it cannot change unless `writable` (Podman
+/// mounts a tmpfs on `/tmp`, `/var/tmp` and `/run` of a read-only one), and, in a pod, the
+/// node's tightened `seccomp` profile. A service also gets an init that hands signals on
+/// (`init`): the first process itself ignores a signal it set no handler for, so a program that
+/// relies on the default action (most do) would be killed only after its stop time. kernable's
+/// own processes (the kernel, the pusher, the backup follower) handle SIGTERM themselves and run
+/// without one: where AppArmor confines containers (Ubuntu 26.04), the init runs under another
+/// label than the process it starts once `no-new-privileges` is set, and is denied sending it
+/// the signal, so the kernel would never drain.
+fn harden(args: &mut Vec<String>, writable: bool, seccomp: Option<&Path>, init: bool) {
+    if init {
+        args.push("--init".into());
+    }
     args.extend([
-        // A small init as the container's first process: it hands SIGTERM on and reaps. The
-        // first process itself ignores a signal it set no handler for, so a program that
-        // relies on the default action (most do) was killed only after its stop time.
-        "--init".into(),
         "--cap-drop".into(),
         "all".into(),
         "--security-opt".into(),
@@ -2785,8 +2791,14 @@ writable = true
         .unwrap();
         for spec in &plan.children {
             let args = spec.args.join(" ");
+            // An init for services only: kernable's own processes take SIGTERM themselves.
+            assert_eq!(
+                spec.args.iter().any(|a| a == "--init"),
+                spec.name != "kernel",
+                "{}: {args}",
+                spec.name
+            );
             for part in [
-                "--init",
                 "--cap-drop all",
                 "--security-opt no-new-privileges",
                 "--pids-limit 4096",
@@ -3182,7 +3194,7 @@ build = "."
                 "run --rm --replace --name kernable-shop-kernel --pod kernable-shop \
                  --volume /opt/kernable/kernable:/usr/local/bin/kernable:ro \
                  --volume /srv/shop:/srv/shop --workdir /srv/shop --security-opt label=disable \
-                 --env KERNABLE_LOG --init --cap-drop all --security-opt no-new-privileges \
+                 --env KERNABLE_LOG --cap-drop all --security-opt no-new-privileges \
                  --pids-limit 4096 --security-opt seccomp={} --read-only --cpus 2 --memory 1g",
                 seccomp.display()
             )
