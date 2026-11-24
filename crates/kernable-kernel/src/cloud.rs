@@ -52,11 +52,16 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
   kernable cloud projects [--team <team>] links <name>
                                           Its partitions linked to your kernels, and the relay
                                           they push to
+  kernable cloud projects [--team <team>] root <name> [set <root.pub|ID> [--now] | finish]
+                                          The project's root key: grants signed by it count for its
+                                          kernels and copies. set replaces it and keeps the old one
+                                          valid until finish (7 days at most); --now ends the old
+                                          one at once, for a key that leaked (admins)
   kernable cloud projects [--team <team>] link <name> <partition> --pusher <pusher.pub|ID>
-                       --root <root.pub|ID>
+                       [--root <root.pub|ID>]
                                           Lets the kernel with that pusher key push the partition's
-                                          copy to the relay, and readers granted by that root follow
-                                          it (developers and up); prints the relay to push to
+                                          copy to the relay, and readers granted by the project's
+                                          root follow it (developers and up); prints the relay
   kernable cloud projects [--team <team>] unlink <name> <partition>
                                           Nothing pushes to or reads the copy from then on; it is
                                           kept 30 days, linking again brings it back (admins)
@@ -932,6 +937,7 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
     let month = flag(&mut rest, "--month")?;
     let pusher = flag(&mut rest, "--pusher")?;
     let root = flag(&mut rest, "--root")?;
+    let now = switch(&mut rest, "--now");
     let t = team(&mut s, team_flag)?;
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -995,8 +1001,10 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
         }
         ["link", name, partition] => {
             let pusher = pusher.as_deref().ok_or("--pusher <pusher.pub|ID>")?;
-            let root = root.as_deref().ok_or("--root <root.pub|ID>")?;
-            let body = json!({ "pushers": [key_id_of(pusher)?], "roots": [key_id_of(root)?] });
+            let mut body = json!({ "pushers": [key_id_of(pusher)?] });
+            if let Some(root) = root.as_deref() {
+                body["roots"] = json!([key_id_of(root)?]);
+            }
             let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}");
             let v = s.call("PUT", &path, Some(body))?;
             s.show(&v, |v| {
@@ -1007,6 +1015,27 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                     text(&v["link"], "copy")
                 )
             });
+        }
+        ["root", name] => {
+            let v = s.call("GET", &format!("/v1/teams/{t}/projects/{name}"), None)?;
+            s.show(&v, |v| print_root(name, &v["project"]));
+        }
+        ["root", name, "set", key] => {
+            let path = format!("/v1/teams/{t}/projects/{name}/root");
+            let v = s.call(
+                "PUT",
+                &path,
+                Some(json!({ "key": key_id_of(key)?, "now": now })),
+            )?;
+            s.show(&v, |v| {
+                print_root(name, &v["project"]);
+                println!("links updated: {}", v["links_updated"]);
+            });
+        }
+        ["root", name, "finish"] => {
+            let path = format!("/v1/teams/{t}/projects/{name}/root/finish");
+            let v = s.call("POST", &path, None)?;
+            s.show(&v, |v| print_root(name, &v["project"]));
         }
         ["unlink", name, partition] => {
             let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}");
@@ -1031,6 +1060,40 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn print_root(name: &str, p: &Value) {
+    match p["root"]["key_id"].as_str() {
+        Some(id) => println!("{name}: root {id}"),
+        None => println!(
+            "{name}: no root key yet; set it with: kernable cloud projects root {name} set root.pub"
+        ),
+    }
+    if let Some(old) = p["previous_root"]["key_id"].as_str() {
+        let until = utc(p["previous_root"]["until"].as_i64().unwrap_or_default());
+        println!(
+            "  the old root {old} stays valid until {until}, or until: kernable cloud projects root {name} finish"
+        );
+    }
+}
+
+/// Milliseconds since the epoch as `YYYY-MM-DD HH:MM UTC`.
+fn utc(ms: i64) -> String {
+    let (days, rem) = (
+        ms.div_euclid(86_400_000),
+        ms.rem_euclid(86_400_000) / 60_000,
+    );
+    // Days to a civil date (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 60, rem % 60)
 }
 
 fn joined(v: &Value) -> String {
@@ -1067,6 +1130,13 @@ fn key_id_of(given: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn times_are_printed_in_utc() {
+        assert_eq!(utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc(1_796_124_480_000), "2026-12-01 11:28 UTC");
+        assert_eq!(utc(951_782_400_000), "2000-02-29 00:00 UTC");
+    }
 
     #[test]
     fn the_api_is_https_or_this_machine() {
