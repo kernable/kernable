@@ -168,6 +168,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "With `--partition`: the control partition's addresses, comma-separated (both kernels of a pair). This kernel takes the partition map, grants, revocations and memberships from there every second, with `--node-key` (granted `replicate`). Without it, this kernel is the control partition: maps are applied here (`kernable partitions apply`).",
     ),
     (
+        "--partition-copy-keys",
+        "KERNABLE_PARTITION_COPY_KEYS",
+        "copy-keys",
+        "With `--partition`: a directory of the copy keys of the partitions this kernel reaches through a relay (`relay:<relay>/<copy>` in the map), one file each, `<copy>.key` (`kernable relay key`, the pusher's `--copy-key`), brought there by your own means.",
+    ),
+    (
         "--witness",
         "KERNABLE_WITNESS",
         "",
@@ -440,6 +446,8 @@ pub struct PartitionConfig {
     pub control: Option<String>,
     /// The key it takes the trust records with; its grant is `<name>.grant` next to it.
     pub node_key: PathBuf,
+    /// `--partition-copy-keys`: `<copy>.key` for each partition reached through a relay.
+    pub copy_keys: PathBuf,
 }
 
 /// Replication (design/replication.md).
@@ -904,6 +912,7 @@ impl Config {
                         c => c,
                     },
                     node_key: get("--node-key").expect("has a default").into(),
+                    copy_keys: get("--partition-copy-keys").expect("has a default").into(),
                 }),
             },
         })

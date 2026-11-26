@@ -115,18 +115,21 @@ Keys and trust:
                                           kernels (--witness-generation); a witness that replaces
                                           a lost one gets a higher one, and kernels that have seen
                                           it ignore older witnesses.
-  kernable relay --dir <dir> (--root <root.pub> --allow-push <key.pub>[,<key.pub>] | --access <file>) [--listen <addr>] [--tls-...]
+  kernable relay --dir <dir> (--allow-push <key.pub>[,<key.pub>] [--allow-read <key.pub>[,<key.pub>]] | --access <file>) [--listen <addr>] [--tls-...]
                                           Runs a relay: it keeps copies of writers' records in
                                           <dir> (one directory per copy), taken from pushers whose
                                           keys --allow-push names (kernable push), and serves each
                                           to readers (kernable start --reader <relay> --reader-copy
-                                          <copy>) whose grants a --root signed with read. It applies
-                                          and checks nothing: readers check every record against
-                                          the writer's checkpoints. A relay several customers share
-                                          takes --access <file> instead: per copy the pushers and
-                                          roots it takes ([copies.<copy>] pushers = [...],
-                                          roots = [...], key IDs), read at every check; a copy it
-                                          does not name is refused. Listens on 127.0.0.1:7400 by
+                                          <copy>) whose keys --allow-read names. Each proves its
+                                          key; no grant counts here. It applies and checks nothing:
+                                          readers check every record against the writer's
+                                          checkpoints. A relay several customers share takes
+                                          --access <file> instead: per copy each key with its role
+                                          and state ([copies.<copy>.keys] '<key ID>' = { role =
+                                          'push' | 'read', state = 'active' | 'stopped' |
+                                          'revoked' }), read at every check; only an active key is
+                                          let in, a connection it holds ends within seconds of a
+                                          change, and a copy it does not name is refused. Listens on 127.0.0.1:7400 by
                                           default, elsewhere only with TLS (--tls-cert, --tls-key:
                                           a public CA's certificate serves clients with no
                                           certificate of their own, who reach it as
@@ -136,7 +139,7 @@ Keys and trust:
                                           copy's readers open it (--reader-copy-key). The relay
                                           never holds it: it sees records' positions, hashes and
                                           sizes, nothing else.
-  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--root <root.pub>]... [--start-anew <position>]
+  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--start-anew <position>]
                                           Follows the writer at <addr> (started with --readers on;
                                           both kernels of a pair, comma-separated) as a reader and
                                           sends every record, sealed with the copy key, to the copy
@@ -147,12 +150,9 @@ Keys and trust:
                                           one the relay takes (--allow-push). The writer keeps its
                                           records until the copy holds them. Beside the push it
                                           takes the writes the copy's readers send through the
-                                          relay and makes them on the writer. With --root, a new
-                                          reader may ask it for the copy key: it seals the key for
-                                          the reader's own key if a root (or the root's enrol key,
-                                          granted grant=read) granted the reader read and nothing
-                                          involved is revoked (it notes revocations as they pass,
-                                          in <copy-key>.revoked). When the writer's log no longer
+                                          relay and makes them on the writer. The copy key reaches
+                                          every reader by your own means, never through the relay.
+                                          When the writer's log no longer
                                           continues the copy, it pushes nothing and says so (the
                                           copy keeps its history); --start-anew with the copy's
                                           position it named empties the copy so it begins anew
@@ -1592,8 +1592,8 @@ fn backup_list(to: &str, flags: &[&str]) -> Result<bool> {
     Ok(true)
 }
 
-/// `kernable relay --dir <dir> --root <root.pub>... --allow-push <key.pub>,...`: serves copies
-/// until stopped.
+/// `kernable relay --dir <dir> --allow-push <key.pub>,... --allow-read <key.pub>,...`: serves
+/// copies until stopped.
 async fn run_relay(flags: &[&str]) -> ExitCode {
     let parsed = (|| -> Result<relay::RelayConfig> {
         let values = flag_values(
@@ -1601,8 +1601,8 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
             &[
                 "--listen",
                 "--dir",
-                "--root",
                 "--allow-push",
+                "--allow-read",
                 "--access",
                 "--tls-cert",
                 "--tls-key",
@@ -1614,29 +1614,17 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
         if let Some(a) = &access {
             relay::Access::read(a).map_err(boxed)?;
         }
-        let roots = match values.get("--root") {
-            Some(r) => r
-                .iter()
-                .map(|r| key_id_of("--root", r))
-                .collect::<Result<Vec<_>>>()?,
-            None if access.is_some() => Vec::new(),
-            None => {
-                return Err("no root key: pass --root <key ID or .pub file> (or --access)".into());
-            }
+        let keys = |flag: &str| -> Result<Vec<String>> {
+            one(flag)
+                .into_iter()
+                .flat_map(|list| list.split(','))
+                .filter(|p| !p.is_empty())
+                .map(|p| key_id_of(flag, p))
+                .collect()
         };
-        let mut pushers = Vec::new();
-        match one("--allow-push") {
-            Some(list) => {
-                for path in list.split(',').filter(|p| !p.is_empty()) {
-                    pushers.push(key_id_of("--allow-push", path)?);
-                }
-            }
-            None if access.is_some() => {}
-            None => {
-                return Err(
-                    "no pusher: pass --allow-push <key.pub>[,<key.pub>] (or --access)".into(),
-                );
-            }
+        let (pushers, readers) = (keys("--allow-push")?, keys("--allow-read")?);
+        if access.is_none() && pushers.is_empty() {
+            return Err("no pusher: pass --allow-push <key.pub>[,<key.pub>] (or --access)".into());
         }
         let tls = match (one("--tls-cert"), one("--tls-key"), one("--tls-client-ca")) {
             (Some(cert), Some(key), client_ca) => Some(relay::RelayTls {
@@ -1655,7 +1643,7 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
         Ok(relay::RelayConfig {
             listen: one("--listen").unwrap_or("127.0.0.1:7400").to_owned(),
             dir: one("--dir").ok_or("--dir is missing")?.into(),
-            roots,
+            readers,
             pushers,
             access,
             tls,
@@ -1696,7 +1684,6 @@ async fn run_push(flags: &[&str]) -> ExitCode {
                 "--to",
                 "--copy",
                 "--copy-key",
-                "--root",
                 "--start-anew",
             ],
         )?;
@@ -1725,18 +1712,6 @@ async fn run_push(flags: &[&str]) -> ExitCode {
             copy: need("--copy")?.to_owned(),
             copy_key: kernable_kernel::seal::CopyKey::read(Path::new(need("--copy-key")?))
                 .map_err(boxed)?,
-            // The revocations it saw, beside the copy key.
-            trust: push::Trust::load(
-                values
-                    .get("--root")
-                    .map(|v| v.as_slice())
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|r| key_id_of("--root", r))
-                    .collect::<Result<Vec<_>>>()?,
-                Some(Path::new(need("--copy-key")?).with_extension("revoked")),
-            )
-            .map_err(boxed)?,
             start_anew: one("--start-anew")
                 .map(|v| {
                     v.parse::<u64>()

@@ -467,16 +467,11 @@ impl Kernel {
     }
 }
 
-/// Copy keys this kernel got from relays, by copy: asked once per process.
-static COPY_KEYS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<String, Arc<crate::seal::CopyKey>>>,
-> = std::sync::LazyLock::new(Default::default);
-
 /// Another partition at `address`: directly, or as `relay:<relay>/<copy>` through that relay,
 /// where the partition's pusher makes the call on it. A partition at another site, reachable only
 /// through the relay both push to, is asked so: each call sealed with that copy's key,
-/// signed with this partition's node key, whose grant must allow `read` too (the relay checks it
-/// as a reader's). The copy key comes from the relay's pusher, as a reader gets it.
+/// signed with this partition's node key, which the relay must let read that copy. The copy key
+/// is the file `<copy>.key` in `--partition-copy-keys`, brought there by the customer.
 pub(crate) async fn connect(
     kernel: &Kernel,
     address: &str,
@@ -500,61 +495,19 @@ pub(crate) async fn connect(
         .trim()
         .to_owned();
     let channel = crate::standby::connect(relay).await?;
-    let cached = COPY_KEYS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(copy)
-        .cloned();
-    let copy_key = match cached {
-        Some(k) => k,
-        None => {
-            let k = ask_copy_key(&channel, copy, &key, &grant).await?;
-            COPY_KEYS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(copy.to_owned(), Arc::clone(&k));
-            tracing::info!(%copy, %relay, "got the copy key of a partition reached through a relay");
-            k
-        }
-    };
+    if !crate::config::valid_name(copy) {
+        return Err(format!("{address}: not a copy's name").into());
+    }
+    let path = partition.copy_keys.join(format!("{copy}.key"));
+    let copy_key = crate::seal::CopyKey::read(&path).map_err(|e| {
+        format!(
+            "the copy key of {copy} ({}): {e}; give each partition the copy keys of the partitions it reaches through a relay",
+            path.display()
+        )
+    })?;
     Ok(crate::reader::Route::Relay(Arc::new(
         crate::reader::RelayRoute::new(channel, copy, copy_key, key, grant),
     )))
-}
-
-/// The key of `copy`, from its pusher through the relay, sealed for `key` (as a reader asks).
-async fn ask_copy_key(
-    relay: &tonic::transport::Channel,
-    copy: &str,
-    key: &ed25519_dalek::SigningKey,
-    grant: &str,
-) -> Result<Arc<crate::seal::CopyKey>, BoxError> {
-    let mut id = [0u8; 8];
-    getrandom::fill(&mut id).map_err(|_| "no randomness")?;
-    let id = u64::from_le_bytes(id);
-    let key_id = signing::key_id(&key.verifying_key());
-    let issued_at = now_ms();
-    let ask = kernable_core::proto::CopyKeyRequest {
-        copy: copy.to_owned(),
-        sig: Some(signing::sign(
-            key,
-            &signing::copy_key_message(copy, &key_id, id, issued_at),
-        )),
-        key_id,
-        issued_at,
-        grant: Some(Grant::decode(hex::decode(grant)?.as_slice())?),
-        id,
-    };
-    let reply = tokio::time::timeout(
-        Duration::from_secs(30),
-        kernable_core::proto::relay_service_client::RelayServiceClient::new(relay.clone())
-            .copy_key(ask),
-    )
-    .await
-    .map_err(|_| format!("the copy key of {copy}: no answer within 30 s"))?
-    .map_err(|e| format!("the copy key of {copy}: {}", e.message()))?;
-    let raw = crate::seal::open_key(key, copy, &reply.into_inner().sealed)?;
-    Ok(Arc::new(crate::seal::CopyKey::new(&raw)))
 }
 
 async fn sync_once(

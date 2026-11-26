@@ -22,9 +22,9 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        CallsRequest, ChallengeResponse, CopyKeyReply, FollowAck, FollowHello, FollowMode,
-        FollowRequest, ForwardedCall, ForwardedReply, Header, ImageEnd, PushHello, PushRequest,
-        SealedReply, calls_request, calls_response, follow_request, follow_response, push_request,
+        CallsRequest, ChallengeResponse, FollowAck, FollowHello, FollowMode, FollowRequest,
+        ForwardedCall, ForwardedReply, Header, ImageEnd, PushHello, PushRequest, SealedReply,
+        calls_request, calls_response, follow_request, follow_response, push_request,
         push_response, relay_service_client::RelayServiceClient,
     },
     signing,
@@ -49,9 +49,6 @@ pub struct Pusher {
     pub copy: String,
     /// The key the copy is sealed with: the relay never holds it.
     pub copy_key: Arc<CopyKey>,
-    /// Who may have the copy key: readers whose grants these roots signed (or a delegate of
-    /// one, the customer's enrol key) and that are not revoked. Empty: nobody asks for it.
-    pub trust: Trust,
     /// `--start-anew <position>`: the copy may be emptied when the writer's log no longer
     /// continues it, but only while it stands at this position (as the refusal named it).
     pub start_anew: Option<u64>,
@@ -79,108 +76,6 @@ impl std::error::Error for Diverged {}
 
 /// How long a pusher waits before it asks again after a refusal to start the copy anew.
 const DIVERGED_DELAY: Duration = Duration::from_secs(60);
-
-/// The roots a pusher trusts, and the keys the writer revoked, as the pusher saw them pass
-/// (kept in a file, so a pusher started again still knows them).
-pub struct Trust {
-    pub roots: Vec<String>,
-    revoked: Mutex<std::collections::HashSet<String>>,
-    file: Option<PathBuf>,
-}
-
-impl Trust {
-    /// `roots`, and the revocations kept in `file` (one key ID a line), if it exists.
-    pub fn load(roots: Vec<String>, file: Option<PathBuf>) -> Result<Trust, BoxError> {
-        let revoked = match &file {
-            Some(f) if f.exists() => std::fs::read_to_string(f)?
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_owned)
-                .collect(),
-            _ => Default::default(),
-        };
-        Ok(Trust {
-            roots,
-            revoked: Mutex::new(revoked),
-            file,
-        })
-    }
-
-    fn note_revoked(&self, key: &str) {
-        let new = self
-            .revoked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key.to_owned());
-        if let (true, Some(file)) = (new, &self.file) {
-            let line = format!("{key}\n");
-            let kept = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(file)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-            if let Err(e) = kept {
-                tracing::warn!(file = %file.display(), error = %e, "noting a revoked key failed");
-            }
-        }
-    }
-
-    fn is_revoked(&self, key: &str) -> bool {
-        self.revoked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(key)
-    }
-
-    /// The revocations among records the writer sent.
-    fn notice<'a>(&self, records: impl Iterator<Item = &'a kernable_core::proto::LogRecord>) {
-        for r in records {
-            if let Some(kernable_core::proto::log_record::Record::Revocation(rev)) = &r.record {
-                self.note_revoked(&rev.key_id);
-            }
-        }
-    }
-
-    /// Whether the reader that asks may have the copy key; why not.
-    fn may_have_key(
-        &self,
-        ask: &kernable_core::proto::CopyKeyRequest,
-        copy: &str,
-    ) -> Result<(), String> {
-        if self.roots.is_empty() {
-            return Err("this pusher hands out no copy key (it trusts no root: --root)".into());
-        }
-        if ask.copy != copy {
-            return Err("an ask for another copy".into());
-        }
-        let sig = ask
-            .sig
-            .as_ref()
-            .filter(|s| s.key_id == ask.key_id)
-            .ok_or("the ask is not signed by its key")?;
-        signing::verify(
-            sig,
-            &signing::copy_key_message(&ask.copy, &ask.key_id, ask.id, ask.issued_at),
-        )
-        .map_err(|_| "invalid signature")?;
-        if (crate::now_ms() - ask.issued_at).abs() > CALL_AGE_MS {
-            return Err("the ask expired; check the clock".into());
-        }
-        let grant = ask.grant.as_ref().ok_or("no grant")?;
-        crate::relay::grant_reads(grant, &self.roots, &ask.key_id)?;
-        // The key, the delegate that granted it (the enrol key) and the root behind it.
-        let mut signers = vec![ask.key_id.clone()];
-        signers.extend(grant.root_sig.as_ref().map(|s| s.key_id.clone()));
-        if let Some(issuer) = &grant.issuer {
-            signers.extend(issuer.root_sig.as_ref().map(|s| s.key_id.clone()));
-        }
-        if let Some(revoked) = signers.iter().find(|k| self.is_revoked(k)) {
-            return Err(format!("the key {revoked} is revoked"));
-        }
-        Ok(())
-    }
-}
 
 /// The longest pause between tries.
 const MAX_DELAY: Duration = Duration::from_secs(5);
@@ -316,14 +211,6 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
                 Some(mut msg @ (follow_response::Msg::Image(_)
                     | follow_response::Msg::ImageEnd(_)
                     | follow_response::Msg::Records(_))) => {
-                    // Revocations pass in plain here, before they are sealed.
-                    match &msg {
-                        follow_response::Msg::Image(b) => pusher.trust.notice(b.records.iter()),
-                        follow_response::Msg::Records(b) => pusher
-                            .trust
-                            .notice(b.records.iter().filter_map(|r| r.record.as_ref())),
-                        _ => {}
-                    }
                     crate::seal::seal(&pusher.copy_key, &mut msg, &mut images);
                     let msg = match msg {
                         follow_response::Msg::Image(batch) => push_request::Msg::Image(batch),
@@ -414,40 +301,6 @@ async fn calls_once(pusher: &Arc<Pusher>, current: &Arc<Mutex<String>>) -> Resul
     while let Some(message) = inbound.message().await? {
         let call = match message.msg {
             Some(calls_response::Msg::Call(call)) => call,
-            Some(calls_response::Msg::KeyRequest(ask)) => {
-                let reply = match pusher
-                    .trust
-                    .may_have_key(&ask, &pusher.copy)
-                    .and_then(|()| {
-                        signing::verifying_key_from_hex(&ask.key_id).map_err(|e| e.to_string())
-                    }) {
-                    Ok(reader) => {
-                        tracing::info!(reader = %ask.key_id, "the copy key, sealed for a new reader");
-                        CopyKeyReply {
-                            id: ask.id,
-                            sealed: crate::seal::seal_key_for(
-                                &reader,
-                                &pusher.copy,
-                                pusher.copy_key.bytes(),
-                            ),
-                            refused: String::new(),
-                        }
-                    }
-                    Err(why) => {
-                        tracing::warn!(reader = %ask.key_id, %why, "a reader may not have the copy key");
-                        CopyKeyReply {
-                            id: ask.id,
-                            refused: why,
-                            ..Default::default()
-                        }
-                    }
-                };
-                tx.send(CallsRequest {
-                    msg: Some(calls_request::Msg::KeyReply(reply)),
-                })
-                .await?;
-                continue;
-            }
             _ => continue,
         };
         // A relay cannot send a call again, or late: each is made once, within a minute.

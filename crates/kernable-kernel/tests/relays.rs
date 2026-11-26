@@ -110,13 +110,37 @@ async fn start_reader(config: &Config) -> Arc<Kernel> {
     open(&kernable_kernel::promoted(config.clone())).await
 }
 
+/// The keys of the readers a test's relay serves: every reader key (`reading_key`'s seed + 50)
+/// a test uses.
+fn readers() -> Vec<String> {
+    (51u8..=99).map(|s| id(&key(s))).collect()
+}
+
+/// A key in an access file: its ID, role and state.
+type KeyLine<'a> = (String, &'a str, &'a str);
+
+/// `--access` with these copies, each with its keys.
+fn access_toml(copies: &[(&str, Vec<KeyLine>)]) -> String {
+    let mut text = String::new();
+    for (copy, keys) in copies {
+        text.push_str(&format!("[copies.\"{copy}\".keys]\n"));
+        for (k, role, state) in keys {
+            text.push_str(&format!(
+                "\"{k}\" = {{ role = \"{role}\", state = \"{state}\" }}\n"
+            ));
+        }
+        text.push('\n');
+    }
+    text
+}
+
 /// The relay in `dir`, taking pushes from key 90's.
 async fn start_relay(dir: &Path) -> String {
     let listen = format!("unix:{}", dir.join("relay.sock").display());
     let config = relay::RelayConfig {
         listen: listen.clone(),
         dir: dir.join("copies"),
-        roots: vec![id(&root())],
+        readers: readers(),
         pushers: vec![id(&key(90))],
         access: None,
         tls: None,
@@ -147,7 +171,6 @@ fn start_pusher_anew(
         relay: relay.to_owned(),
         copy: copy.to_owned(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(dir)).unwrap(),
-        trust: push::Trust::load(vec![id(&root())], Some(dir.join("copy.revoked"))).unwrap(),
         start_anew,
     };
     tokio::spawn(async move {
@@ -262,7 +285,7 @@ async fn a_reader_follows_the_writer_through_a_copy_at_a_relay() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_relay_serves_only_granted_readers_of_a_copy_it_holds() {
+async fn a_relay_serves_only_the_readers_it_names_a_copy_it_holds() {
     let dir = Dir::new("relays-refuse");
     let relay = start_relay(&dir.0).await;
     // No copy yet: a reader waits.
@@ -280,7 +303,6 @@ async fn a_relay_serves_only_granted_readers_of_a_copy_it_holds() {
         relay: relay.clone(),
         copy: "shop".into(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
-        trust: push::Trust::load(Vec::new(), None).unwrap(),
         start_anew: None,
     };
     let pushing = tokio::spawn(push::run(stranger));
@@ -290,6 +312,16 @@ async fn a_relay_serves_only_granted_readers_of_a_copy_it_holds() {
         "a stranger's push makes no copy"
     );
     pushing.abort();
+
+    // A reader whose key it does not name gets nothing, whatever the root granted it.
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    until_async("the copy fills", async || {
+        std::fs::metadata(dir.0.join("copies/shop/log")).is_ok_and(|m| m.len() > 0)
+    })
+    .await;
+    let unnamed = reader_config(&dir.0, "unnamed", 60, &relay, "shop");
+    let refused = tokio::time::timeout(Duration::from_secs(3), standby::run(unnamed)).await;
+    assert!(refused.is_err(), "a reader it does not name never follows");
 }
 
 async fn config_with_writer(dir: &Path) -> Config {
@@ -605,130 +637,35 @@ async fn readers_of_a_copy_whose_pusher_is_gone_count_the_writer_as_away() {
     .await;
 }
 
-/// A reader `name` that has no copy key yet, its grant `grant`.
-fn new_reader(
-    dir: &Path,
-    name: &str,
-    seed: u8,
-    relay: &str,
-    grant: kernable_core::proto::Grant,
-) -> Config {
-    let mut config = reader_config(dir, name, seed, relay, "shop");
-    std::fs::write(
-        dir.join(format!("{name}.grant")),
-        hex(&grant.encode_to_vec()),
-    )
-    .unwrap();
-    config.replication.follow.as_mut().unwrap().copy_key =
-        Some(dir.join(format!("{name}-copy.key")));
-    config
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_new_reader_gets_the_copy_key_on_the_word_of_the_customers_enrol_key() {
-    use kernable_core::proto::Permission;
-    let dir = Dir::new("relays-enrol");
-    let writer_config = config(&dir.0, "writer", 3);
-    let writer = open(&writer_config).await;
-    grant_defaults(&writer);
-    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
-    for i in 0..3 {
-        submit(&writer_config.listen, place(i)).await.unwrap();
-    }
-    let relay = start_relay(&dir.0).await;
-    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
-    // The customer's enrol key: the root lets it grant `read`, nothing else.
-    let enrol = key(80);
-    let enrol_grant = grant(&enrol, &[("grant", &["read"])]);
-    let by_enrol = |to: &ed25519_dalek::SigningKey| {
-        kernable_core::signing::delegated_grant(
-            &enrol,
-            enrol_grant.clone(),
-            &id(to),
-            vec![Permission {
-                action: "read".into(),
-                types: vec!["*".into()],
-            }],
-            issued_now(),
-        )
-    };
-
-    // A reader the enrol key granted gets the key, sealed for it, and follows.
-    let config = new_reader(&dir.0, "enrolled", 31, &relay, by_enrol(&key(81)));
-    let reader = start_reader(&config).await;
-    let at = held(&writer);
-    until_async(
-        "the enrolled reader holds the writer's records",
-        async || held(&reader) >= at,
-    )
-    .await;
-    assert_eq!(
-        std::fs::read_to_string(dir.0.join("enrolled-copy.key")).unwrap(),
-        std::fs::read_to_string(copy_key(&dir.0)).unwrap()
-    );
-
-    // A grant from a root the pusher does not trust: refused, at once.
-    let stranger_root = key(82);
-    let mut foreign = grant(&key(83), &[("read", &["*"])]);
-    foreign.root_sig = Some(kernable_core::signing::sign(
-        &stranger_root,
-        &kernable_core::signing::grant_message(&foreign),
-    ));
-    // It keeps asking (a refusal may be lifted), and says why, as an error.
-    let log = captured_log();
-    let asking = tokio::time::timeout(
-        Duration::from_secs(3),
-        standby::run(new_reader(&dir.0, "foreign", 33, &relay, foreign)),
-    )
-    .await;
-    assert!(asking.is_err(), "it keeps asking: {asking:?}");
-    assert!(!dir.0.join("foreign-copy.key").exists());
-    let said = |what: &str| {
-        log.text()
-            .lines()
-            .any(|l| l.contains("ERROR") && l.contains("the copy key") && l.contains(what))
-    };
-    assert!(said("root"), "{}", log.text());
-
-    // The writer revokes the enrol key: the pusher sees it pass and refuses what it granted.
-    writer.revoke(&id(&enrol), 0).unwrap();
-    submit(&writer_config.listen, place(10)).await.unwrap();
-    let revoked_file = dir.0.join("copy.revoked");
-    until_async("the pusher noted the revocation", async || {
-        std::fs::read_to_string(&revoked_file).is_ok_and(|f| f.contains(&id(&enrol)))
-    })
-    .await;
-    let asking = tokio::time::timeout(
-        Duration::from_secs(3),
-        standby::run(new_reader(&dir.0, "late", 34, &relay, by_enrol(&key(84)))),
-    )
-    .await;
-    assert!(asking.is_err(), "it keeps asking: {asking:?}");
-    assert!(!dir.0.join("late-copy.key").exists());
-    assert!(said("revoked"), "{}", log.text());
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_shared_relay_keeps_each_customers_copy_to_its_own_pushers_and_readers() {
     let dir = Dir::new("relays-access");
-    // Two customers: shop (root 200, pusher 90) and other (root 201, pusher 91).
-    let other_root = key(201);
+    // Two customers: shop (pusher 90, reader 71) and other (pusher 91, reader 201).
     std::fs::write(
         dir.0.join("access.toml"),
-        format!(
-            "[copies.\"shop.eu\"]\npushers = [\"{}\"]\nroots = [\"{}\"]\n\n[copies.\"other.eu\"]\npushers = [\"{}\"]\nroots = [\"{}\"]\n",
-            id(&key(90)),
-            id(&root()),
-            id(&key(91)),
-            id(&other_root)
-        ),
+        access_toml(&[
+            (
+                "shop.eu",
+                vec![
+                    (id(&key(90)), "push", "active"),
+                    (id(&key(71)), "read", "active"),
+                ],
+            ),
+            (
+                "other.eu",
+                vec![
+                    (id(&key(91)), "push", "active"),
+                    (id(&key(201)), "read", "active"),
+                ],
+            ),
+        ]),
     )
     .unwrap();
     let listen = format!("unix:{}", dir.0.join("relay.sock").display());
     let config = relay::RelayConfig {
         listen: listen.clone(),
         dir: dir.0.join("copies"),
-        roots: Vec::new(),
+        readers: Vec::new(),
         pushers: Vec::new(),
         access: Some(dir.0.join("access.toml")),
         tls: None,
@@ -752,7 +689,7 @@ async fn a_shared_relay_keeps_each_customers_copy_to_its_own_pushers_and_readers
     );
     theirs.abort();
 
-    // Shop's reader follows shop's copy; at the other's, its grant counts for nothing.
+    // Shop's reader follows shop's copy; the other's does not name its key.
     let ours = reader_config(&dir.0, "ours", 21, &listen, "shop.eu");
     let _reader = start_reader(&ours).await;
     let mut stray = reader_config(&dir.0, "stray", 22, &listen, "other.eu");
@@ -778,7 +715,7 @@ async fn a_relay_over_tls_needs_no_client_certificates() {
     let open_relay = relay::RelayConfig {
         listen: listen.clone(),
         dir: dir.0.join("copies"),
-        roots: vec![id(&root())],
+        readers: readers(),
         pushers: vec![id(&key(90))],
         access: None,
         tls: Some(relay::RelayTls {
@@ -824,7 +761,7 @@ async fn a_relay_over_tls_needs_no_client_certificates() {
     let strict_relay = relay::RelayConfig {
         listen: strict.clone(),
         dir: dir.0.join("strict"),
-        roots: vec![id(&root())],
+        readers: readers(),
         pushers: vec![id(&key(90))],
         access: None,
         tls: Some(relay::RelayTls {
@@ -1068,22 +1005,19 @@ async fn a_pusher_tells_why_the_relay_ended_its_push() {
 async fn a_refused_reader_says_so_once_and_follows_once_let_in() {
     let log = captured_log();
     let dir = Dir::new("relays-let-in");
-    let access = |roots: &str| {
-        std::fs::write(
-            dir.0.join("access.toml"),
-            format!(
-                "[copies.\"shop.eu\"]\npushers = [\"{}\"]\nroots = [{roots}]\n",
-                id(&key(90))
-            ),
-        )
-        .unwrap()
+    let access = |reader: bool| {
+        let mut keys = vec![(id(&key(90)), "push", "active")];
+        if reader {
+            keys.push((id(&key(74)), "read", "active"));
+        }
+        std::fs::write(dir.0.join("access.toml"), access_toml(&[("shop.eu", keys)])).unwrap()
     };
-    access("");
+    access(false);
     let listen = format!("unix:{}", dir.0.join("relay.sock").display());
     let config = relay::RelayConfig {
         listen: listen.clone(),
         dir: dir.0.join("copies"),
-        roots: Vec::new(),
+        readers: Vec::new(),
         pushers: Vec::new(),
         access: Some(dir.0.join("access.toml")),
         tls: None,
@@ -1097,9 +1031,8 @@ async fn a_refused_reader_says_so_once_and_follows_once_let_in() {
     })
     .await;
 
-    // Its copy key is not there yet: it asks the relay, which refuses its root.
-    let mut reader = reader_config(&dir.0, "late", 24, &listen, "shop.eu");
-    reader.replication.follow.as_mut().unwrap().copy_key = Some(dir.0.join("late-copy.key"));
+    // The relay does not name its key yet: refused.
+    let reader = reader_config(&dir.0, "late", 24, &listen, "shop.eu");
     let following = tokio::spawn(standby::run(reader.clone()));
     tokio::time::sleep(Duration::from_secs(4)).await;
     let refused = log
@@ -1110,14 +1043,13 @@ async fn a_refused_reader_says_so_once_and_follows_once_let_in() {
     assert_eq!(refused, 1, "once, as an error:\n{}", log.text());
     assert!(!following.is_finished(), "it keeps asking");
 
-    // The operator lets its root in: it gets the key and catches up, still the same process.
-    access(&format!("\"{}\"", id(&root())));
-    tokio::time::timeout(Duration::from_secs(30), following)
+    // The operator names its key: it catches up, still the same process.
+    access(true);
+    tokio::time::timeout(Duration::from_secs(70), following)
         .await
         .expect("it follows once let in")
         .unwrap()
         .unwrap();
-    assert!(dir.0.join("late-copy.key").exists());
 }
 
 fn now() -> i64 {
@@ -1281,11 +1213,13 @@ async fn streams_end_once_their_copy_leaves_the_access_file() {
     let dir = Dir::new("relays-unlinked");
     let access = |linked: bool| {
         let text = if linked {
-            format!(
-                "[copies.\"shop.eu\"]\npushers = [\"{}\"]\nroots = [\"{}\"]\n",
-                id(&key(90)),
-                id(&root())
-            )
+            access_toml(&[(
+                "shop.eu",
+                vec![
+                    (id(&key(90)), "push", "active"),
+                    (id(&key(71)), "read", "active"),
+                ],
+            )])
         } else {
             String::new()
         };
@@ -1296,7 +1230,7 @@ async fn streams_end_once_their_copy_leaves_the_access_file() {
     let relay_config = relay::RelayConfig {
         listen: listen.clone(),
         dir: dir.0.join("copies"),
-        roots: Vec::new(),
+        readers: Vec::new(),
         pushers: Vec::new(),
         access: Some(dir.0.join("access.toml")),
         tls: None,
@@ -1332,4 +1266,83 @@ async fn streams_end_once_their_copy_leaves_the_access_file() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// A key's state in the access file: a stopped reader and a revoked pusher are refused within
+/// seconds, on the streams they hold, without a restart, and each says why; an active key goes
+/// on.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopped_and_revoked_keys_are_refused_on_the_streams_they_hold() {
+    let log = captured_log();
+    let dir = Dir::new("relays-states");
+    let access = |reader: &str, other: &str, pusher: &str| {
+        let keys = vec![
+            (id(&key(90)), "push", pusher),
+            (id(&key(71)), "read", reader),
+            (id(&key(72)), "read", other),
+        ];
+        std::fs::write(dir.0.join("access.toml"), access_toml(&[("shop.eu", keys)])).unwrap()
+    };
+    access("active", "active", "active");
+    let listen = format!("unix:{}", dir.0.join("relay.sock").display());
+    let relay_config = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        readers: Vec::new(),
+        pushers: Vec::new(),
+        access: Some(dir.0.join("access.toml")),
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(relay_config).await.unwrap() });
+    wait_for(&listen).await;
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..5 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &listen, "shop.eu");
+    let reader = start_reader(&reader_config(&dir.0, "reader", 21, &listen, "shop.eu")).await;
+    let other = start_reader(&reader_config(&dir.0, "other", 22, &listen, "shop.eu")).await;
+    let at = held(&writer);
+    until_async("both readers hold it", async || {
+        held(&reader) >= at && held(&other) >= at
+    })
+    .await;
+
+    // The first reader stopped: its stream ends, and the other reader goes on.
+    access("stopped", "active", "active");
+    let said = |what: &str| log.text().lines().any(|l| l.contains(what));
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !said("is stopped for shop.eu") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the stopped reader is refused:\n{}",
+            log.text()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    submit(&writer_config.listen, place(10)).await.unwrap();
+    let at = held(&writer);
+    until_async("the active reader goes on", async || held(&other) >= at).await;
+    assert!(held(&reader) < at, "the stopped reader gets nothing more");
+
+    // The pusher revoked: its push ends, and nothing new reaches the copy.
+    access("stopped", "active", "revoked");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !said("is revoked for shop.eu") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the revoked pusher is refused:\n{}",
+            log.text()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    submit(&writer_config.listen, place(11)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        held(&other) < held(&writer),
+        "a revoked pusher pushes nothing more"
+    );
 }

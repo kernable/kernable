@@ -50,14 +50,19 @@ for n in root client worker node ops pusherA pusherB readerA readerB kernel1 ker
 for n in pusherA pusherB readerA readerB; do "$K" grant root.key "$n.pub" 'read=*' >/dev/null; done
 "$K" relay key copyA.key >/dev/null; "$K" relay key copyB.key >/dev/null
 for v in vault1 vault2 vaultA vaultB; do head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$v.key"; chmod 600 "$v.key"; done
+# The relay knows every key by itself (no root counts there); the node key reads both copies, to
+# ask the other site's partition through the relay. Each partition has the other's copy key.
 cat >access.toml <<EOF
-[copies."site.a"]
-pushers = ["$(cat pusherA.pub)"]
-roots = ["$(cat root.pub)"]
-[copies."site.b"]
-pushers = ["$(cat pusherB.pub)"]
-roots = ["$(cat root.pub)"]
+[copies."site.a".keys]
+"$(cat pusherA.pub)" = { role = "push", state = "active" }
+"$(cat readerB.pub)" = { role = "read", state = "active" }
+"$(cat node.pub)" = { role = "read", state = "active" }
+[copies."site.b".keys]
+"$(cat pusherB.pub)" = { role = "push", state = "active" }
+"$(cat readerA.pub)" = { role = "read", state = "active" }
+"$(cat node.pub)" = { role = "read", state = "active" }
 EOF
+mkdir -p copy-keys && cp copyA.key copy-keys/site.a.key && cp copyB.key copy-keys/site.b.key
 
 # --- the relay, the writers, their pushers ------------------------------------------------------
 start relay.log "$K" relay --dir copies --access access.toml --listen "$RELAY"
@@ -70,7 +75,7 @@ writer() { # <n> [extra flags]
 }
 writer 1
 wait_sock p1.sock || { say "p1 did not start"; exit 1; }
-start pushA.log "$K" push --follow "unix:$DIR/p1.sock" --key pusherA.key --to "$RELAY" --copy site.a --copy-key copyA.key --root root.pub
+start pushA.log "$K" push --follow "unix:$DIR/p1.sock" --key pusherA.key --to "$RELAY" --copy site.a --copy-key copyA.key
 reader() { # <site> <copy> <copy key> <writer's kernel.pub>
   start "r$1.log" "$K" start --root root.pub --reader "$RELAY" --reader-copy "$2" --reader-copy-key "$3" \
     --follow-key "reader$1.key" --primary-kernel-key "$4" --kernel-key "rk$1.key" --vault-key "vault$1.key" \
@@ -84,7 +89,7 @@ wait_sock rB.sock || { say "site B's reader did not start"; exit 1; }
 # --- T2: p2 with its control partition reached through site B's reader --------------------------
 writer 2 --control "unix:$DIR/rB.sock" --node-key node.key
 wait_sock p2.sock || { say "p2 did not start"; exit 1; }
-start pushB.log "$K" push --follow "unix:$DIR/p2.sock" --key pusherB.key --to "$RELAY" --copy site.b --copy-key copyB.key --root root.pub
+start pushB.log "$K" push --follow "unix:$DIR/p2.sock" --key pusherB.key --to "$RELAY" --copy site.b --copy-key copyB.key
 reader A site.b copyB.key kernel2.pub
 wait_sock rA.sock || { say "site A's reader did not start"; exit 1; }
 

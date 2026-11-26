@@ -128,10 +128,13 @@ relay. Through the relay, each call is sealed with the other partition's copy ke
 the asking partition's node key; the copy's pusher makes it on its writer. So:
 
 - every partition runs with `--readers on` and a [pusher](./relays#_3-the-pusher-beside-the-writer)
-  to its copy, started with `--root`: it hands the copy key to other partitions as to readers;
-- every node key is granted `read` besides `replicate`
-  (`kernable grant root.key node-p2.pub 'replicate=*' 'read=*'`): the relay checks it as a
-  reader's;
+  to its copy;
+- every partition has the copy keys of the partitions it reaches through the relay, as
+  `<copy>.key` in its `--partition-copy-keys` directory (`copy-keys` by default), brought there by
+  your own means;
+- the relay lets every node key read the other partitions' copies (`--allow-read`, or `read`
+  keys in `--access`), and every node key is granted `read` besides `replicate`
+  (`kernable grant root.key node-p2.pub 'replicate=*' 'read=*'`);
 - the pusher passes on only what partitions ask each other (global keys, moves and their status,
   the trust records), and each of those checks the asking node key itself: the copy key opens
   nothing more.

@@ -78,10 +78,10 @@ Writes witness.generation: the generation of the witness the kernels of a pair r
 ### `kernable relay`
 
 ```text
-kernable relay --dir <dir> (--root <root.pub> --allow-push <key.pub>[,<key.pub>] | --access <file>) [--listen <addr>] [--tls-...]
+kernable relay --dir <dir> (--allow-push <key.pub>[,<key.pub>] [--allow-read <key.pub>[,<key.pub>]] | --access <file>) [--listen <addr>] [--tls-...]
 ```
 
-Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per copy), taken from pushers whose keys `--allow-push` names (kernable push), and serves each to readers (kernable start `--reader <relay>` `--reader-copy <copy>`) whose grants a `--root` signed with read. It applies and checks nothing: readers check every record against the writer's checkpoints. A relay several customers share takes `--access <file>` instead: per copy the pushers and roots it takes (`[copies.<copy>]` pushers = [...], roots = [...], key IDs), read at every check; a copy it does not name is refused. Listens on `127.0.0.1:7400` by default, elsewhere only with TLS (`--tls-cert`, `--tls-key`: a public CA's certificate serves clients with no certificate of their own, who reach it as `https://<host>:<port>`; `--tls-client-ca` adds mutual TLS).
+Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per copy), taken from pushers whose keys `--allow-push` names (kernable push), and serves each to readers (kernable start `--reader <relay>` `--reader-copy <copy>`) whose keys `--allow-read` names. Each proves its key; no grant counts here. It applies and checks nothing: readers check every record against the writer's checkpoints. A relay several customers share takes `--access <file>` instead: per copy each key with its role and state (`[copies.<copy>.keys]` `'<key` ID>' = { role = 'push' | 'read', state = 'active' | 'stopped' | 'revoked' }), read at every check; only an active key is let in, a connection it holds ends within seconds of a change, and a copy it does not name is refused. Listens on `127.0.0.1:7400` by default, elsewhere only with TLS (`--tls-cert`, `--tls-key`: a public CA's certificate serves clients with no certificate of their own, who reach it as `https://<host>:<port>`; `--tls-client-ca` adds mutual TLS).
 
 ### `kernable relay key`
 
@@ -94,10 +94,10 @@ Writes a new copy key (hex, mode 600): the pusher seals what it sends a relay wi
 ### `kernable push`
 
 ```text
-kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--root <root.pub>]... [--start-anew <position>]
+kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--start-anew <position>]
 ```
 
-Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record, sealed with the copy key, to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Beside the push it takes the writes the copy's readers send through the relay and makes them on the writer. With `--root`, a new reader may ask it for the copy key: it seals the key for the reader's own key if a root (or the root's enrol key, granted `grant=read`) granted the reader read and nothing involved is revoked (it notes revocations as they pass, in `<copy-key>.revoked`). When the writer's log no longer continues the copy, it pushes nothing and says so (the copy keeps its history); `--start-anew` with the copy's position it named empties the copy so it begins anew from the writer. Connections use `KERNABLE_TLS_*`, as the SDKs do.
+Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record, sealed with the copy key, to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Beside the push it takes the writes the copy's readers send through the relay and makes them on the writer. The copy key reaches every reader by your own means, never through the relay. When the writer's log no longer continues the copy, it pushes nothing and says so (the copy keeps its history); `--start-anew` with the copy's position it named empties the copy so it begins anew from the writer. Connections use `KERNABLE_TLS_*`, as the SDKs do.
 
 ### `kernable partitions apply`
 

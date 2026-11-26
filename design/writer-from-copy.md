@@ -42,7 +42,12 @@ itself, so it opens no data):
 
 A partition gets a new pusher only once its current one is stopped or revoked; while it is
 active, the console and the CLI refuse and say so plainly ("stop or revoke the current writer of
-`plant-a` first"). No waiting time and no override decide it: a person does. A planned move stops
+`plant-a` first"). No waiting time and no override decide it: a person does. **Built in the relay** (part 1c,
+2026-11-26): `--access` names keys with role and state, `--allow-push`/`--allow-read` for a relay
+of one's own; no root grant counts at a relay any more; the copy key's hand-over by the pusher
+(`push --root`, the relay's `CopyKey`) is gone, partitions read each other's copy keys from
+`--partition-copy-keys`. The rule "a new pusher only after the old one is stopped or revoked" is
+the access list's editor's (kernable Cloud) to keep. A planned move stops
 the old writer (it pushes everything, nothing is lost); a lost machine is revoked (what it never
 pushed is lost with it). Readers have the same states: a stopped or revoked reader gets nothing
 more from the relay, without a new copy key.

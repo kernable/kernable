@@ -863,6 +863,7 @@ async fn each_partition_runs_the_cases_of_its_tenants() {
             name: "p1".into(),
             control: None,
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -872,6 +873,7 @@ async fn each_partition_runs_the_cases_of_its_tenants() {
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -1072,6 +1074,7 @@ async fn cases_go_on_with_a_tenant_that_moved_to_a_shorter_log() {
             name: "p1".into(),
             control: None,
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -1081,6 +1084,7 @@ async fn cases_go_on_with_a_tenant_that_moved_to_a_shorter_log() {
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;

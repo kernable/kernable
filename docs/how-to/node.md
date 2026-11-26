@@ -37,7 +37,6 @@ to = "https://relay.example.net:7400"
 copy = "shop"
 key = "pusher.key"
 copy-key = "copy.key"
-root = ["root.pub"]                        # optional: new readers may ask for the copy key
 # start-anew = 1234                        # only when the pusher refused: the copy's position it named
 follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's listen
 

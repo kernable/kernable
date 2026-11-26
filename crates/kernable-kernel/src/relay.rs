@@ -35,11 +35,10 @@ use std::{
 
 use kernable_core::{
     proto::{
-        CallsRequest, CallsResponse, Challenge, CopyKeyReply, CopyKeyRequest, FollowMode,
-        FollowRequest, FollowResponse, FollowStart, Grant, PromoteRequest, PromoteResult,
-        PushRequest, PushResponse, RecordBatch, RecordPoint, SealedCall, SealedReply,
-        SwitchoverRequest, SwitchoverResult, calls_request, calls_response, follow_request,
-        follow_response, push_request, push_response,
+        CallsRequest, CallsResponse, Challenge, FollowMode, FollowRequest, FollowResponse,
+        FollowStart, PromoteRequest, PromoteResult, PushRequest, PushResponse, RecordBatch,
+        RecordPoint, SealedCall, SealedReply, SwitchoverRequest, SwitchoverResult, calls_request,
+        calls_response, follow_request, follow_response, push_request, push_response,
         relay_service_server::{RelayService, RelayServiceServer},
         replication_service_server::{ReplicationService, ReplicationServiceServer},
     },
@@ -55,9 +54,7 @@ use tonic::{
     transport::{Certificate, Identity, Server, ServerTlsConfig},
 };
 
-use crate::{
-    BoxError, GRANT_HEADER, MAX_REQUEST_AGE_MS, Permissions, config, now_ms, protocol, replication,
-};
+use crate::{BoxError, MAX_REQUEST_AGE_MS, now_ms, protocol, replication};
 
 /// How a relay runs.
 #[derive(Debug, Clone)]
@@ -65,14 +62,13 @@ pub struct RelayConfig {
     pub listen: String,
     /// Where the copies are kept, one directory each.
     pub dir: PathBuf,
-    /// Root key IDs: a reader's grant must be signed by one of them (or delegated from one) and
-    /// allow `read`.
-    pub roots: Vec<String>,
-    /// Key IDs of the pushers it takes copies from.
+    /// Key IDs of the readers it serves every copy to (`--allow-read`).
+    pub readers: Vec<String>,
+    /// Key IDs of the pushers it takes copies from (`--allow-push`).
     pub pushers: Vec<String>,
-    /// `--access`: per copy, the pushers and roots it takes, for a relay several customers
-    /// share. With it, a copy it does not name is refused, and `roots` and `pushers` count for
-    /// none of the copies it names.
+    /// `--access`: per copy, the keys it takes and their state, for a relay several customers
+    /// share. With it, a copy it does not name is refused, and `readers` and `pushers` count for
+    /// none of them.
     pub access: Option<PathBuf>,
     pub tls: Option<RelayTls>,
 }
@@ -89,7 +85,14 @@ pub struct RelayTls {
     pub client_ca: Option<PathBuf>,
 }
 
-/// `--access`: who may push to and read each copy.
+/// `--access`: who may push to and read each copy, by key (design/writer-from-copy.md): per copy,
+/// each key ID with its role and its state.
+///
+/// ```toml
+/// [copies."acme.shop.eu".keys]
+/// "<key ID>" = { role = "push", state = "active" }
+/// "<key ID>" = { role = "read", state = "active" }
+/// ```
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Access {
@@ -100,12 +103,39 @@ pub struct Access {
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CopyAccess {
-    /// Key IDs of the pushers that may push to it.
+    /// The keys it takes, by key ID.
     #[serde(default)]
-    pub pushers: Vec<String>,
-    /// Key IDs of the roots whose grants (or whose delegates' grants) let readers follow it.
+    pub keys: HashMap<String, KeyAccess>,
+}
+
+/// What a key may do with a copy, and whether it may now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyAccess {
+    pub role: KeyRole,
     #[serde(default)]
-    pub roots: Vec<String>,
+    pub state: KeyState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyRole {
+    /// Pushes the copy (and takes its readers' calls): a writer's pusher.
+    Push,
+    /// Follows the copy (and sends calls through it): a reader, or a writer starting from it.
+    Read,
+}
+
+/// A key's state: only an active key is let in; a stopped or revoked one is refused, at once on
+/// a connection it holds (checked every few seconds). How the instance behind it ends differs
+/// (design/writer-from-copy.md): a stopped writer first pushes what it has, a revoked one not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyState {
+    #[default]
+    Active,
+    Stopped,
+    Revoked,
 }
 
 impl Access {
@@ -445,8 +475,6 @@ struct Copy {
     calls: Mutex<Option<mpsc::Sender<Result<CallsResponse, Status>>>>,
     /// Calls sent down it, waiting for their answers, by ID.
     pending: Mutex<HashMap<u64, oneshot::Sender<SealedReply>>>,
-    /// Asks for the copy key sent down it, waiting for their answers, by ID.
-    keys: Mutex<HashMap<u64, oneshot::Sender<CopyKeyReply>>>,
     /// Bytes sent to readers since the copy began (`served`).
     served: AtomicU64,
     /// Who is connected now, for `status.json`.
@@ -677,7 +705,6 @@ impl Relay {
             changed,
             calls: Mutex::default(),
             pending: Mutex::default(),
-            keys: Mutex::default(),
             who: Mutex::default(),
             followed: Mutex::default(),
             served: AtomicU64::new(
@@ -691,13 +718,29 @@ impl Relay {
         Ok(copy)
     }
 
-    /// The roots and pushers `copy` takes: from `--access`, else the relay's own.
-    fn access(&self, copy: &str) -> Result<(Vec<String>, Vec<String>), Status> {
+    /// Whether `key` (proven by its signature) may act on `copy` in `role` now: named for it in
+    /// `--access`, active; else among the relay's own `--allow-push` or `--allow-read`.
+    fn may(&self, key: &str, copy: &str, role: KeyRole) -> Result<(), Status> {
         if !valid_name(copy) {
             return Err(invalid_name());
         }
+        let what = match role {
+            KeyRole::Push => "push to",
+            KeyRole::Read => "read",
+        };
         let Some(path) = &self.config.access else {
-            return Ok((self.config.roots.clone(), self.config.pushers.clone()));
+            let keys = match role {
+                KeyRole::Push => &self.config.pushers,
+                KeyRole::Read => &self.config.readers,
+            };
+            return if keys.iter().any(|k| k == key) {
+                Ok(())
+            } else {
+                Err(Status::permission_denied(format!(
+                    "this relay lets the key {} not {what} {copy} (--allow-push, --allow-read)",
+                    short(key)
+                )))
+            };
         };
         let file = Access::read(path).map_err(|e| {
             tracing::error!(error = %e, "the access file does not read: every copy refused");
@@ -706,55 +749,39 @@ impl Relay {
         let entry = file.copies.get(copy).ok_or_else(|| {
             Status::permission_denied(format!("this relay holds no copy {copy} for anyone"))
         })?;
-        Ok((entry.roots.clone(), entry.pushers.clone()))
+        match entry.keys.get(key) {
+            Some(KeyAccess { role: r, state }) if *r == role => match state {
+                KeyState::Active => Ok(()),
+                KeyState::Stopped => Err(Status::permission_denied(format!(
+                    "the key {} is stopped for {copy}: it may no longer {what} it",
+                    short(key)
+                ))),
+                KeyState::Revoked => Err(Status::permission_denied(format!(
+                    "the key {} is revoked for {copy}",
+                    short(key)
+                ))),
+            },
+            _ => Err(Status::permission_denied(format!(
+                "the key {} may not {what} {copy}: its access list does not name it so",
+                short(key)
+            ))),
+        }
     }
 
     /// Whether `key` may push to (and take calls for) `copy`.
     fn pusher_may(&self, key: &str, copy: &str) -> Result<(), Status> {
-        let (_, pushers) = self.access(copy)?;
-        if pushers.iter().any(|p| p == key) {
-            Ok(())
-        } else {
-            Err(Status::permission_denied(format!(
-                "this relay takes no pushes to {copy} from the key (--allow-push, --access)"
-            )))
-        }
+        self.may(key, copy, KeyRole::Push)
     }
 
-    /// A reader's grant, presented with its stream or call: signed by a root `copy` takes (or
-    /// delegated from one) and allowing `read`.
-    fn reader_may(
-        &self,
-        metadata: &tonic::metadata::MetadataMap,
-        key: &str,
-        copy: &str,
-    ) -> Result<(), Status> {
-        let grant = metadata
-            .get(GRANT_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| hex::decode(v.trim()).ok())
-            .and_then(|b| Grant::decode(b.as_slice()).ok())
-            .ok_or_else(|| {
-                Status::permission_denied("present the reader's grant, signed by a trusted root")
-            })?;
-        let (roots, _) = self.access(copy)?;
-        grant_reads(&grant, &roots, key).map_err(Status::permission_denied)
+    /// Whether `key` may follow `copy` (and send calls through it).
+    fn reader_may(&self, key: &str, copy: &str) -> Result<(), Status> {
+        self.may(key, copy, KeyRole::Read)
     }
 }
 
-/// Whether `grant` is `key`'s, signed by one of `roots` (or by a delegate of one, as the
-/// customer's enrol key), and allows `read` for everything.
-pub(crate) fn grant_reads(grant: &Grant, roots: &[String], key: &str) -> Result<(), String> {
-    if grant.key_id != key {
-        return Err("the grant is another key's".into());
-    }
-    crate::grants::chain(grant, roots, None)
-        .map_err(|e| format!("the reader's grant is not from a trusted root: {e}"))?;
-    let grants = HashMap::from([(grant.key_id.clone(), grant.clone())]);
-    if !config::allowed(&Permissions::new(&grants, &HashMap::new()).read, key, "*") {
-        return Err("the key may not follow as a reader: its grant needs read".into());
-    }
-    Ok(())
+/// A key ID as said in a refusal: its first twelve digits.
+fn short(key: &str) -> &str {
+    &key[..key.len().min(12)]
 }
 
 fn internal(e: impl std::fmt::Display) -> Status {
@@ -980,44 +1007,27 @@ async fn calls(
     *copy.calls.lock().unwrap_or_else(PoisonError::into_inner) = Some(out.clone());
     tracing::info!(copy = %copy.name, key = %hello.key_id, "a pusher takes calls");
     while let Some(message) = inbound.message().await? {
-        match message.msg {
-            Some(calls_request::Msg::Reply(reply)) => {
-                let waiting = copy
-                    .pending
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&reply.id);
-                if let Some(waiting) = waiting {
-                    let _ = waiting.send(reply);
-                }
+        if let Some(calls_request::Msg::Reply(reply)) = message.msg {
+            let waiting = copy
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&reply.id);
+            if let Some(waiting) = waiting {
+                let _ = waiting.send(reply);
             }
-            Some(calls_request::Msg::KeyReply(reply)) => {
-                let waiting = copy
-                    .keys
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&reply.id);
-                if let Some(waiting) = waiting {
-                    let _ = waiting.send(reply);
-                }
-            }
-            _ => {}
         }
     }
     Ok(())
 }
 
 /// A reader's write, passed to the copy's pusher; the writer's answer, as the pusher sent it.
-async fn call(
-    relay: Arc<Relay>,
-    metadata: &tonic::metadata::MetadataMap,
-    call: SealedCall,
-) -> Result<SealedReply, Status> {
+async fn call(relay: Arc<Relay>, call: SealedCall) -> Result<SealedReply, Status> {
     let sig = call
         .sig
         .as_ref()
         .ok_or_else(|| Status::unauthenticated("the call is not signed"))?;
-    relay.reader_may(metadata, &sig.key_id, &call.copy)?;
+    relay.reader_may(&sig.key_id, &call.copy)?;
     let msg = signing::relay_call_message(&call.copy, call.id, &call.sealed, call.issued_at);
     if signing::verify(sig, &msg).is_err() {
         return Err(Status::unauthenticated("invalid signature"));
@@ -1079,76 +1089,6 @@ async fn call(
     }
 }
 
-/// A new reader's ask for the copy key, passed to the copy's pusher, which decides.
-async fn copy_key(relay: Arc<Relay>, ask: CopyKeyRequest) -> Result<CopyKeyReply, Status> {
-    let sig = ask
-        .sig
-        .as_ref()
-        .filter(|s| s.key_id == ask.key_id)
-        .ok_or_else(|| Status::unauthenticated("the ask is not signed by its key"))?;
-    let msg = signing::copy_key_message(&ask.copy, &ask.key_id, ask.id, ask.issued_at);
-    if signing::verify(sig, &msg).is_err() {
-        return Err(Status::unauthenticated("invalid signature"));
-    }
-    if (now_ms() - ask.issued_at).abs() > MAX_REQUEST_AGE_MS {
-        return Err(Status::unauthenticated("the ask expired; check the clock"));
-    }
-    let grant = ask
-        .grant
-        .as_ref()
-        .ok_or_else(|| Status::permission_denied("present the reader's grant"))?;
-    let (roots, _) = relay.access(&ask.copy)?;
-    grant_reads(grant, &roots, &ask.key_id).map_err(Status::permission_denied)?;
-    let copy = relay.copy(&ask.copy, false)?;
-    let out = copy
-        .calls
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
-        .filter(|o| !o.is_closed())
-        .ok_or_else(|| {
-            Status::unavailable(format!(
-                "no pusher of the copy {} is connected to this relay; try again",
-                copy.name
-            ))
-        })?;
-    let (tx, rx) = oneshot::channel();
-    copy.keys
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(ask.id, tx);
-    let id = ask.id;
-    let forget = || {
-        copy.keys
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
-    };
-    if out
-        .send(Ok(CallsResponse {
-            msg: Some(calls_response::Msg::KeyRequest(ask)),
-        }))
-        .await
-        .is_err()
-    {
-        forget();
-        return Err(Status::unavailable("the copy's pusher left; try again"));
-    }
-    match tokio::time::timeout(Duration::from_secs(30), rx).await {
-        Ok(Ok(reply)) if reply.refused.is_empty() => Ok(reply),
-        Ok(Ok(reply)) => Err(Status::permission_denied(reply.refused)),
-        Ok(Err(_)) => Err(Status::unavailable(
-            "the copy's pusher left before it answered; try again",
-        )),
-        Err(_) => {
-            forget();
-            Err(Status::deadline_exceeded(
-                "the copy's pusher did not answer in time",
-            ))
-        }
-    }
-}
-
 type FollowOut = mpsc::Sender<Result<FollowResponse, Status>>;
 
 async fn tell(out: &FollowOut, msg: follow_response::Msg) -> Result<(), Status> {
@@ -1197,7 +1137,6 @@ async fn frames(file: Arc<File>, frames: Vec<Frame>) -> Result<Vec<PushRequest>,
 async fn follow(
     relay: Arc<Relay>,
     signed: (String, String),
-    metadata: &tonic::metadata::MetadataMap,
     inbound: &mut Streaming<FollowRequest>,
     out: &FollowOut,
 ) -> Result<(), Status> {
@@ -1216,7 +1155,7 @@ async fn follow(
         ));
     }
     same_as_signed(&hello.key_id, &hello.copy, &signed)?;
-    relay.reader_may(metadata, &hello.key_id, &hello.copy)?;
+    relay.reader_may(&hello.key_id, &hello.copy)?;
     challenge(
         inbound,
         &hello.key_id,
@@ -1481,18 +1420,8 @@ impl RelayService for Api {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn copy_key(
-        &self,
-        request: Request<CopyKeyRequest>,
-    ) -> Result<Response<CopyKeyReply>, Status> {
-        copy_key(Arc::clone(&self.0), request.into_inner())
-            .await
-            .map(Response::new)
-    }
-
     async fn call(&self, request: Request<SealedCall>) -> Result<Response<SealedReply>, Status> {
-        let metadata = request.metadata().clone();
-        call(Arc::clone(&self.0), &metadata, request.into_inner())
+        call(Arc::clone(&self.0), request.into_inner())
             .await
             .map(Response::new)
     }
@@ -1507,17 +1436,15 @@ impl ReplicationService for Api {
         request: Request<Streaming<FollowRequest>>,
     ) -> Result<Response<Self::FollowStream>, Status> {
         let signed = signed_stream(request.metadata(), "follow")?;
-        self.0
-            .reader_may(request.metadata(), &signed.0, &signed.1)?;
+        self.0.reader_may(&signed.0, &signed.1)?;
         let (tx, rx) = mpsc::channel(16);
         let relay = Arc::clone(&self.0);
-        let metadata = request.metadata().clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
             let (key, copy) = signed.clone();
             let still = Arc::clone(&relay);
-            let following = follow(relay, signed, &metadata, &mut inbound, &tx);
-            let may = || still.reader_may(&metadata, &key, &copy);
+            let following = follow(relay, signed, &mut inbound, &tx);
+            let may = || still.reader_may(&key, &copy);
             if let Err(status) = while_allowed(following, may).await {
                 // A damaged copy is the operator's to know; a reader leaving is not.
                 if status.code() == tonic::Code::DataLoss {
@@ -1728,7 +1655,6 @@ mod tests {
                 changed,
                 calls: Mutex::default(),
                 pending: Mutex::default(),
-                keys: Mutex::default(),
                 served: AtomicU64::new(0),
                 who: Mutex::default(),
                 followed: Mutex::default(),

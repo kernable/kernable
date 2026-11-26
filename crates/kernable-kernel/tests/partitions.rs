@@ -111,11 +111,12 @@ fn place(id: &str, tenant: &str) -> Command {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_partitions_share_the_tenants_by_the_map_of_the_control_partition() {
-    let p1 = start_custom("part-p1", |config, _| {
+    let p1 = start_custom("part-p1", |config, dir| {
         config.partition = Some(PartitionConfig {
             name: "p1".into(),
             control: None,
             node_key: "unused.key".into(),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -129,6 +130,7 @@ async fn two_partitions_share_the_tenants_by_the_map_of_the_control_partition() 
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key,
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -296,6 +298,7 @@ async fn a_global_key_is_unique_across_partitions() {
             name: "p1".into(),
             control: None,
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -305,6 +308,7 @@ async fn a_global_key_is_unique_across_partitions() {
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -408,6 +412,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
             name: "p1".into(),
             control: None,
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -417,6 +422,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -773,6 +779,7 @@ async fn a_tenant_moves_while_clients_write_to_it() {
             name: "p1".into(),
             control: None,
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -782,6 +789,7 @@ async fn a_tenant_moves_while_clients_write_to_it() {
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -932,11 +940,11 @@ async fn a_tenant_moves_while_clients_write_to_it() {
 /// Partitions at sites that reach each other only through a relay: the map names p2 only
 /// as `relay:<relay>/<its copy>`, so what p1 asks p2, whether a global key is still held and a
 /// moving tenant's records, goes through the relay to p2's pusher, sealed with p2's copy key,
-/// which p1 got from that pusher with its node key.
+/// given to p1 as a file; the relay lets p1's node key read p2's copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitions_ask_each_other_through_a_relay() {
     use kernable_kernel::{push, relay, seal::CopyKey};
-    // Node keys that also read: the relay checks them as a reader's.
+    // Node keys that also read p2's copy at the relay.
     let node_key_reading = |dir: &std::path::Path| {
         let path = node_key(dir);
         let g = grant(&key(13), &[("replicate", &["*"]), ("read", &["*"])]);
@@ -945,10 +953,14 @@ async fn partitions_ask_each_other_through_a_relay() {
     };
     let p1 = start_custom("rl-p1", |config, dir| {
         config.replication.readers = true;
+        // p2's copy key, brought by hand.
+        std::fs::create_dir_all(dir.join("copy-keys")).unwrap();
+        std::fs::write(dir.join("copy-keys").join("p2.copy.key"), hex(&[44; 32])).unwrap();
         config.partition = Some(PartitionConfig {
             name: "p1".into(),
             control: None,
             node_key: node_key_reading(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -959,6 +971,7 @@ async fn partitions_ask_each_other_through_a_relay() {
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key: node_key_reading(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -968,14 +981,14 @@ async fn partitions_ask_each_other_through_a_relay() {
             .unwrap();
     }
 
-    // The relay, and p2's pusher to its copy there (key 90, trusting the root for copy keys).
+    // The relay (p2's pusher may push, the node key may read), and p2's pusher (key 90).
     let dir = std::env::temp_dir().join(format!("kn-rl-relay-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let relay_addr = format!("unix:{}", dir.join("relay.sock").display());
     let config = relay::RelayConfig {
         listen: relay_addr.clone(),
         dir: dir.join("copies"),
-        roots: vec![id(&root())],
+        readers: vec![id(&key(13))],
         pushers: vec![id(&key(90))],
         access: None,
         tls: None,
@@ -995,7 +1008,6 @@ async fn partitions_ask_each_other_through_a_relay() {
         relay: relay_addr.clone(),
         copy: "p2.copy".into(),
         copy_key: std::sync::Arc::new(CopyKey::new(&[44; 32])),
-        trust: push::Trust::load(vec![id(&root())], Some(dir.join("copy.revoked"))).unwrap(),
         start_anew: None,
     };
     tokio::spawn(async move { push::run(pusher).await.unwrap() });

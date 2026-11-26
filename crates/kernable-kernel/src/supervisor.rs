@@ -30,7 +30,6 @@
 //! copy = "shop"
 //! key = "pusher.key"
 //! copy-key = "copy.key"
-//! root = ["root.pub"]                        # optional: new readers may ask for the copy key
 //! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
 //! start-anew = 1234                          # only after a refusal: the copy's position it named
 //! ```
@@ -386,9 +385,6 @@ struct PushSection {
     key: String,
     copy_key: String,
     follow: Option<String>,
-    /// Roots whose (or whose enrol key's) grants let a new reader have the copy key.
-    #[serde(default)]
-    root: Vec<String>,
     /// `--start-anew`: the copy's position, as the pusher's refusal named it, when the writer's
     /// log no longer continues the copy and it may begin anew (nothing else empties it).
     start_anew: Option<u64>,
@@ -430,7 +426,6 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
                 key: "pusher.key".into(),
                 copy_key: "copy.key".into(),
                 follow: None,
-                root: Vec::new(),
                 start_anew: None,
                 cpus: None,
                 memory: None,
@@ -767,9 +762,6 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             "--copy-key".into(),
             p.copy_key,
         ];
-        for root in p.root {
-            args.extend(["--root".into(), root]);
-        }
         if let Some(at) = p.start_anew {
             args.extend(["--start-anew".into(), at.to_string()]);
         }

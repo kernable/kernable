@@ -498,6 +498,7 @@ async fn a_scheduled_command_moves_with_its_tenant_and_runs_there() {
             name: "p1".into(),
             control: None,
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;
@@ -507,6 +508,7 @@ async fn a_scheduled_command_moves_with_its_tenant_and_runs_there() {
             name: "p2".into(),
             control: Some(p1_addr.clone()),
             node_key: node_key(dir),
+            copy_keys: dir.join("copy-keys"),
         });
     })
     .await;

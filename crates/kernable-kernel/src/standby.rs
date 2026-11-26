@@ -520,9 +520,6 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         .map_err(|e| format!("the standby's grant {}: {e}", grant_path.display()))?
         .trim()
         .to_owned();
-    if config.replication.reader && !follow.copy.is_empty() {
-        ask_copy_key(&follow, &key, &grant).await?;
-    }
     // A standby on a new binary waits for the old one to let go of the stores; only then
     // are its snapshots, a cache the primary does not send, removed: they start empty.
     let stores = crate::taking_over(config.take_over_ms, || {
@@ -1029,81 +1026,20 @@ async fn follow_once(
     }
 }
 
-/// A new reader of a relay's copy whose `--reader-copy-key` file does not exist yet asks the
-/// relays for it, and the copy's pusher seals it for the reader's key if the reader's grant
-/// allows it; written to the file (mode 0600). Asked again while no pusher answers.
-async fn ask_copy_key(follow: &Follow, key: &SigningKey, grant: &str) -> Result<(), BoxError> {
-    let Some(path) = follow.copy_key.as_ref().filter(|p| !p.exists()) else {
-        return Ok(());
-    };
-    let grant = kernable_core::proto::Grant::decode(hex::decode(grant)?.as_slice())?;
-    let relays = crate::reader::addresses(&follow.primary);
-    let mut delay = Duration::from_millis(200);
-    let mut last_refusal = None;
-    for attempt in 0usize.. {
-        let relay = &relays[attempt % relays.len()];
-        let mut id = [0u8; 8];
-        getrandom::fill(&mut id).map_err(|_| "no randomness")?;
-        let id = u64::from_le_bytes(id);
-        let key_id = signing::key_id(&key.verifying_key());
-        let issued_at = crate::now_ms();
-        let ask = kernable_core::proto::CopyKeyRequest {
-            copy: follow.copy.clone(),
-            sig: Some(signing::sign(
-                key,
-                &signing::copy_key_message(&follow.copy, &key_id, id, issued_at),
-            )),
-            key_id,
-            issued_at,
-            grant: Some(grant.clone()),
-            id,
-        };
-        let answer = tokio::time::timeout(Duration::from_secs(30), async {
-            kernable_core::proto::relay_service_client::RelayServiceClient::new(
-                connect(relay).await?,
-            )
-            .copy_key(ask)
-            .await
-            .map_err(BoxError::from)
-        })
-        .await
-        .unwrap_or_else(|_| Err("no answer within 30 s".into()));
-        match answer {
-            Ok(reply) => {
-                let copy_key =
-                    crate::seal::open_key(key, &follow.copy, &reply.into_inner().sealed)?;
-                crate::seal::CopyKey::write(path, &copy_key)?;
-                tracing::info!(copy = %follow.copy, file = %path.display(), "got the copy key");
-                return Ok(());
-            }
-            Err(e) => {
-                // A refusal lasts until the grant or the relay's access list allows it: asked
-                // again, loudly, rarely.
-                let max = match refusal(&*e) {
-                    Some(why) => {
-                        refused_once(&mut last_refusal, format!("the copy key: {why}"), relay);
-                        REFUSED_MAX_DELAY
-                    }
-                    None => {
-                        tracing::warn!(%relay, error = %with_causes(&*e), "asking for the copy key failed; asking again in {delay:?}");
-                        Duration::from_secs(5)
-                    }
-                };
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(max);
-            }
-        }
-    }
-    unreachable!("asks until it has the key or is refused")
-}
-
 /// A reader of a relay's copy key (`--reader-copy-key`).
 pub(crate) fn copy_key(
     follow: &Follow,
     reader: bool,
 ) -> Result<Option<Arc<crate::seal::CopyKey>>, BoxError> {
     match (&follow.copy_key, reader && !follow.copy.is_empty()) {
-        (Some(path), true) => Ok(Some(crate::seal::CopyKey::read(path)?)),
+        (Some(path), true) => match crate::seal::CopyKey::read(path) {
+            Ok(key) => Ok(Some(key)),
+            Err(e) => Err(format!(
+                "--reader-copy-key {}: {e} (the copy key reaches a reader by your own means: copy the pusher's --copy-key file here)",
+                path.display()
+            )
+            .into()),
+        },
         (None, true) => Err("a reader of a relay needs --reader-copy-key".into()),
         (_, false) => Ok(None),
     }

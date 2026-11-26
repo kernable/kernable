@@ -57,20 +57,26 @@ for n in root client worker node ops pusherA pusherB readerA readerB kernel1 ker
 for n in pusherA pusherB readerA readerB; do "$K" grant root.key "$n.pub" 'read=*' >/dev/null; done
 "$K" relay key copyA.key >/dev/null; "$K" relay key copyB.key >/dev/null
 for v in vault1 vault2 vaultA vaultB; do head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$v.key"; chmod 600 "$v.key"; done
+# The relay knows every key by itself (no root counts there); the node key reads both copies, to
+# ask the other site's partition through the relay. Each partition has the other's copy key.
 cat >access.toml <<EOF
-[copies."site.a"]
-pushers = ["$(cat pusherA.pub)"]
-roots = ["$(cat root.pub)"]
-[copies."site.b"]
-pushers = ["$(cat pusherB.pub)"]
-roots = ["$(cat root.pub)"]
+[copies."site.a".keys]
+"$(cat pusherA.pub)" = { role = "push", state = "active" }
+"$(cat readerB.pub)" = { role = "read", state = "active" }
+"$(cat node.pub)" = { role = "read", state = "active" }
+[copies."site.b".keys]
+"$(cat pusherB.pub)" = { role = "push", state = "active" }
+"$(cat readerA.pub)" = { role = "read", state = "active" }
+"$(cat node.pub)" = { role = "read", state = "active" }
 EOF
+mkdir -p copy-keys && cp copyA.key copy-keys/site.a.key && cp copyB.key copy-keys/site.b.key
 # Two calls: a command line that names $R itself would match the pattern and end its own shell.
 ssh_b "systemctl stop 'kx-*' 2>/dev/null; systemctl reset-failed 'kx-*' 2>/dev/null; true"
 ssh_b "rm -rf $R && mkdir -p $R/repo/sdks/typescript $R/repo/bench" || { say "no directory on the server"; exit 1; }
 scp -q "$KL" "root@$SERVER:$R/kernable"
 scp -q root.pub kernel1.pub kernel2.key kernel2.pub client.key client.grant worker.key worker.grant node.key node.grant \
   ops.key ops.grant pusherB.key pusherB.grant readerB.key readerB.grant rkB.key copyB.key vault2.key vaultB.key access.toml "root@$SERVER:$R/"
+scp -qr copy-keys "root@$SERVER:$R/"
 rsync -az --exclude test "$ROOT/sdks/typescript/" "root@$SERVER:$R/repo/sdks/typescript/"
 rsync -az "$ROOT/proto" "root@$SERVER:$R/repo/"
 scp -q "$ROOT/bench/cross-site-worker.ts" "root@$SERVER:$R/repo/bench/"
@@ -96,13 +102,13 @@ reader_flags() { # <site> <copy> <copy key> <writer's kernel.pub> <port>
 # Site A: p1, its pusher.
 start p1.log "$K" start $(writer_flags 1)
 port_up 17301 || { say "p1 did not start"; exit 1; }
-start pushA.log "$K" push --follow 127.0.0.1:17301 --key pusherA.key --to "$RELAY" --copy site.a --copy-key copyA.key --root root.pub
+start pushA.log "$K" push --follow 127.0.0.1:17301 --key pusherA.key --to "$RELAY" --copy site.a --copy-key copyA.key
 # Site B: its reader of p1's copy, then p2 with that reader as its control, p2's pusher.
 start_b rB "$R/kernable start $(reader_flags B site.a copyA.key kernel1.pub 17312)"
 port_up_b 17312 || { say "site B's reader did not start"; exit 1; }
 start_b p2 "$R/kernable start $(writer_flags 2) --control 127.0.0.1:17312 --node-key node.key"
 port_up_b 17302 || { say "p2 did not start"; exit 1; }
-start_b pushB "$R/kernable push --follow 127.0.0.1:17302 --key pusherB.key --to $RELAY --copy site.b --copy-key copyB.key --root root.pub"
+start_b pushB "$R/kernable push --follow 127.0.0.1:17302 --key pusherB.key --to $RELAY --copy site.b --copy-key copyB.key"
 # Site A: its reader of p2's copy.
 start rA.log "$K" start $(reader_flags A site.b copyB.key kernel2.pub 17311)
 port_up 17311 || { say "site A's reader did not start"; exit 1; }

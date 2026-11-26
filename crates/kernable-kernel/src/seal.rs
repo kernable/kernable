@@ -42,8 +42,6 @@ const NONCE: usize = 24;
 pub struct CopyKey {
     cipher: XChaCha20Poly1305,
     id: [u8; ID],
-    /// The key itself, for sealing it for a new reader.
-    raw: Zeroizing<[u8; 32]>,
 }
 
 impl CopyKey {
@@ -54,7 +52,6 @@ impl CopyKey {
         CopyKey {
             cipher: XChaCha20Poly1305::new(key.into()),
             id,
-            raw: Zeroizing::new(*key),
         }
     }
 
@@ -77,10 +74,6 @@ impl CopyKey {
             .map_err(|e| format!("{}: {e}", path.display()))?;
         std::io::Write::write_all(&mut file, format!("{}\n", hex::encode(*key)).as_bytes())?;
         Ok(())
-    }
-
-    pub(crate) fn bytes(&self) -> &[u8; 32] {
-        &self.raw
     }
 
     /// The key's ID, in hex.
@@ -300,99 +293,6 @@ fn open_records(key: &CopyKey, batch: &mut RecordBatch) -> Result<(), BoxError> 
     Ok(())
 }
 
-/// The copy key sealed for the reader whose Ed25519 key is `reader` (as X25519): a fresh
-/// key pair's public half, then the key under XChaCha20-Poly1305 keyed by the SHA-256 of the
-/// label, both public halves and the shared secret.
-pub(crate) fn seal_key_for(
-    reader: &ed25519_dalek::VerifyingKey,
-    copy: &str,
-    key: &[u8; 32],
-) -> Vec<u8> {
-    use curve25519_dalek::montgomery::MontgomeryPoint;
-    let mut ephemeral = Zeroizing::new([0u8; 32]);
-    getrandom::fill(ephemeral.as_mut()).expect("randomness");
-    let public = MontgomeryPoint::mul_base_clamped(*ephemeral);
-    let theirs = reader.to_montgomery();
-    let shared = theirs.mul_clamped(*ephemeral);
-    let cipher = key_cipher(copy, &public, &theirs, &shared);
-    let mut nonce = [0u8; NONCE];
-    getrandom::fill(&mut nonce).expect("randomness");
-    let sealed = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: key,
-                aad: copy.as_bytes(),
-            },
-        )
-        .expect("sealing does not fail");
-    let mut out = public.to_bytes().to_vec();
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&sealed);
-    out
-}
-
-/// Opened with the reader's own key.
-pub(crate) fn open_key(
-    reader: &ed25519_dalek::SigningKey,
-    copy: &str,
-    sealed: &[u8],
-) -> Result<Zeroizing<[u8; 32]>, BoxError> {
-    use curve25519_dalek::montgomery::MontgomeryPoint;
-    if sealed.len() < 32 + NONCE {
-        return Err("the sealed copy key is cut off".into());
-    }
-    let public = MontgomeryPoint(sealed[..32].try_into().expect("32 bytes"));
-    let ours = reader.verifying_key().to_montgomery();
-    let shared = public.mul_clamped(reader.to_scalar_bytes());
-    let cipher = key_cipher(copy, &public, &ours, &shared);
-    let plain = Zeroizing::new(
-        cipher
-            .decrypt(
-                XNonce::from_slice(&sealed[32..32 + NONCE]),
-                Payload {
-                    msg: &sealed[32 + NONCE..],
-                    aad: copy.as_bytes(),
-                },
-            )
-            .map_err(|_| "the copy key is not sealed for this key")?,
-    );
-    let mut key = Zeroizing::new([0u8; 32]);
-    key.copy_from_slice(plain.get(..32).ok_or("the copy key is too short")?);
-    Ok(key)
-}
-
-fn key_cipher(
-    copy: &str,
-    ephemeral: &curve25519_dalek::montgomery::MontgomeryPoint,
-    reader: &curve25519_dalek::montgomery::MontgomeryPoint,
-    shared: &curve25519_dalek::montgomery::MontgomeryPoint,
-) -> XChaCha20Poly1305 {
-    let mut h = Sha256::new();
-    h.update(b"kernable.v1.copy-key-for");
-    h.update(copy.as_bytes());
-    h.update(ephemeral.as_bytes());
-    h.update(reader.as_bytes());
-    h.update(shared.as_bytes());
-    let key = Zeroizing::new(<[u8; 32]>::from(h.finalize()));
-    XChaCha20Poly1305::new((&*key).into())
-}
-
-impl CopyKey {
-    /// Writes `key` to `path`, readable by its owner only; never overwrites one.
-    pub fn write(path: &Path, key: &[u8; 32]) -> Result<(), BoxError> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options
-            .open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        std::io::Write::write_all(&mut file, format!("{}\n", hex::encode(key)).as_bytes())?;
-        file.sync_all()?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,19 +352,6 @@ mod tests {
 
         open(&key, &mut msg, &mut Images::default()).unwrap();
         assert_eq!(msg, follow_response::Msg::Records(batch()));
-    }
-
-    #[test]
-    fn a_copy_key_sealed_for_a_reader_opens_with_its_key_only() {
-        let reader = kernable_core::signing::generate_key();
-        let other = kernable_core::signing::generate_key();
-        let sealed = seal_key_for(&reader.verifying_key(), "shop", &[9; 32]);
-        assert_eq!(*open_key(&reader, "shop", &sealed).unwrap(), [9; 32]);
-        assert!(open_key(&other, "shop", &sealed).is_err());
-        assert!(
-            open_key(&reader, "other", &sealed).is_err(),
-            "bound to its copy"
-        );
     }
 
     #[test]
