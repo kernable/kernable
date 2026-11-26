@@ -138,6 +138,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "With `--reader-copy`: the file of the key the copy is sealed with (`kernable relay key`), the pusher's `--copy-key`. The relay holds the records sealed and never this key.",
     ),
     (
+        "--become-writer",
+        "KERNABLE_BECOME_WRITER",
+        "",
+        "With `--reader-copy`: the key file of the pusher this kernel will have as the writer (`kernable push --key`). It catches up from the copy as a reader does, then becomes the copy's writer on the same history, once the relay takes that key as the copy's pusher: named there and active, and no other pusher connected (the old writer's stopped or revoked). Until then it keeps following and says why it waits. While it takes the copy's last records it holds the relay's push for that key, so the old pusher cannot come back meanwhile. It then serves as the writer; start its pusher (`kernable push` with that key, or `[push]` on a node) and it continues the copy where it stands. Needs `--readers on`, for that pusher.",
+    ),
+    (
         "--from-backup",
         "KERNABLE_FROM_BACKUP",
         "",
@@ -471,6 +477,9 @@ pub struct Replication {
     /// `--reader-max-lag-ms`: a reader that has not held everything its writer may tell for
     /// longer refuses queries and is not ready; 0: never.
     pub reader_max_lag_ms: u64,
+    /// `--become-writer`: the key file of the pusher this reader of a relay's copy takes the
+    /// copy over with, as its writer.
+    pub become_writer: Option<PathBuf>,
 }
 
 /// A backup a new reader starts from.
@@ -785,12 +794,28 @@ impl Config {
             reader: reader.is_some(),
             from_backup,
             reader_max_lag_ms: number("--reader-max-lag-ms")?,
+            become_writer: get("--become-writer").map(PathBuf::from),
         };
+        if replication.become_writer.is_some() {
+            let of_copy = replication
+                .follow
+                .as_ref()
+                .is_some_and(|f| replication.reader && !f.copy.is_empty());
+            if !of_copy {
+                return Err("--become-writer takes a relay's copy over: give --reader <relay> and --reader-copy <copy>".into());
+            }
+            if !replication.readers {
+                return Err("--become-writer: give --readers on too, for the pusher of the writer it becomes".into());
+            }
+        }
         if replication.reader {
             let wrong = [
                 (replication.sync, "--replication sync"),
                 (replication.backup, "--backup on"),
-                (replication.readers, "--readers on"),
+                (
+                    replication.readers && replication.become_writer.is_none(),
+                    "--readers on",
+                ),
             ];
             if let Some((_, flag)) = wrong.iter().find(|(set, _)| *set) {
                 return Err(format!(
@@ -1276,6 +1301,44 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn becoming_the_writer_takes_a_relays_copy_and_readers_for_its_pusher() {
+        let root = kernable_core::signing::key_id(
+            &ed25519_dalek::SigningKey::from_bytes(&[1; 32]).verifying_key(),
+        );
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "--root",
+                &root,
+                "--reader",
+                "https://relay.example:7400",
+                "--follow-key",
+                "f.key",
+                "--primary-kernel-key",
+                &root,
+                "--become-writer",
+                "pusher.key",
+            ];
+            args.extend_from_slice(extra);
+            Config::from_args(&args, |_| None).map_err(|e| e.to_string())
+        };
+        let copy = ["--reader-copy", "shop.eu", "--reader-copy-key", "copy.key"];
+        assert!(parse(&copy).unwrap_err().contains("--readers on"));
+        assert!(
+            parse(&["--readers", "on"])
+                .unwrap_err()
+                .contains("--reader-copy")
+        );
+        let config = parse(&[&copy[..], &["--readers", "on"]].concat()).unwrap();
+        assert_eq!(
+            config.replication.become_writer.as_deref(),
+            Some(std::path::Path::new("pusher.key"))
+        );
+        // Once it took the copy over, it runs as the writer.
+        let writer = crate::promoted(config);
+        assert!(!writer.replication.reader && writer.replication.become_writer.is_none());
+    }
 
     #[test]
     fn patterns_cover_types_and_domains() {

@@ -61,7 +61,7 @@ In CI, set `KERNABLE_CLOUD_TOKEN` to a team's [token](/cloud/teams#tokens-for-ci
 | `kernable cloud projects key <name> <partition> <key.pub\|ID> read\|push\|stop\|revoke\|activate` | `read`, `push`: adds the key in that role, active; `stop`: refused until `activate`; `revoke`: refused for good. The relay applies it within seconds. Developers and up. |
 | `kernable cloud projects unlink <name> <partition>` | Ends the link at once; the copy is kept 30 days. Admins and owners. |
 | `kernable cloud projects alerts <name> [set <email>...]` | Where the project's [alerts](/cloud/monitoring#alerts) go besides the team's owners and admins (at most 10); `set` without addresses leaves only them. Admins and owners. |
-| `kernable cloud projects node-token <name> <instance>` | A one-time join token (24 h) for a [managed node](/cloud/link-kernels#_7-managed-nodes-optional). Admins and owners. |
+| `kernable cloud projects node-token <name> <instance>` | A one-time join token (24 h) for a [managed node](/cloud/link-kernels#_8-managed-nodes-optional). Admins and owners. |
 
 ## The audit log
 

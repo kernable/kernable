@@ -130,7 +130,30 @@ A stopped or revoked reader still holds the copy key and what it read. If the co
 leaked, make a new one, give it to the pusher and the remaining readers, and start the copy anew
 under it.
 
-## 7. Managed nodes (optional)
+## 7. A writer from its copy
+
+If the writer's machine is lost, or the writer moves to another site, a new kernel takes the copy
+over: it catches up from the copy, then becomes the writer on the same history, and its pusher
+continues the copy where it stands. On the new machine, its own keys; then tell kernable Cloud
+which keys it uses:
+
+```sh
+kernable cloud projects key shop eu reader-c.pub read          # it follows the copy first
+kernable start --root root.pub --readers on \
+  --reader https://relay-eu.kernable.cloud:7400 --reader-copy acme.shop.eu --reader-copy-key copy.key \
+  --follow-key reader-c.key --primary-kernel-key kernel.pub \
+  --become-writer pusher-c.key \
+  --kernel-key kernel-c.key --vault-key vault-c.key
+kernable cloud projects key shop eu pusher.pub revoke          # the old writer's pusher (or stop)
+kernable cloud projects link shop eu --pusher pusher-c.pub     # now the new one's
+```
+
+The new kernel waits, and says why, until the relay takes its pusher key; then it becomes the
+writer. Start its pusher with `pusher-c.key` (`[push]` on its node). Your readers need the new
+writer's kernel key too (`--primary-kernel-key kernel-c.pub` beside the old one) before they take
+what it writes.
+
+## 8. Managed nodes (optional)
 
 A node can be linked to kernable Cloud, which then sets its role, whom it follows, the copy it
 pushes to, its kernel version and a reader's maximum lag, and nothing else: never keys, grants,

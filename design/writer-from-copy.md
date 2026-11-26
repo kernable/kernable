@@ -68,6 +68,12 @@ until it connects again, learns that it is revoked, and turns read-only.
 What the old writer had not pushed yet is not in the copy, so it is lost with that machine:
 usually the last seconds.
 
+**Built** (part 1b): `kernable start --reader <relay> --reader-copy <copy> --become-writer
+<pusher.key> --readers on`. It catches up as a reader, waits (said once per reason) until the
+relay takes that pusher key, then holds the copy's push while it takes the last records and
+becomes the writer; its pusher continues the copy. Until readers trust the new writer by the
+project key (part 1d), they are given its kernel key beside the old one.
+
 ## One history per partition
 
 A partition has one copy at a relay, one log; a writer started from it continues that log, it

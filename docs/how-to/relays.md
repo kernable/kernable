@@ -157,3 +157,31 @@ kernable start --root root.pub \
 ```
 
 Everything else is as for [readers](./readers).
+
+## 5. A writer from its copy
+
+The copy is enough to start a writer again, after its machine is lost or at a new site: a new
+kernel catches up from the copy as a reader does, then becomes the writer on the same history,
+and its pusher continues the copy where it stands. Its own keys are made on its machine; it needs
+the copy key and the root's grants as any writer.
+
+```sh
+kernable keys new kernel-c && kernable keys new reader-c && kernable keys new pusher-c
+kernable grant root.key reader-c.pub 'read=*' && kernable grant root.key pusher-c.pub 'read=*'
+kernable start --root root.pub --readers on \
+  --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
+  --follow-key reader-c.key --primary-kernel-key kernel-a.pub \
+  --become-writer pusher-c.key \
+  --kernel-key kernel-c.key --vault-key vault-c.key --listen 10.2.0.5:7233
+```
+
+The relay must let `reader-c` read the copy. The kernel catches up, then waits, and says why,
+until the relay takes `pusher-c` as the copy's pusher: named there, active, and no other pusher
+connected. So first stop or revoke the old writer's pusher key in the access list (a stopped one
+has pushed what it had; a revoked one, on a machine that is lost, may have held the last records
+it never pushed), then name `pusher-c`'s. The kernel then holds the copy's push while it takes
+the last records, so the old pusher cannot come back meanwhile, and serves as the writer. Start
+its pusher with `pusher-c.key`: it continues the copy, and the copy's readers follow on.
+
+Readers check every record against the writer's kernel key: until they know the new writer's
+(`--primary-kernel-key kernel-c.pub` beside the old one), they take nothing it wrote.

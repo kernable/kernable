@@ -8,11 +8,12 @@ EU, apart from the relays. The backups are sealed like the copy: kernable cannot
 
 ## What is not
 
-**Your writer.** Its store is in your infrastructure, and so are its backups: a copy is not a
-way to get a writer back, and a reader is never promoted to a writer. Back up your writer with
-the kernel's own backup follower:
-[backups](/how-to/backup), and keep a
-[standby](/how-to/standby) beside it.
+**Your writer.** Its store is in your infrastructure, and so are its backups: back it up with
+the kernel's own backup follower ([backups](/how-to/backup)) and keep a
+[standby](/how-to/standby) beside it. If its machine is lost all the same, the copy brings it
+back: a new kernel takes the copy over as the writer
+([a writer from its copy](/cloud/link-kernels#_7-a-writer-from-its-copy)). Only what the old
+writer had not pushed yet, usually the last seconds, is lost with it.
 
 ## When kernable restores
 

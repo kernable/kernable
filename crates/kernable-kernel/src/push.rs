@@ -112,6 +112,58 @@ pub async fn run(pusher: Pusher) -> Result<(), BoxError> {
     }
 }
 
+/// The relay's push stream for `copy`, held with `key` and nothing sent on it: while it is open
+/// no other pusher can push the copy. A kernel that becomes the writer from the copy
+/// (`--become-writer`) holds it while it takes the copy's last records, so the old writer's
+/// pusher cannot slip in meanwhile.
+pub(crate) struct Hold {
+    _to_relay: mpsc::Sender<PushRequest>,
+    _from_relay: tonic::Streaming<kernable_core::proto::PushResponse>,
+}
+
+/// Opens [`Hold`] at `relay`: the relay must take `key` as the copy's pusher (named, active) and
+/// have no other pusher connected; otherwise its answer says why not.
+pub(crate) async fn hold(relay: &str, copy: &str, key: &SigningKey) -> Result<Hold, String> {
+    let held = async {
+        let mut client = RelayServiceClient::new(standby::connect(relay).await?);
+        let (to_relay, rx) = mpsc::channel(4);
+        let say = |msg| PushRequest { msg: Some(msg) };
+        to_relay
+            .send(say(push_request::Msg::Hello(PushHello {
+                key_id: signing::key_id(&key.verifying_key()),
+                copy: copy.to_owned(),
+                protocol: kernable_core::PROTOCOL,
+            })))
+            .await?;
+        let mut request = tonic::Request::new(ReceiverStream::new(rx));
+        crate::relay::sign_stream(&mut request, key, "push", copy)?;
+        let mut from_relay = client.push(request).await?.into_inner();
+        let Some(push_response::Msg::Challenge(challenge)) =
+            from_relay.message().await?.and_then(|m| m.msg)
+        else {
+            return Err::<Hold, BoxError>("the relay sent no challenge".into());
+        };
+        let proof = signing::sign(key, &signing::challenge_message(&challenge.nonce));
+        to_relay
+            .send(say(push_request::Msg::ChallengeResponse(
+                ChallengeResponse { sig: proof.sig },
+            )))
+            .await?;
+        match from_relay.message().await?.and_then(|m| m.msg) {
+            Some(push_response::Msg::Start(_)) => Ok(Hold {
+                _to_relay: to_relay,
+                _from_relay: from_relay,
+            }),
+            _ => Err("the relay did not start the push".into()),
+        }
+    };
+    held.await
+        .map_err(|e| match e.downcast_ref::<tonic::Status>() {
+            Some(status) => status.message().to_owned(),
+            None => e.to_string(),
+        })
+}
+
 async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
     let grant = std::fs::read_to_string(&pusher.grant_file)
         .map_err(|e| format!("the pusher's grant {}: {e}", pusher.grant_file.display()))?

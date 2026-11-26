@@ -1281,7 +1281,11 @@ async fn stopped_and_revoked_keys_are_refused_on_the_streams_they_hold() {
             (id(&key(71)), "read", reader),
             (id(&key(72)), "read", other),
         ];
-        std::fs::write(dir.0.join("access.toml"), access_toml(&[("shop.eu", keys)])).unwrap()
+        std::fs::write(
+            dir.0.join("access.toml"),
+            access_toml(&[("states.eu", keys)]),
+        )
+        .unwrap()
     };
     access("active", "active", "active");
     let listen = format!("unix:{}", dir.0.join("relay.sock").display());
@@ -1302,9 +1306,9 @@ async fn stopped_and_revoked_keys_are_refused_on_the_streams_they_hold() {
     for i in 0..5 {
         submit(&writer_config.listen, place(i)).await.unwrap();
     }
-    let _pusher = start_pusher(&dir.0, &writer_config.listen, &listen, "shop.eu");
-    let reader = start_reader(&reader_config(&dir.0, "reader", 21, &listen, "shop.eu")).await;
-    let other = start_reader(&reader_config(&dir.0, "other", 22, &listen, "shop.eu")).await;
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &listen, "states.eu");
+    let reader = start_reader(&reader_config(&dir.0, "reader", 21, &listen, "states.eu")).await;
+    let other = start_reader(&reader_config(&dir.0, "other", 22, &listen, "states.eu")).await;
     let at = held(&writer);
     until_async("both readers hold it", async || {
         held(&reader) >= at && held(&other) >= at
@@ -1315,7 +1319,7 @@ async fn stopped_and_revoked_keys_are_refused_on_the_streams_they_hold() {
     access("stopped", "active", "active");
     let said = |what: &str| log.text().lines().any(|l| l.contains(what));
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while !said("is stopped for shop.eu") {
+    while !said("is stopped for states.eu") {
         assert!(
             std::time::Instant::now() < deadline,
             "the stopped reader is refused:\n{}",
@@ -1323,15 +1327,23 @@ async fn stopped_and_revoked_keys_are_refused_on_the_streams_they_hold() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    // What was on its way before the stream ended may still arrive: then nothing more.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let before = held(&reader);
     submit(&writer_config.listen, place(10)).await.unwrap();
     let at = held(&writer);
     until_async("the active reader goes on", async || held(&other) >= at).await;
-    assert!(held(&reader) < at, "the stopped reader gets nothing more");
+    assert_eq!(
+        held(&reader),
+        before,
+        "the stopped reader gets nothing more:\n{}",
+        log.text()
+    );
 
     // The pusher revoked: its push ends, and nothing new reaches the copy.
     access("stopped", "active", "revoked");
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while !said("is revoked for shop.eu") {
+    while !said("is revoked for states.eu") {
         assert!(
             std::time::Instant::now() < deadline,
             "the revoked pusher is refused:\n{}",
@@ -1345,4 +1357,122 @@ async fn stopped_and_revoked_keys_are_refused_on_the_streams_they_hold() {
         held(&other) < held(&writer),
         "a revoked pusher pushes nothing more"
     );
+}
+
+/// A writer from its copy (`--become-writer`): a new kernel catches up from the relay's copy,
+/// waits while the relay takes another pusher, and once the old pusher is stopped and its own
+/// named, becomes the writer on the same history; its pusher continues the copy where it stands,
+/// and a reader of the copy gets the new writer's records.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher() {
+    let log = captured_log();
+    let dir = Dir::new("relays-become");
+    // The old writer's pusher 90; readers 71 (a reader) and 75 (the new writer, following).
+    let access = |old: &str, new: Option<&str>| {
+        let mut keys = vec![
+            (id(&key(90)), "push", old),
+            (id(&key(71)), "read", "active"),
+            (id(&key(75)), "read", "active"),
+        ];
+        if let Some(state) = new {
+            keys.push((id(&key(91)), "push", state));
+        }
+        std::fs::write(
+            dir.0.join("access.toml"),
+            access_toml(&[("become.eu", keys)]),
+        )
+        .unwrap()
+    };
+    access("active", None);
+    let listen = format!("unix:{}", dir.0.join("relay.sock").display());
+    let relay_config = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        readers: Vec::new(),
+        pushers: Vec::new(),
+        access: Some(dir.0.join("access.toml")),
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(relay_config).await.unwrap() });
+    wait_for(&listen).await;
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    let worker = start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..5 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let old_pusher = start_pusher(&dir.0, &writer_config.listen, &listen, "become.eu");
+    let old_at = held(&writer);
+
+    // The new writer: a reader of the copy with its own kernel key (25) and pusher key (91).
+    let mut becoming = reader_config(&dir.0, "becoming", 25, &listen, "become.eu");
+    becoming.replication.readers = true;
+    becoming.replication.become_writer = Some(reading_key(&dir.0, "pusher-new", 91));
+    let taking = tokio::spawn(standby::run(becoming.clone()));
+    let said = |what: &str| log.text().lines().any(|l| l.contains(what));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !said("not the writer yet") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "it waits for the relay:\n{}",
+            log.text()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        !taking.is_finished(),
+        "not the writer while the relay takes another pusher"
+    );
+
+    // The old writer's pusher stopped, the new one's named: it takes the copy over.
+    access("stopped", Some("active"));
+    tokio::time::timeout(Duration::from_secs(30), taking)
+        .await
+        .expect("it becomes the writer")
+        .unwrap()
+        .unwrap();
+    old_pusher.abort();
+    drop(worker);
+    let new_writer = open(&kernable_kernel::promoted(becoming.clone())).await;
+    assert_eq!(held(&new_writer), old_at, "the same history");
+    assert_eq!(new_writer.role()["role"], "writer", "{}", new_writer.role());
+    grant_defaults(&new_writer);
+    start_worker(becoming.listen.clone(), TestWorker::honest()).await;
+    let pusher_path = dir.0.join("pusher-new.key");
+    let pusher = push::Pusher {
+        follow: vec![becoming.listen.clone()],
+        key: key(91),
+        grant_file: pusher_path.with_extension("grant"),
+        relay: listen.clone(),
+        copy: "become.eu".into(),
+        copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
+        start_anew: None,
+    };
+    tokio::spawn(async move { push::run(pusher).await.unwrap() });
+    for i in 20..23 {
+        submit(&becoming.listen, place(i)).await.unwrap();
+    }
+    let new_at = held(&new_writer);
+    assert!(new_at > old_at);
+
+    // A reader of the copy that knows both writers' kernel keys holds the new writer's records:
+    // the copy went on, it did not begin anew.
+    let mut reading = reader_config(&dir.0, "reading", 21, &listen, "become.eu");
+    reading
+        .replication
+        .follow
+        .as_mut()
+        .unwrap()
+        .primary_kernel_keys = vec![id(&key(3)), id(&key(25))];
+    let reader = start_reader(&reading).await;
+    until_async("the reader holds the new writer's records", async || {
+        held(&reader) >= new_at
+    })
+    .await;
+    let anew = log
+        .text()
+        .lines()
+        .any(|l| l.contains("begins anew") && l.contains("become.eu"));
+    assert!(!anew, "the copy continued: {}", log.text());
 }

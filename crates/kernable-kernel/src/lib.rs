@@ -1627,6 +1627,10 @@ pub const PROMOTED_TAKE_OVER_MS: u64 = 2_000;
 /// `config` for opening the stores as the primary once `standby::run` returned (promoted).
 pub fn promoted(mut config: config::Config) -> config::Config {
     config.take_over_ms = config.take_over_ms.max(PROMOTED_TAKE_OVER_MS);
+    // A reader that took its copy over (`--become-writer`) is the writer from here.
+    if config.replication.become_writer.take().is_some() {
+        config.replication.reader = false;
+    }
     config
 }
 

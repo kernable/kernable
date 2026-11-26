@@ -142,6 +142,10 @@ struct Standby {
     current: Mutex<String>,
     /// Snapshots from the primary that wait for their event, and erasures seen per tenant.
     warm: Mutex<Warmed>,
+    /// `--become-writer`: the pusher key a reader of a relay's copy takes the copy over with.
+    become_writer: Option<SigningKey>,
+    /// Such a reader holds everything the copy held when it last looked.
+    held_all: std::sync::atomic::AtomicBool,
 }
 
 /// Snapshots the primary sent before the standby held their event, each with how many erasures
@@ -425,8 +429,19 @@ impl Standby {
         *current = addresses[(at + 1) % addresses.len()].clone();
     }
 
-    /// A reader caught up: the kernel opens its stores next.
+    /// A reader caught up: the kernel opens its stores next. One that becomes the writer
+    /// (`--become-writer`) notes it, and takes the copy over once the relay lets it.
     fn caught_up(&self) {
+        if self.become_writer.is_some() {
+            if !self.held_all.swap(true, SeqCst) {
+                tracing::info!(
+                    record = self.applied.load(SeqCst),
+                    copy = %self.follow.copy,
+                    "caught up with the copy: this kernel becomes its writer once the relay takes its pusher key"
+                );
+            }
+            return;
+        }
         if let Some(done) = self
             .promote
             .lock()
@@ -529,6 +544,14 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         }
         Stores::open_on(&config, store)
     })?;
+    let become_writer = match &config.replication.become_writer {
+        Some(path) => Some(
+            config
+                .read_signing_key(path)
+                .map_err(|e| format!("--become-writer {}: {e}", path.display()))?,
+        ),
+        None => None,
+    };
     let (promoted, promoted_rx) = oneshot::channel();
     let reader = config.replication.reader;
     let first = crate::reader::addresses(&follow.primary)
@@ -545,6 +568,8 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         reader,
         current: Mutex::new(first),
         warm: Mutex::default(),
+        become_writer,
+        held_all: std::sync::atomic::AtomicBool::new(false),
         config,
     });
     // Following, it is no primary that handed over. Its note that it is in sync stays
@@ -609,8 +634,51 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         // within a moment, and a pair's writes wait for its standby meanwhile.
         let mut delay = Duration::from_millis(100);
         let mut last_refusal = None;
+        let mut last_wait: Option<String> = None;
         loop {
             let followed = follow_once(&standby, &key, &grant, &mut tried_backup).await;
+            // Caught up, a reader that becomes the writer asks the relay for the copy's push.
+            if let Some(pusher) = &standby.become_writer
+                && followed.is_ok()
+                && standby.held_all.swap(false, SeqCst)
+            {
+                match crate::push::hold(&standby.current(), &standby.follow.copy, pusher).await {
+                    Ok(hold) => {
+                        // No pusher can add to the copy now: its last records, then the writer.
+                        let last = follow_once(&standby, &key, &grant, &mut tried_backup).await;
+                        if last.is_ok() && standby.held_all.load(SeqCst) {
+                            tracing::warn!(
+                                record = standby.applied.load(SeqCst),
+                                copy = %standby.follow.copy,
+                                "took the copy over: this kernel is its writer now; start its pusher with the same key"
+                            );
+                            let promote = standby
+                                .promote
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .take();
+                            if let Some(promote) = promote {
+                                let _ = promote.send(());
+                            }
+                            // Held until the kernel opens as the writer.
+                            let _hold = hold;
+                            return std::future::pending().await;
+                        }
+                    }
+                    // Said once per reason, as an error: it waits for a person.
+                    Err(why) if last_wait.as_deref() != Some(why.as_str()) => {
+                        tracing::error!(
+                            copy = %standby.follow.copy,
+                            relay = %standby.current(),
+                            "not the writer yet: the relay does not take this kernel's pusher key ({why}); name it as the copy's pusher once the old one is stopped or revoked (asking again every 5 s)"
+                        );
+                        last_wait = Some(why);
+                    }
+                    Err(_) => {}
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
             // A reader that caught up is done here: its kernel opens the stores next.
             if standby.reader
                 && standby
