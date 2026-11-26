@@ -128,6 +128,17 @@ async fn start_relay(dir: &Path) -> String {
 
 /// A pusher of the writer at `writer` to `copy` at `relay`, with key 90.
 fn start_pusher(dir: &Path, writer: &str, relay: &str, copy: &str) -> JoinHandle<()> {
+    start_pusher_anew(dir, writer, relay, copy, None)
+}
+
+/// The same, with `--start-anew`.
+fn start_pusher_anew(
+    dir: &Path,
+    writer: &str,
+    relay: &str,
+    copy: &str,
+    start_anew: Option<u64>,
+) -> JoinHandle<()> {
     let path = reading_key(dir, "pusher", 90);
     let pusher = push::Pusher {
         follow: vec![writer.to_owned()],
@@ -137,6 +148,7 @@ fn start_pusher(dir: &Path, writer: &str, relay: &str, copy: &str) -> JoinHandle
         copy: copy.to_owned(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(dir)).unwrap(),
         trust: push::Trust::load(vec![id(&root())], Some(dir.join("copy.revoked"))).unwrap(),
+        start_anew,
     };
     tokio::spawn(async move {
         push::run(pusher).await.unwrap();
@@ -269,6 +281,7 @@ async fn a_relay_serves_only_granted_readers_of_a_copy_it_holds() {
         copy: "shop".into(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
         trust: push::Trust::load(Vec::new(), None).unwrap(),
+        start_anew: None,
     };
     let pushing = tokio::spawn(push::run(stranger));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -287,7 +300,7 @@ async fn config_with_writer(dir: &Path) -> Config {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_writer_whose_log_no_longer_continues_the_copy_empties_it() {
+async fn a_writer_whose_log_no_longer_continues_the_copy_empties_it_only_when_told() {
     let dir = Dir::new("relays-anew");
     let relay = start_relay(&dir.0).await;
 
@@ -311,8 +324,10 @@ async fn a_writer_whose_log_no_longer_continues_the_copy_empties_it() {
     .await;
     pusher.abort();
 
-    // Another writer (restored from elsewhere, say) with fewer, other records: the copy begins
-    // anew from its first record.
+    let first_at = at;
+
+    // Another writer (restored from elsewhere, or started by mistake) with fewer, other
+    // records: the copy keeps its history, and the pusher pushes nothing.
     let second = Dir::new("relays-anew-second");
     let second_config = config(&second.0, "writer", 3);
     let writer_2 = open(&second_config).await;
@@ -321,7 +336,49 @@ async fn a_writer_whose_log_no_longer_continues_the_copy_empties_it() {
     for i in 100..103 {
         submit(&second_config.listen, place(i)).await.unwrap();
     }
-    let _pusher = start_pusher(&dir.0, &second_config.listen, &relay, "shop");
+    let refused = start_pusher(&dir.0, &second_config.listen, &relay, "shop");
+    let status = dir.0.join("copies").join("shop").join("status.json");
+    let head = || -> Option<u64> {
+        let s: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&status).ok()?).ok()?;
+        s["head"].as_u64()
+    };
+    until("the relay says where the copy stands", || {
+        head().is_some_and(|h| h > 0)
+    })
+    .await;
+    let copy_at = head().unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let kept = reader_config(&dir.0, "kept", 23, &relay, "shop");
+    let kept_reader = start_reader(&kept).await;
+    until_async(
+        "a new reader still gets the first writer's records",
+        async || held(&kept_reader) >= first_at,
+    )
+    .await;
+    // A position other than the copy's empties nothing either.
+    refused.abort();
+    let wrong = start_pusher_anew(
+        &dir.0,
+        &second_config.listen,
+        &relay,
+        "shop",
+        Some(copy_at + 1),
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    drop(kept_reader);
+    let still = reader_config(&dir.0, "still", 24, &relay, "shop");
+    let still_reader = start_reader(&still).await;
+    until_async(
+        "a reader started after it still gets the first writer's records",
+        async || held(&still_reader) >= first_at,
+    )
+    .await;
+    wrong.abort();
+    drop(still_reader);
+
+    // Told with the copy's position: the copy begins anew from the second writer's first record.
+    let _pusher = start_pusher_anew(&dir.0, &second_config.listen, &relay, "shop", Some(copy_at));
     let new = reader_config(&dir.0, "new", 22, &relay, "shop");
     let new_reader = start_reader(&new).await;
     let at = held(&writer_2);

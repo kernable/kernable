@@ -5,10 +5,13 @@
 //! `--readers on`), so it gets every record the writer may tell, and opens a connection of its
 //! own to the relay (`RelayService.Push`): the writer takes no connection from outside its
 //! network. It starts where the relay's copy stands; when the writer no longer keeps the records
-//! after that, the writer sends an image and the copy begins anew from it; when the writer's log
-//! no longer continues the copy (restored from an older backup, say), the pusher empties the copy
-//! and the writer's records go there from the first. The relay's acknowledgements go on to the
-//! writer, which keeps its records until the copy holds them, as it does for a slow reader.
+//! after that, the writer sends an image and the copy begins anew from it. When the writer's log
+//! no longer continues the copy (restored from an older backup, or another writer started by
+//! mistake), the copy keeps its history: the pusher refuses to push, says so as an error, and
+//! tries again every minute. Only `--start-anew <position>`, the copy's position as the pusher
+//! reported it, lets it empty the copy so the writer's records go there from the first. The
+//! relay's acknowledgements go on to the writer, which keeps its records until the copy holds
+//! them, as it does for a slow reader.
 
 use std::{
     path::PathBuf,
@@ -49,7 +52,33 @@ pub struct Pusher {
     /// Who may have the copy key: readers whose grants these roots signed (or a delegate of
     /// one, the customer's enrol key) and that are not revoked. Empty: nobody asks for it.
     pub trust: Trust,
+    /// `--start-anew <position>`: the copy may be emptied when the writer's log no longer
+    /// continues it, but only while it stands at this position (as the refusal named it).
+    pub start_anew: Option<u64>,
 }
+
+/// The writer's log no longer continues the copy, and the copy keeps its history.
+#[derive(Debug)]
+struct Diverged {
+    copy: String,
+    at: u64,
+    why: String,
+}
+
+impl std::fmt::Display for Diverged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the writer's log no longer continues the copy {} at record {} ({}): the copy keeps its history and nothing is pushed. If this writer is meant to replace it (restored from an older backup, say), start the pusher once with --start-anew {} to empty the copy; its readers start over",
+            self.copy, self.at, self.why, self.at
+        )
+    }
+}
+
+impl std::error::Error for Diverged {}
+
+/// How long a pusher waits before it asks again after a refusal to start the copy anew.
+const DIVERGED_DELAY: Duration = Duration::from_secs(60);
 
 /// The roots a pusher trusts, and the keys the writer revoked, as the pusher saw them pass
 /// (kept in a file, so a pusher started again still knows them).
@@ -173,6 +202,11 @@ pub async fn run(pusher: Pusher) -> Result<(), BoxError> {
         *current.lock().unwrap_or_else(PoisonError::into_inner) = writer.clone();
         match push_once(&pusher, writer).await {
             Ok(()) => delay = Duration::from_millis(200),
+            // Nothing changes by itself: said as an error, asked again only now and then.
+            Err(e) if e.downcast_ref::<Diverged>().is_some() => {
+                tracing::error!(%writer, relay = %pusher.relay, error = %e, "not pushing");
+                tokio::time::sleep(DIVERGED_DELAY).await;
+            }
             Err(e) => {
                 tracing::warn!(%writer, relay = %pusher.relay, error = %e, "pushing failed; trying again in {delay:?}");
                 at += 1;
@@ -243,8 +277,16 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
         FollowMode::Image => {
             tracing::info!(%writer, copy = %pusher.copy, "the writer sends an image: the copy begins anew from it");
         }
+        FollowMode::Diverged if start.seq > 0 && pusher.start_anew != Some(start.seq) => {
+            return Err(Diverged {
+                copy: pusher.copy.clone(),
+                at: start.seq,
+                why: begun.message.clone(),
+            }
+            .into());
+        }
         FollowMode::Diverged if start.seq > 0 => {
-            tracing::warn!(%writer, copy = %pusher.copy, message = %begun.message, "the writer's log no longer continues the copy: it begins anew, empty");
+            tracing::warn!(%writer, copy = %pusher.copy, at = start.seq, message = %begun.message, "--start-anew: the writer's log no longer continues the copy; it begins anew, empty");
             let mut empty = follow_response::Msg::ImageEnd(ImageEnd {
                 seq: 0,
                 hash: ZERO.to_vec(),

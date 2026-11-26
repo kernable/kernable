@@ -136,7 +136,7 @@ Keys and trust:
                                           copy's readers open it (--reader-copy-key). The relay
                                           never holds it: it sees records' positions, hashes and
                                           sizes, nothing else.
-  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--root <root.pub>]...
+  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--root <root.pub>]... [--start-anew <position>]
                                           Follows the writer at <addr> (started with --readers on;
                                           both kernels of a pair, comma-separated) as a reader and
                                           sends every record, sealed with the copy key, to the copy
@@ -152,8 +152,12 @@ Keys and trust:
                                           the reader's own key if a root (or the root's enrol key,
                                           granted grant=read) granted the reader read and nothing
                                           involved is revoked (it notes revocations as they pass,
-                                          in <copy-key>.revoked). Connections use
-                                          KERNABLE_TLS_*, as the SDKs do.
+                                          in <copy-key>.revoked). When the writer's log no longer
+                                          continues the copy, it pushes nothing and says so (the
+                                          copy keeps its history); --start-anew with the copy's
+                                          position it named empties the copy so it begins anew
+                                          from the writer. Connections use KERNABLE_TLS_*, as the
+                                          SDKs do.
   kernable partitions apply <addr> <key> <map.json>
                                           Applies a partition map on the control partition at
                                           <addr>: {'epoch': 2, 'partitions': {'p1': ['host:7233'],
@@ -1693,6 +1697,7 @@ async fn run_push(flags: &[&str]) -> ExitCode {
                 "--copy",
                 "--copy-key",
                 "--root",
+                "--start-anew",
             ],
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
@@ -1732,6 +1737,12 @@ async fn run_push(flags: &[&str]) -> ExitCode {
                 Some(Path::new(need("--copy-key")?).with_extension("revoked")),
             )
             .map_err(boxed)?,
+            start_anew: one("--start-anew")
+                .map(|v| {
+                    v.parse::<u64>()
+                        .map_err(|_| format!("--start-anew {v}: the copy's position, a number"))
+                })
+                .transpose()?,
         })
     })();
     let pusher = match parsed {

@@ -32,6 +32,7 @@
 //! copy-key = "copy.key"
 //! root = ["root.pub"]                        # optional: new readers may ask for the copy key
 //! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
+//! start-anew = 1234                          # only after a refusal: the copy's position it named
 //! ```
 //!
 //! The customer's services are built and run with Podman, one `[[service]]` each:
@@ -388,6 +389,9 @@ struct PushSection {
     /// Roots whose (or whose enrol key's) grants let a new reader have the copy key.
     #[serde(default)]
     root: Vec<String>,
+    /// `--start-anew`: the copy's position, as the pusher's refusal named it, when the writer's
+    /// log no longer continues the copy and it may begin anew (nothing else empties it).
+    start_anew: Option<u64>,
     cpus: Option<String>,
     memory: Option<String>,
     #[serde(default)]
@@ -427,6 +431,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
                 copy_key: "copy.key".into(),
                 follow: None,
                 root: Vec::new(),
+                start_anew: None,
                 cpus: None,
                 memory: None,
                 env: BTreeMap::new(),
@@ -764,6 +769,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         ];
         for root in p.root {
             args.extend(["--root".into(), root]);
+        }
+        if let Some(at) = p.start_anew {
+            args.extend(["--start-anew".into(), at.to_string()]);
         }
         specs.push(kernable("push", args, p.env, &p.cpus, &p.memory));
     }
@@ -2585,6 +2593,16 @@ segment-seconds = 2
                 "--copy-key",
                 "copy.key"
             ]
+        );
+        // The copy begins anew only with the position the pusher's refusal named.
+        let anew = format!("{text}start-anew = 1234\n");
+        let told = plan(&anew, Path::new("/srv/shop"), Path::new("/bin/kernable"))
+            .unwrap()
+            .children;
+        assert!(
+            told[2]
+                .args
+                .ends_with(&["--start-anew".into(), "1234".into()])
         );
         // A service may not take its name.
         let named = format!("{text}\n[[service]]\nname = \"push\"\nimage = \"x\"\n");

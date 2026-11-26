@@ -996,6 +996,7 @@ async fn partitions_ask_each_other_through_a_relay() {
         copy: "p2.copy".into(),
         copy_key: std::sync::Arc::new(CopyKey::new(&[44; 32])),
         trust: push::Trust::load(vec![id(&root())], Some(dir.join("copy.revoked"))).unwrap(),
+        start_anew: None,
     };
     tokio::spawn(async move { push::run(pusher).await.unwrap() });
 

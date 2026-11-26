@@ -25,10 +25,13 @@ one. One relay holds the copies of several writers, one directory each.
 ## How it works
 
 The copy starts where the writer's record log starts. If the writer no longer keeps the records
-a copy needs (it pruned them), it sends an image and the copy begins anew from it; if the
-writer's log no longer continues the copy (the writer was restored from an older backup, say),
-the pusher empties the copy and it fills again from the writer's first record. A reader whose
-copy no longer continues the relay's starts anew, as from a writer.
+a copy needs (it pruned them), it sends an image and the copy begins anew from it. If the
+writer's log no longer continues the copy (the writer was restored from an older backup, or
+another writer was started by mistake), the copy keeps its history: the pusher pushes nothing
+and says so as an error, with the copy's position, every minute. Only when you start the pusher
+with `--start-anew <position>` (the position it named; `start-anew` under `[push]` in a node's
+`project.toml`) does it empty the copy, which then fills again from the writer's first record. A
+reader whose copy no longer continues the relay's starts anew, as from a writer.
 
 The writer keeps its records until the copy holds them, as for a slow reader, a million records
 at most. A reader of a relay knows how far the writer is (the pusher passes it on), so its lag

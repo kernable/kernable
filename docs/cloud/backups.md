@@ -27,5 +27,8 @@ reader follow the result.
 ## If your writer was restored
 
 If you restored your writer from an older backup, its log no longer continues the copy. The
-pusher notices, empties the copy and fills it again from the writer's first record. Your readers
-start anew from it, as from a writer.
+pusher notices and pushes nothing: the copy keeps its history, so a writer started by mistake
+cannot erase it. The pusher's log says so as an error, with the copy's position. If the restored
+writer is meant to replace the copy, start the pusher once with `--start-anew <position>` (in a
+node's `project.toml`, `start-anew = <position>` under `[push]`): it empties the copy and fills it
+again from the writer's first record. Your readers start anew from it, as from a writer.

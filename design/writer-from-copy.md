@@ -66,9 +66,12 @@ usually the last seconds.
 ## One history per partition
 
 A partition has one copy at a relay, one log; a writer started from it continues that log, it
-never starts one of its own. The relay refuses a pusher whose log does not continue the copy
-(today the pusher empties the copy and fills it from its own log: with a takeover, a wrongly
-started writer would erase the history). Starting a copy anew is an explicit action of the team.
+never starts one of its own. A pusher whose writer's log does not continue the copy pushes
+nothing and says so as an error, with the copy's position (before, it emptied the copy and filled
+it from its own log: with a takeover, a wrongly started writer would have erased the history).
+Starting a copy anew is an explicit action: `kernable push --start-anew <position>` (`start-anew`
+under `[push]` on a node), only while the copy stands at that position. **Built** (part 1a); the
+relay's own check, by the pusher key's state, comes with the states (1c).
 
 ## Readers trust a new writer by the project key
 
