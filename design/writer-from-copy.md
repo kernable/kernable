@@ -18,7 +18,7 @@ starts from a repository that exists elsewhere.
   (`--copy-key`, `--reader-copy-key`).
 - **There is no other way to a copy key.** The pusher no longer hands the copy key to new readers
   (`kernable push --root` and the node config's `root =` go away), and partitions no longer get
-  each other's copy keys from a pusher (the hand-over of P58): a partition that calls another
+  each other's copy keys from a pusher (as they did through a relay before): a partition that calls another
   through a relay is given that partition's copy key as a file too.
 
 ## Who may push and read: metadata, not keys
