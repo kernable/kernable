@@ -63,12 +63,25 @@ until it connects again, learns that it is revoked, and turns read-only.
 What the old writer had not pushed yet is not in the copy, so it is lost with that machine:
 usually the last seconds.
 
-## Questions still open
+## A writer that comes back
 
-- **An old writer that comes back.** Its pusher is refused; it may rejoin only as a reader of the
-  new state, with the records it never pushed set aside and listed (proposed, not decided).
-- **The kernel's own grants.** The new writer's pusher key needs `read` granted by the root key,
-  as every pusher's does. Whether that grant is made once ahead (a key the customer keeps for
-  this, from their own sources like the copy key) or another way is to be decided.
-- **Rotating a copy key** (an instance retired, a key leaked): a new copy key, given to the
-  remaining instances, and the copy starts anew from an image under it; to be specified.
+A writer that was cut off while another took its partition over learns it is revoked when it
+connects again. It turns read-only, writes the records it never pushed to a file beside its store,
+and says so loudly, with how many and from when to when ("142 records from 09:14 to 11:20 are not
+in partition `plant-a`"). Nothing sends them anywhere by itself: their business rules ran against
+an older state, so the team decides what to do with them (enter them again at the new writer, or
+not).
+
+## The pusher belongs to its writer
+
+The pusher runs beside its writer, on the same machine and in the same node, and the writer
+trusts it there without a grant: it no longer reads the writer as a reader with a `read` grant
+from the root key. Whether it may push to a relay is decided by the relay's access list alone (its
+key and that key's state). So starting a writer from a copy needs no root key.
+
+## A new copy key
+
+Retiring an instance needs no new key: it is stopped or revoked. A new copy key is for a key that
+leaked, or when the team wants one: the team makes it and gives it to the writer and the instances
+that stay; the copy keeps its name and starts anew from an image of the writer sealed with the new
+key; instances with the old key stop following until they get the new one.
