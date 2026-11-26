@@ -96,6 +96,26 @@ const SIDEBAR = [
     ],
   },
   {
+    text: "kernable Cloud",
+    items: [
+      { text: "Overview", link: "/cloud/" },
+      { text: "Getting started", link: "/cloud/getting-started" },
+      { text: "How it works", link: "/cloud/how-it-works" },
+      { text: "Link your kernels", link: "/cloud/link-kernels" },
+      { text: "Hosted kernels", link: "/cloud/hosted-kernels" },
+      { text: "Teams, members and tokens", link: "/cloud/teams" },
+      { text: "Security and data", link: "/cloud/security" },
+      { text: "Monitoring and alerts", link: "/cloud/monitoring" },
+      { text: "Backups and restores", link: "/cloud/backups" },
+      { text: "Usage and prices", link: "/cloud/usage" },
+      { text: "Troubleshooting", link: "/cloud/troubleshooting" },
+      { text: "Leaving", link: "/cloud/leaving" },
+      { text: "Preview Access", link: "/cloud/preview-access" },
+      { text: "Cloud API", link: "/cloud/reference/api" },
+      { text: "Cloud CLI", link: "/cloud/reference/cli" },
+    ],
+  },
+  {
     text: "Reference",
     items: [
       { text: "Overview", link: "/reference/" },
@@ -147,6 +167,7 @@ export default withMermaid(
         { text: "How-to", link: "/how-to/" },
         { text: "Kits", link: "/kits/" },
         { text: "Reference", link: "/reference/" },
+        { text: "Cloud", link: "/cloud/" },
         // Back to the website; VitePress marks it as external.
         { text: "kernable.com", link: "https://kernable.com/" },
       ],
