@@ -139,19 +139,23 @@ which keys it uses:
 
 ```sh
 kernable cloud projects key shop eu reader-c.pub read          # it follows the copy first
+kernable approve project.key acme.shop.eu kernel-c.pub         # where the project key is kept
 kernable start --root root.pub --readers on \
   --reader https://relay-eu.kernable.cloud:7400 --reader-copy acme.shop.eu --reader-copy-key copy.key \
   --follow-key reader-c.key --primary-kernel-key kernel.pub \
-  --become-writer pusher-c.key \
+  --become-writer pusher-c.key --approval acme.shop.eu.approval \
   --kernel-key kernel-c.key --vault-key vault-c.key
 kernable cloud projects key shop eu pusher.pub revoke          # the old writer's pusher (or stop)
 kernable cloud projects link shop eu --pusher pusher-c.pub     # now the new one's
 ```
 
 The new kernel waits, and says why, until the relay takes its pusher key; then it becomes the
-writer. Start its pusher with `pusher-c.key` (`[push]` on its node). Your readers need the new
-writer's kernel key too (`--primary-kernel-key kernel-c.pub` beside the old one) before they take
-what it writes.
+writer and writes a **takeover** with your project key's approval. Start its pusher with
+`pusher-c.key` (`[push]` on its node). Readers started with `--project-key project.pub` take the
+new writer from the takeover on, and refuse the old one's records from there: nothing to change
+on them. The **project key** is one per project, made once (`kernable keys new project`) and kept
+with you, never on an instance and never with kernable: it only approves which kernel key may
+write a partition.
 
 ## 8. Managed nodes (optional)
 

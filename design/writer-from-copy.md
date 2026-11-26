@@ -72,7 +72,9 @@ usually the last seconds.
 <pusher.key> --readers on`. It catches up as a reader, waits (said once per reason) until the
 relay takes that pusher key, then holds the copy's push while it takes the last records and
 becomes the writer; its pusher continues the copy. Until readers trust the new writer by the
-project key (part 1d), they are given its kernel key beside the old one.
+project key (part 1d), they are given its kernel key beside the old one. **Built** (part 1d): `kernable approve`, `--approval` for the writer, `--project-key` for
+readers and standbys; a takeover record (`TakeoverRecord`, its own table in the store, in images
+too) is the new writer's first record, and readers take the new key from it and refuse the old.
 
 ## One history per partition
 
@@ -88,13 +90,21 @@ relay's own check, by the pusher key's state, comes with the states (1c).
 
 Readers check every record against the writer's checkpoints, signed with its kernel key, and
 accept the kernel keys they are given. Each project has a **project key**, made once locally and
-kept in the team's own secrets; readers are given its public half. It signs, scoped to one
-partition, "kernel key B may write `plant-a`" (`kernable cloud approve`, from the CLI; the console
-does not hold the key), and the new writer brings that signature along: readers accept B without a
-change of their configuration, and the Cloud cannot slip a writer in. The project key approves
-writers only; it hands out no copy key: copy keys reach instances by hand alone. When the old
-writer is stopped (a planned move), it writes one last signed record that hands the partition
-over to B, and readers accept B from it.
+kept in the team's own secrets; readers are given its public half (`--project-key`). It signs,
+scoped to one partition, "kernel key B may write `plant-a`": an **approval**, made with
+`kernable cloud approve` from the CLI (the console does not hold the key). The project key
+approves writers only; it hands out no copy key: copy keys reach instances by hand alone.
+
+**The new writer says it takes over** (the old one may be lost, down or cut off, so it cannot be
+asked to hand over): the first record a writer started with `--become-writer` writes is a
+**takeover record**, "kernel key B writes this partition from position N", with the approval, and
+signed by B. A reader that reaches it checks the approval against the project key and, if it
+holds, accepts B's kernel key from N on, without a change of its configuration; the Cloud cannot
+slip a writer in, as it holds no project key. From N on it also refuses whatever the previous
+writer's key signs: an old writer that comes back cannot add to the partition's history, even
+past the relay's access list. A takeover record without a valid approval stops the reader with an
+error. A planned move still stops the old writer first (it pushes what it has); the takeover
+record is the same either way.
 
 ## A writer that comes back
 

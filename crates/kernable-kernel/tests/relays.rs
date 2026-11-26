@@ -1372,6 +1372,7 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
         let mut keys = vec![
             (id(&key(90)), "push", old),
             (id(&key(71)), "read", "active"),
+            (id(&key(73)), "read", "active"),
             (id(&key(75)), "read", "active"),
         ];
         if let Some(state) = new {
@@ -1409,6 +1410,20 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
     let mut becoming = reader_config(&dir.0, "becoming", 25, &listen, "become.eu");
     becoming.replication.readers = true;
     becoming.replication.become_writer = Some(reading_key(&dir.0, "pusher-new", 91));
+    // The project key (99) approves its kernel key for the copy (`kernable approve`).
+    let project = key(99);
+    let approval = kernable_core::proto::WriterApproval {
+        copy: "become.eu".into(),
+        kernel_key_id: id(&key(25)),
+        issued_at: 1,
+        project_sig: Some(kernable_core::signing::sign(
+            &project,
+            &kernable_core::signing::writer_approval_message("become.eu", &id(&key(25)), 1),
+        )),
+    };
+    let approval_path = dir.0.join("become.eu.approval");
+    std::fs::write(&approval_path, hex(&approval.encode_to_vec())).unwrap();
+    becoming.replication.approval = Some(approval_path);
     let taking = tokio::spawn(standby::run(becoming.clone()));
     let said = |what: &str| log.text().lines().any(|l| l.contains(what));
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -1456,20 +1471,30 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
     let new_at = held(&new_writer);
     assert!(new_at > old_at);
 
-    // A reader of the copy that knows both writers' kernel keys holds the new writer's records:
-    // the copy went on, it did not begin anew.
+    // A reader of the copy that knows the old writer's kernel key and the project key (not the
+    // new writer's) holds the new writer's records: the takeover told it. The copy went on, it
+    // did not begin anew.
     let mut reading = reader_config(&dir.0, "reading", 21, &listen, "become.eu");
-    reading
-        .replication
-        .follow
-        .as_mut()
-        .unwrap()
-        .primary_kernel_keys = vec![id(&key(3)), id(&key(25))];
+    reading.replication.project_keys = vec![id(&project)];
     let reader = start_reader(&reading).await;
     until_async("the reader holds the new writer's records", async || {
         held(&reader) >= new_at
     })
     .await;
+    // One that knows neither the project key nor the new writer's key stops at the takeover.
+    let unknowing = reader_config(&dir.0, "unknowing", 23, &listen, "become.eu");
+    let stopped = tokio::time::timeout(Duration::from_secs(5), standby::run(unknowing)).await;
+    assert!(
+        !matches!(stopped, Ok(Ok(()))),
+        "it does not take a writer it was not told of: {stopped:?}"
+    );
+    assert!(
+        log.text()
+            .lines()
+            .any(|l| l.contains("took the partition over") && l.contains("--project-key")),
+        "and says what to give it: {}",
+        log.text()
+    );
     let anew = log
         .text()
         .lines()

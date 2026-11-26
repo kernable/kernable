@@ -83,6 +83,14 @@ kernable relay --dir <dir> (--allow-push <key.pub>[,<key.pub>] [--allow-read <ke
 
 Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per copy), taken from pushers whose keys `--allow-push` names (kernable push), and serves each to readers (kernable start `--reader <relay>` `--reader-copy <copy>`) whose keys `--allow-read` names. Each proves its key; no grant counts here. It applies and checks nothing: readers check every record against the writer's checkpoints. A relay several customers share takes `--access <file>` instead: per copy each key with its role and state (`[copies.<copy>.keys]` `'<key` ID>' = { role = 'push' | 'read', state = 'active' | 'stopped' | 'revoked' }), read at every check; only an active key is let in, a connection it holds ends within seconds of a change, and a copy it does not name is refused. Listens on `127.0.0.1:7400` by default, elsewhere only with TLS (`--tls-cert`, `--tls-key`: a public CA's certificate serves clients with no certificate of their own, who reach it as `https://<host>:<port>`; `--tls-client-ca` adds mutual TLS).
 
+### `kernable approve`
+
+```text
+kernable approve <project.key> <copy> <kernel.pub|ID> [--out <file>]
+```
+
+The project key's approval that the kernel key may write the copy's partition (`<copy>.approval` by default), for a writer taking the copy over (kernable start `--approval`); readers given the project key (`--project-key`) accept it
+
 ### `kernable relay key`
 
 ```text

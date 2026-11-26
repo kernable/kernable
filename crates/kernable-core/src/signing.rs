@@ -621,6 +621,16 @@ pub fn relay_stream_message(rpc: &str, copy: &str, key_id: &str, issued_at: i64)
         .0
 }
 
+/// What a project key signs to let a kernel key write a copy's partition (a writer taking the
+/// copy over, design/writer-from-copy.md).
+pub fn writer_approval_message(copy: &str, kernel_key_id: &str, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.writer-approval")
+        .str(copy)
+        .str(kernel_key_id)
+        .i64(issued_at)
+        .0
+}
+
 /// The request headers of a stream at a relay: the key, the copy, when (ms), the signature
 /// over [`relay_stream_message`] (hex).
 pub const RELAY_KEY_HEADER: &str = "kernable-relay-key";

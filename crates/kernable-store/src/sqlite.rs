@@ -22,8 +22,8 @@ use kernable_core::{
         Grant, ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware,
         NewEvent, ParkedEvent, PartitionMap, ProcessPositionRecord, ProcessRecord, Rejected,
         RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RequestContext, Requirement,
-        RevocationRecord, Signature, StreamIndex, TenantImportedRecord, TenantIndexRecord, When,
-        WorkerRecord, command_result::Outcome, log_record::Record,
+        RevocationRecord, Signature, StreamIndex, TakeoverRecord, TenantImportedRecord,
+        TenantIndexRecord, When, WorkerRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -1168,6 +1168,23 @@ impl Store for SqliteStore {
 
     fn revocations(&self) -> Result<Vec<RevocationRecord>> {
         read_revocations(&self.conn())
+    }
+
+    fn take_over(&self, record: &TakeoverRecord) -> Result<TakeoverRecord> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut record = record.clone();
+        record.from = self.log().head.seq + 1;
+        save_takeover_tx(&tx, &record)?;
+        let filed = record.clone();
+        let head = self.file(&tx, || vec![Record::Takeover(filed)])?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(record)
+    }
+
+    fn takeovers(&self) -> Result<Vec<TakeoverRecord>> {
+        read_takeovers(&self.conn())
     }
 
     fn grants(&self) -> Result<Vec<Grant>> {
@@ -2702,6 +2719,7 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
         }
         Record::ProcessPosition(p) => save_process_position_tx(tx, p.position)?,
         Record::Copy(c) => save_copy_tx(tx, c)?,
+        Record::Takeover(t) => save_takeover_tx(tx, t)?,
         Record::Revocation(r) => {
             revoke_tx(tx, r)?;
         }
@@ -2754,6 +2772,41 @@ fn read_copy(conn: &Connection) -> Result<Option<CopyRecord>> {
         .query_row("SELECT record FROM copy WHERE id = 1", [], |r| r.get(0))
         .optional()?;
     Ok(blob.map(|b| CopyRecord::decode(b.as_slice())).transpose()?)
+}
+
+/// Made with the first takeover (design/writer-from-copy.md).
+const TAKEOVER_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS takeovers (
+    from_seq INTEGER PRIMARY KEY, -- the takeover record's own position
+    record   BLOB    NOT NULL     -- the TakeoverRecord
+) STRICT;
+";
+
+fn save_takeover_tx(tx: &Connection, record: &TakeoverRecord) -> Result<()> {
+    tx.execute_batch(TAKEOVER_SCHEMA)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO takeovers (from_seq, record) VALUES (?1, ?2)",
+        params![record.from as i64, record.encode_to_vec()],
+    )?;
+    Ok(())
+}
+
+fn read_takeovers(conn: &Connection) -> Result<Vec<TakeoverRecord>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'takeovers')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare("SELECT record FROM takeovers ORDER BY from_seq")?;
+    let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+    let mut out = Vec::new();
+    for blob in rows {
+        out.push(TakeoverRecord::decode(blob?.as_slice())?);
+    }
+    Ok(out)
 }
 
 fn save_copy_tx(tx: &Connection, mark: &CopyRecord) -> Result<()> {
@@ -3169,6 +3222,9 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     }
     for r in read_revocations(conn)? {
         f(Record::Revocation(r))?;
+    }
+    for t in read_takeovers(conn)? {
+        f(Record::Takeover(t))?;
     }
     for m in read_memberships(conn)? {
         f(Record::Membership(m))?;

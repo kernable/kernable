@@ -500,14 +500,16 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
                     })
                     .collect();
                 let (k, keys) = (Arc::clone(kernel), reader.kernel_keys.clone());
+                let project = kernel.config().replication.project_keys.clone();
                 let seq = tokio::task::spawn_blocking(move || {
+                    let mut trust = standby::Trust::of(k.store.as_ref(), &keys, &project)?;
                     let parts = standby::Parts {
                         store: k.store.as_ref(),
                         vault: k.vault.as_ref(),
                         data: k.data.as_ref(),
                         snapshots: k.snapshots.as_ref(),
                     };
-                    standby::apply_to(parts, batch, &keys)
+                    standby::apply_to(parts, batch, &mut trust)
                 })
                 .await?
                 .map_err(|e| {

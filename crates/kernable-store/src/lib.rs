@@ -39,8 +39,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, CopyRecord, EnqueuedRecord, Event, Grant,
     ListenerRecord, MembershipRecord, NewEvent, PartitionMap, ProcessRecord, Rejected,
-    ReplicatedRecord, RevocationRecord, Signature, StreamIndex, TenantImportedRecord, WorkerRecord,
-    log_record::Record,
+    ReplicatedRecord, RevocationRecord, Signature, StreamIndex, TakeoverRecord,
+    TenantImportedRecord, WorkerRecord, log_record::Record,
 };
 
 /// The version of the stored data format this build reads and writes; a store of another
@@ -504,6 +504,13 @@ pub trait Store: Send + Sync {
 
     /// Every revocation, in the order they were stored.
     fn revocations(&self) -> Result<Vec<RevocationRecord>>;
+
+    /// Notes that this kernel took the partition over from its copy: `record.from` is set to
+    /// the position the record gets. Returns the record as filed.
+    fn take_over(&self, record: &TakeoverRecord) -> Result<TakeoverRecord>;
+
+    /// Every takeover, oldest first.
+    fn takeovers(&self) -> Result<Vec<TakeoverRecord>>;
 
     /// The newest grant the kernel took into effect per key, ordered by key ID.
     fn grants(&self) -> Result<Vec<Grant>>;

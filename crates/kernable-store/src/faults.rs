@@ -348,6 +348,18 @@ impl Store for FaultyStore {
         self.inner.revocations()
     }
 
+    fn take_over(
+        &self,
+        record: &kernable_core::proto::TakeoverRecord,
+    ) -> Result<kernable_core::proto::TakeoverRecord> {
+        self.faults.write(|| self.inner.take_over(record))
+    }
+
+    fn takeovers(&self) -> Result<Vec<kernable_core::proto::TakeoverRecord>> {
+        self.faults.read()?;
+        self.inner.takeovers()
+    }
+
     fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {
         self.faults.read()?;
         self.inner.index()

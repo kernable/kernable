@@ -364,7 +364,58 @@ impl Kernel {
         if let Some(m) = standby::marker(&kernel.config().store, "following") {
             let _ = std::fs::remove_file(m);
         }
+        kernel.note_takeover()?;
         Ok(kernel)
+    }
+
+    /// A writer that took its partition over from the copy (`--become-writer --approval`) says
+    /// so in its log, once: a takeover record with the project key's approval, from which the
+    /// copy's readers accept its kernel key (design/writer-from-copy.md).
+    fn note_takeover(&self) -> Result<(), BoxError> {
+        let config = self.config();
+        let (Some(path), false) = (&config.replication.approval, config.replication.reader) else {
+            return Ok(());
+        };
+        let copy = config
+            .replication
+            .follow
+            .as_ref()
+            .map(|f| f.copy.clone())
+            .unwrap_or_default();
+        let own = signing::key_id(&self.key().verifying_key());
+        if self
+            .store
+            .takeovers()?
+            .last()
+            .is_some_and(|t| t.kernel_key_id == own)
+        {
+            return Ok(());
+        }
+        let approval = read_approval(path)?;
+        if approval.kernel_key_id != own || approval.copy != copy {
+            return Err(format!(
+                "--approval {}: it approves the kernel key {} for {}, not this kernel's ({own}) for {copy}",
+                path.display(),
+                approval.kernel_key_id,
+                approval.copy
+            )
+            .into());
+        }
+        let filed = self
+            .store
+            .take_over(&kernable_core::proto::TakeoverRecord {
+                from: 0,
+                copy,
+                kernel_key_id: own,
+                approval: Some(approval),
+                created_at: now_ms(),
+            })?;
+        tracing::warn!(
+            record = filed.from,
+            copy = %filed.copy,
+            "wrote the takeover: the copy's readers that know the project key take this kernel as its writer from here"
+        );
+        Ok(())
     }
 
     /// Like [`Kernel::open`], on a store opened already (`config.store` is not opened): for
@@ -1625,6 +1676,19 @@ pub(crate) fn taking_over<T>(
 pub const PROMOTED_TAKE_OVER_MS: u64 = 2_000;
 
 /// `config` for opening the stores as the primary once `standby::run` returned (promoted).
+/// A writer approval as `kernable approve` writes it: the `WriterApproval`, hex encoded.
+pub fn read_approval(
+    path: &std::path::Path,
+) -> Result<kernable_core::proto::WriterApproval, BoxError> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes =
+        hex::decode(text.trim()).map_err(|_| format!("{}: not an approval", path.display()))?;
+    Ok(
+        kernable_core::proto::WriterApproval::decode(bytes.as_slice())
+            .map_err(|_| format!("{}: not an approval", path.display()))?,
+    )
+}
+
 pub fn promoted(mut config: config::Config) -> config::Config {
     config.take_over_ms = config.take_over_ms.max(PROMOTED_TAKE_OVER_MS);
     // A reader that took its copy over (`--become-writer`) is the writer from here.

@@ -28,7 +28,29 @@ message LogRecord {
     ProcessRecord process = 17;
     ProcessPositionRecord process_position = 18;
     CopyRecord copy = 19;
+    TakeoverRecord takeover = 20;
   }
+}
+
+// A kernel took the partition's writing over from its copy at a relay (`kernable start
+// --become-writer`): from position `from` (this record's own) kernel key `kernel_key_id` writes
+// it, approved for `copy` by the project key. A reader that knows the project key accepts that
+// kernel key's checkpoints from there, and no longer the previous writer's.
+message TakeoverRecord {
+  uint64 from = 1;
+  string copy = 2;
+  string kernel_key_id = 3;
+  WriterApproval approval = 4;
+  int64 created_at = 5;  // ms since epoch
+}
+
+// The project key's word that a kernel key may write a copy's partition (`kernable approve`):
+// signed by it over kernable.v1.writer-approval.
+message WriterApproval {
+  string copy = 1;
+  string kernel_key_id = 2;
+  int64 issued_at = 3;  // ms since epoch
+  Signature project_sig = 4;
 }
 
 // The store is a masked copy of another kernel's stores (a preview): made by `kernable copy`,

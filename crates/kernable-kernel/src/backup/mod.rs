@@ -1291,7 +1291,7 @@ pub fn restore_masked(
             }
             let keys = learn(&mut batch.records.iter().filter_map(|l| l.record.as_ref()))?;
             check_vault(stores, &batch.vault)?;
-            standby::apply_image(stores, batch, &keys)?;
+            standby::apply_image(stores, batch, &mut standby::Trust::given(&keys))?;
         }
     }
     // An empty base at record 0: the store's own record log starts there already.
@@ -1352,7 +1352,7 @@ pub fn restore_masked(
             )?;
             check_vault(stores, &batch.vault)?;
             let cut_short = matches!(until, Until::Record(n) if batch.records.last().is_some_and(|r| r.seq >= n));
-            restored.record = standby::apply(stores, batch, &keys)?;
+            restored.record = standby::apply(stores, batch, &mut standby::Trust::given(&keys))?;
             restored.taken_at = taken.taken_at;
             if cut_short {
                 break 'segments;

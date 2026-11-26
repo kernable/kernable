@@ -138,6 +138,18 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "With `--reader-copy`: the file of the key the copy is sealed with (`kernable relay key`), the pusher's `--copy-key`. The relay holds the records sealed and never this key.",
     ),
     (
+        "--project-key",
+        "KERNABLE_PROJECT_KEY",
+        "",
+        "With `--reader` or `--follow`: the project key's public half, as a key ID or a `.pub` file (comma-separated for several). A writer that took the partition over from its copy (`--become-writer`) writes a takeover record with the project key's approval; with this flag the kernel takes it, accepts the new writer's kernel key from there on, and no longer the previous writer's. Without it, a takeover record stops it with an error, and the new writer's kernel key has to be given with `--primary-kernel-key`.",
+    ),
+    (
+        "--approval",
+        "KERNABLE_APPROVAL",
+        "",
+        "With `--become-writer`: the project key's approval of this kernel's key for the copy (`kernable approve`). Once the kernel is the writer, it writes it into a takeover record, so the copy's readers that know the project key (`--project-key`) accept it without a change of their own.",
+    ),
+    (
         "--become-writer",
         "KERNABLE_BECOME_WRITER",
         "",
@@ -480,6 +492,10 @@ pub struct Replication {
     /// `--become-writer`: the key file of the pusher this reader of a relay's copy takes the
     /// copy over with, as its writer.
     pub become_writer: Option<PathBuf>,
+    /// `--approval`: the project key's approval this kernel writes into its takeover record.
+    pub approval: Option<PathBuf>,
+    /// `--project-key`: key IDs of the project keys whose approvals of a takeover count.
+    pub project_keys: Vec<String>,
 }
 
 /// A backup a new reader starts from.
@@ -795,7 +811,24 @@ impl Config {
             from_backup,
             reader_max_lag_ms: number("--reader-max-lag-ms")?,
             become_writer: get("--become-writer").map(PathBuf::from),
+            approval: get("--approval").map(PathBuf::from),
+            project_keys: get("--project-key")
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(|k| key_id("--project-key", k))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
         };
+        if replication.approval.is_some() && replication.become_writer.is_none() {
+            return Err(
+                "--approval goes with --become-writer: the takeover record it is written into"
+                    .into(),
+            );
+        }
         if replication.become_writer.is_some() {
             let of_copy = replication
                 .follow

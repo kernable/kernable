@@ -134,6 +134,11 @@ Keys and trust:
                                           a public CA's certificate serves clients with no
                                           certificate of their own, who reach it as
                                           https://<host>:<port>; --tls-client-ca adds mutual TLS).
+  kernable approve <project.key> <copy> <kernel.pub|ID> [--out <file>]
+                                          The project key's approval that the kernel key may write
+                                          the copy's partition (<copy>.approval by default), for a
+                                          writer taking the copy over (kernable start --approval);
+                                          readers given the project key (--project-key) accept it
   kernable relay key <file>               Writes a new copy key (hex, mode 600): the pusher seals
                                           what it sends a relay with it (--copy-key) and the
                                           copy's readers open it (--reader-copy-key). The relay
@@ -642,6 +647,10 @@ async fn main() -> ExitCode {
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
         ["relay", "key", file] => relay_key(file),
+        ["approve", project_key, copy, kernel] => approve(project_key, copy, kernel, None),
+        ["approve", project_key, copy, kernel, "--out", out] => {
+            approve(project_key, copy, kernel, Some(out))
+        }
         ["relay", flags @ ..] => return run_relay(flags).await,
         ["push", flags @ ..] => return run_push(flags).await,
         ["node", "join", url, token] => node_join(url, token, ".", None),
@@ -1742,6 +1751,30 @@ async fn run_push(flags: &[&str]) -> ExitCode {
         },
         _ = shutdown_signal() => ExitCode::SUCCESS,
     }
+}
+
+/// `kernable approve <project.key> <copy> <kernel.pub|ID> [--out <file>]`: the project key's
+/// approval of a kernel key to write a copy's partition, for `kernable start --approval`.
+fn approve(project_key: &str, copy: &str, kernel: &str, out: Option<&str>) -> Result<bool> {
+    let key = signing::read_signing_key(project_key).map_err(|e| format!("{project_key}: {e}"))?;
+    let kernel_key_id = key_id_of("kernel key", kernel)?;
+    let issued_at = now_ms();
+    let approval = kernable_core::proto::WriterApproval {
+        copy: copy.to_owned(),
+        kernel_key_id: kernel_key_id.clone(),
+        issued_at,
+        project_sig: Some(signing::sign(
+            &key,
+            &signing::writer_approval_message(copy, &kernel_key_id, issued_at),
+        )),
+    };
+    let out = out.map_or_else(|| format!("{copy}.approval"), str::to_owned);
+    fs::write(&out, format!("{}\n", hex::encode(approval.encode_to_vec())))?;
+    println!(
+        "wrote to {out}: the project key {} lets the kernel key {kernel_key_id} write {copy}",
+        signing::key_id(&key.verifying_key())
+    );
+    Ok(true)
 }
 
 /// `kernable relay key <file>`: a new copy key.

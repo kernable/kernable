@@ -26,8 +26,8 @@ use kernable_core::{
     proto::{
         CacheBatch, ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode,
         FollowRequest, FollowResponse, Grant, ImageBatch, ImageEnd, Leaving, PromoteRequest,
-        PromoteResult, RecordBatch, RecordPoint, SnapshotRecord, StoredKey, TookOver, WitnessOp,
-        follow_request, follow_response,
+        PromoteResult, RecordBatch, RecordPoint, SnapshotRecord, StoredKey, TakeoverRecord,
+        TookOver, WitnessOp, follow_request, follow_response,
         log_record::Record,
         replication_service_client::ReplicationServiceClient,
         replication_service_server::{ReplicationService, ReplicationServiceServer},
@@ -1012,9 +1012,13 @@ async fn follow_once(
                 let erased = erased_tenants(&batch);
                 let stores = standby.stores();
                 let keys = follow.primary_kernel_keys.clone();
+                let project = standby.config.replication.project_keys.clone();
                 let applied_to = Arc::clone(&stores);
-                let seq =
-                    tokio::task::spawn_blocking(move || apply(&applied_to, batch, &keys)).await??;
+                let seq = tokio::task::spawn_blocking(move || {
+                    let mut trust = Trust::of(applied_to.store.as_ref(), &keys, &project)?;
+                    apply(&applied_to, batch, &mut trust)
+                })
+                .await??;
                 standby.applied.store(seq, SeqCst);
                 standby.applied_records(&stores, &erased);
                 if tx
@@ -1132,7 +1136,12 @@ async fn take_image(standby: &Arc<Standby>, inbound: &mut Inbound) -> Result<u64
                 records += batch.records.len();
                 let stores = standby.stores();
                 let keys = standby.follow.primary_kernel_keys.clone();
-                tokio::task::spawn_blocking(move || apply_image(&stores, batch, &keys)).await??;
+                let project = standby.config.replication.project_keys.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut trust = Trust::of(stores.store.as_ref(), &keys, &project)?;
+                    apply_image(&stores, batch, &mut trust)
+                })
+                .await??;
                 crate::crash::point("standby.imaging");
             }
             Some(follow_response::Msg::ImageEnd(ImageEnd { seq, hash, .. })) => {
@@ -1157,10 +1166,23 @@ async fn take_image(standby: &Arc<Standby>, inbound: &mut Inbound) -> Result<u64
 pub(crate) fn apply_image(
     stores: &Stores,
     batch: ImageBatch,
-    keys: &[String],
+    trust: &mut Trust,
 ) -> Result<(), BoxError> {
     let records: Vec<Record> = batch.records.into_iter().filter_map(|l| l.record).collect();
-    check_checkpoints(records.iter(), keys)?;
+    // An image holds the writer's state, not its order: every writer whose takeover counts
+    // signed checkpoints in it.
+    for r in &records {
+        if let Record::Takeover(t) = r {
+            trust.counts(t)?;
+            if !trust.keys.contains(&t.kernel_key_id) {
+                trust.keys.push(t.kernel_key_id.clone());
+            }
+        }
+    }
+    let checkpoints = records
+        .iter()
+        .filter(|r| matches!(r, Record::Checkpoint(_)));
+    check_checkpoints(checkpoints, trust)?;
     for file in &batch.files {
         stores.data.restore(&file.path, &file.data)?;
     }
@@ -1177,27 +1199,119 @@ fn import(vault: Option<&Vault>, rows: &[kernable_core::proto::VaultRow]) -> Res
     }
 }
 
-/// The primary's checkpoints carry its kernel key's signature.
+/// Which kernel keys a standby or reader takes checkpoints from (design/writer-from-copy.md):
+/// those it was given (`--primary-kernel-key`), until a takeover record names the kernel key of a
+/// writer that took the partition over; from there on only that one. A takeover counts if a
+/// project key it knows (`--project-key`) approved it, or if it was given that kernel key itself.
+pub(crate) struct Trust {
+    keys: Vec<String>,
+    configured: Vec<String>,
+    project_keys: Vec<String>,
+}
+
+impl Trust {
+    /// The trust of a follower whose stores are `store`: the newest takeover it holds, else
+    /// the keys it was given.
+    pub(crate) fn of(
+        store: &dyn Store,
+        configured: &[String],
+        project_keys: &[String],
+    ) -> Result<Trust, BoxError> {
+        let keys = match store.takeovers()?.last() {
+            Some(t) => vec![t.kernel_key_id.clone()],
+            None => configured.to_vec(),
+        };
+        Ok(Trust {
+            keys,
+            configured: configured.to_vec(),
+            project_keys: project_keys.to_vec(),
+        })
+    }
+
+    /// Exactly these keys, a takeover counting only for one of them (a backup's restore: it
+    /// learned them from the backup's checkpoints).
+    pub(crate) fn given(keys: &[String]) -> Trust {
+        Trust {
+            keys: keys.to_vec(),
+            configured: keys.to_vec(),
+            project_keys: Vec::new(),
+        }
+    }
+
+    /// Whether `takeover` counts; why not.
+    fn counts(&self, t: &TakeoverRecord) -> Result<(), String> {
+        if self.configured.contains(&t.kernel_key_id) {
+            return Ok(());
+        }
+        let short = |k: &str| k.chars().take(12).collect::<String>();
+        let what = format!(
+            "a writer took the partition over at record {} (kernel key {}, copy {})",
+            t.from,
+            short(&t.kernel_key_id),
+            t.copy
+        );
+        if self.project_keys.is_empty() {
+            return Err(format!(
+                "{what}: give the project key (--project-key) to accept it by its approval, or its kernel key (--primary-kernel-key)"
+            ));
+        }
+        let approval = t
+            .approval
+            .as_ref()
+            .ok_or_else(|| format!("{what} without an approval"))?;
+        let sig = approval
+            .project_sig
+            .as_ref()
+            .ok_or_else(|| format!("{what}: its approval is not signed"))?;
+        let msg = signing::writer_approval_message(
+            &approval.copy,
+            &approval.kernel_key_id,
+            approval.issued_at,
+        );
+        if !self.project_keys.contains(&sig.key_id) || signing::verify(sig, &msg).is_err() {
+            return Err(format!(
+                "{what}: its approval is not the project key's (--project-key)"
+            ));
+        }
+        if approval.kernel_key_id != t.kernel_key_id || approval.copy != t.copy {
+            return Err(format!("{what}: its approval is for another key or copy"));
+        }
+        Ok(())
+    }
+
+    /// From a counted takeover on, only its kernel key.
+    fn take(&mut self, t: &TakeoverRecord) -> Result<(), BoxError> {
+        self.counts(t)?;
+        self.keys = vec![t.kernel_key_id.clone()];
+        Ok(())
+    }
+}
+
+/// The primary's checkpoints carry its kernel key's signature; a takeover changes the key, in
+/// the order the records come.
 fn check_checkpoints<'a>(
     records: impl Iterator<Item = &'a Record>,
-    keys: &[String],
+    trust: &mut Trust,
 ) -> Result<(), BoxError> {
     for record in records {
-        if let Record::Checkpoint(CheckpointRecord {
-            global_position,
-            chain_hash,
-            kernel_sig,
-            created_at,
-        }) = record
-        {
-            let sig = kernel_sig.as_ref().ok_or("an unsigned checkpoint")?;
-            let msg = signing::checkpoint_message(*global_position, chain_hash, *created_at);
-            if !keys.contains(&sig.key_id) || signing::verify(sig, &msg).is_err() {
-                return Err(format!(
-                    "the checkpoint of event {global_position} is not signed by the primary's kernel key (--primary-kernel-key)"
-                )
-                .into());
+        match record {
+            Record::Takeover(t) => trust.take(t)?,
+            Record::Checkpoint(CheckpointRecord {
+                global_position,
+                chain_hash,
+                kernel_sig,
+                created_at,
+            }) => {
+                let sig = kernel_sig.as_ref().ok_or("an unsigned checkpoint")?;
+                let msg = signing::checkpoint_message(*global_position, chain_hash, *created_at);
+                if !trust.keys.contains(&sig.key_id) || signing::verify(sig, &msg).is_err() {
+                    return Err(format!(
+                        "the checkpoint of event {global_position} is not signed by the writer's kernel key (--primary-kernel-key, or a takeover's)"
+                    )
+                    .into());
+                }
             }
+            _ => {}
         }
     }
     Ok(())
@@ -1218,15 +1332,19 @@ struct Around {
 /// Applies a batch of the primary's records: files and vault values first (the records refer
 /// to them), erasures noted, the records, then what the vault drops after a commit. Returns the
 /// last record applied.
-pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Result<u64, BoxError> {
-    apply_to(stores.parts(), batch, keys)
+pub(crate) fn apply(
+    stores: &Stores,
+    batch: RecordBatch,
+    trust: &mut Trust,
+) -> Result<u64, BoxError> {
+    apply_to(stores.parts(), batch, trust)
 }
 
 /// [`apply`] to any [`Parts`]: a standby's stores, or a reader's kernel.
 pub(crate) fn apply_to(
     stores: Parts<'_>,
     batch: RecordBatch,
-    keys: &[String],
+    trust: &mut Trust,
 ) -> Result<u64, BoxError> {
     let last = batch.records.last().map_or(0, |r| r.seq);
     let records: Vec<&Record> = batch
@@ -1234,7 +1352,7 @@ pub(crate) fn apply_to(
         .iter()
         .filter_map(|r| r.record.as_ref().and_then(|l| l.record.as_ref()))
         .collect();
-    check_checkpoints(records.iter().copied(), keys)?;
+    check_checkpoints(records.iter().copied(), trust)?;
     for f in &batch.files {
         let key = DataKey {
             tenant_id: f.tenant_id.clone(),
@@ -2013,5 +2131,124 @@ mod ended_tests {
         )
         .await;
         assert!(started.elapsed() < Duration::from_secs(3), "{silent}");
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn id(k: &SigningKey) -> String {
+        signing::key_id(&k.verifying_key())
+    }
+
+    fn checkpoint(by: &SigningKey, position: u64) -> Record {
+        let hash = vec![position as u8; 32];
+        Record::Checkpoint(CheckpointRecord {
+            global_position: position,
+            chain_hash: hash.clone(),
+            kernel_sig: Some(signing::sign(
+                by,
+                &signing::checkpoint_message(position, &hash, 7),
+            )),
+            created_at: 7,
+        })
+    }
+
+    fn takeover(writer: &SigningKey, approved_by: &SigningKey, copy: &str) -> Record {
+        let kernel_key_id = id(writer);
+        Record::Takeover(TakeoverRecord {
+            from: 40,
+            copy: "shop.eu".into(),
+            kernel_key_id: kernel_key_id.clone(),
+            approval: Some(kernable_core::proto::WriterApproval {
+                copy: copy.into(),
+                kernel_key_id: kernel_key_id.clone(),
+                issued_at: 5,
+                project_sig: Some(signing::sign(
+                    approved_by,
+                    &signing::writer_approval_message(copy, &kernel_key_id, 5),
+                )),
+            }),
+            created_at: 6,
+        })
+    }
+
+    fn trust(project: &[&SigningKey]) -> Trust {
+        Trust {
+            keys: vec![id(&key(3))],
+            configured: vec![id(&key(3))],
+            project_keys: project.iter().map(|k| id(k)).collect(),
+        }
+    }
+
+    #[test]
+    fn a_takeover_the_project_key_approved_moves_trust_to_the_new_writer_for_good() {
+        let (old, new, project) = (key(3), key(4), key(9));
+        let records = [
+            checkpoint(&old, 10),
+            takeover(&new, &project, "shop.eu"),
+            checkpoint(&new, 11),
+        ];
+        let mut t = trust(&[&project]);
+        check_checkpoints(records.iter(), &mut t).unwrap();
+        // The old writer, from there on: refused, though its key was given.
+        let late = [checkpoint(&old, 12)];
+        let refused = check_checkpoints(late.iter(), &mut t)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("checkpoint of event 12"), "{refused}");
+    }
+
+    #[test]
+    fn a_follower_started_again_trusts_the_takeover_its_store_holds() {
+        let (new, project) = (key(4), key(9));
+        let store =
+            kernable_store::open_with("memory:", kernable_store::Durability::Normal).unwrap();
+        let given = [id(&key(3))];
+        assert_eq!(Trust::of(store.as_ref(), &given, &[]).unwrap().keys, given);
+        let Record::Takeover(t) = takeover(&new, &project, "shop.eu") else {
+            unreachable!()
+        };
+        let filed = store.take_over(&t).unwrap();
+        assert!(filed.from > 0, "the store set its position");
+        assert_eq!(store.takeovers().unwrap(), vec![filed]);
+        assert_eq!(
+            Trust::of(store.as_ref(), &given, &[]).unwrap().keys,
+            [id(&new)]
+        );
+    }
+
+    #[test]
+    fn a_takeover_counts_only_by_the_project_keys_approval_for_its_copy() {
+        let (new, project, stranger) = (key(4), key(9), key(8));
+        let said = |records: &[Record], t: &mut Trust| {
+            check_checkpoints(records.iter(), t)
+                .unwrap_err()
+                .to_string()
+        };
+        // No project key given: refused, saying what to give.
+        let e = said(&[takeover(&new, &project, "shop.eu")], &mut trust(&[]));
+        assert!(e.contains("--project-key"), "{e}");
+        // Approved by another key, or for another copy: refused.
+        let e = said(
+            &[takeover(&new, &stranger, "shop.eu")],
+            &mut trust(&[&project]),
+        );
+        assert!(e.contains("not the project key's"), "{e}");
+        let e = said(
+            &[takeover(&new, &project, "other.eu")],
+            &mut trust(&[&project]),
+        );
+        assert!(e.contains("another key or copy"), "{e}");
+        // Its kernel key given by hand: it counts without the project key.
+        let mut by_hand = trust(&[]);
+        by_hand.configured.push(id(&new));
+        let records = [takeover(&new, &project, "shop.eu"), checkpoint(&new, 11)];
+        check_checkpoints(records.iter(), &mut by_hand).unwrap();
     }
 }

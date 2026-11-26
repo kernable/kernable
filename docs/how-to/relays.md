@@ -168,10 +168,11 @@ the copy key and the root's grants as any writer.
 ```sh
 kernable keys new kernel-c && kernable keys new reader-c && kernable keys new pusher-c
 kernable grant root.key reader-c.pub 'read=*' && kernable grant root.key pusher-c.pub 'read=*'
+kernable approve project.key shop kernel-c.pub          # where the project key is: shop.approval
 kernable start --root root.pub --readers on \
   --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
   --follow-key reader-c.key --primary-kernel-key kernel-a.pub \
-  --become-writer pusher-c.key \
+  --become-writer pusher-c.key --approval shop.approval \
   --kernel-key kernel-c.key --vault-key vault-c.key --listen 10.2.0.5:7233
 ```
 
@@ -183,5 +184,10 @@ it never pushed), then name `pusher-c`'s. The kernel then holds the copy's push 
 the last records, so the old pusher cannot come back meanwhile, and serves as the writer. Start
 its pusher with `pusher-c.key`: it continues the copy, and the copy's readers follow on.
 
-Readers check every record against the writer's kernel key: until they know the new writer's
-(`--primary-kernel-key kernel-c.pub` beside the old one), they take nothing it wrote.
+Readers check every record against the writer's kernel key. The new writer's first record is a
+**takeover**: its kernel key, with the **project key**'s approval (`kernable approve`, made where
+the project key is kept; it approves a kernel key for one copy and opens nothing else). Readers
+given the project key's public half (`--project-key project.pub`) take it: from there on they
+accept the new writer's checkpoints and no longer the old writer's, so an old writer that comes
+back cannot add to the history. A reader without the project key stops at the takeover and says
+what to give it (the project key, or the new writer's kernel key with `--primary-kernel-key`).
