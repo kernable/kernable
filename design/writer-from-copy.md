@@ -70,13 +70,15 @@ never starts one of its own. The relay refuses a pusher whose log does not conti
 (today the pusher empties the copy and fills it from its own log: with a takeover, a wrongly
 started writer would erase the history). Starting a copy anew is an explicit action of the team.
 
-## Readers trust a new writer by the partition key
+## Readers trust a new writer by the project key
 
 Readers check every record against the writer's checkpoints, signed with its kernel key, and
-accept the kernel keys they are given. Each partition has a **partition key**, made once locally
-and kept in the team's own secrets like the copy key; readers are given its public half. It signs
-"kernel key B may write `plant-a`", and the new writer brings that signature along: readers accept
-B without a change of their configuration, and the Cloud cannot slip a writer in. When the old
+accept the kernel keys they are given. Each project has a **project key**, made once locally and
+kept in the team's own secrets; readers are given its public half. It signs, scoped to one
+partition, "kernel key B may write `plant-a`" (`kernable cloud approve`, from the CLI; the console
+does not hold the key), and the new writer brings that signature along: readers accept B without a
+change of their configuration, and the Cloud cannot slip a writer in. The project key approves
+writers only; it hands out no copy key: copy keys reach instances by hand alone. When the old
 writer is stopped (a planned move), it writes one last signed record that hands the partition
 over to B, and readers accept B from it.
 
