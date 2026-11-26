@@ -50,18 +50,25 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           (kernable Cloud runs no code of yours); past the checks
                                           before a team's first project
   kernable cloud projects [--team <team>] links <name>
-                                          Its partitions linked to your kernels, and the relay
-                                          they push to
+                                          Its partitions linked to your kernels, each key the relay
+                                          takes with its role and state, and the relay they push to
   kernable cloud projects [--team <team>] root <name> [set <root.pub|ID> [--now] | finish]
                                           The project's root key: grants signed by it count for its
                                           kernels and copies. set replaces it and keeps the old one
                                           valid until finish (7 days at most); --now ends the old
                                           one at once, for a key that leaked (admins)
   kernable cloud projects [--team <team>] link <name> <partition> --pusher <pusher.pub|ID>
-                       [--root <root.pub|ID>]
                                           Lets the kernel with that pusher key push the partition's
-                                          copy to the relay, and readers granted by the project's
-                                          root follow it (developers and up); prints the relay
+                                          copy to the relay (developers and up); prints the relay.
+                                          A linked partition takes another pusher only once its
+                                          current one is stopped or revoked
+  kernable cloud projects [--team <team>] key <name> <partition> <key.pub|ID> (read | push | stop | revoke | activate)
+                                          read, push: adds the key in that role (a reader, a
+                                          writer's pusher), active; stop: refused until activated
+                                          again; revoke: refused for good. The relay applies it
+                                          within seconds (developers and up). Copy keys never
+                                          pass through kernable Cloud: give each instance its
+                                          partition's copy key yourself
   kernable cloud projects [--team <team>] unlink <name> <partition>
                                           Nothing pushes to or reads the copy from then on; it is
                                           kept 30 days, linking again brings it back (admins)
@@ -954,7 +961,6 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
     let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
     let month = flag(&mut rest, "--month")?;
     let pusher = flag(&mut rest, "--pusher")?;
-    let root = flag(&mut rest, "--root")?;
     let now = switch(&mut rest, "--now");
     let t = team(&mut s, team_flag)?;
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -1008,21 +1014,20 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                         Some(_) => "unlinked (kept 30 days)",
                         None => "linked",
                     };
-                    println!(
-                        "{}\t{state}\tpushers {}\troots {}",
-                        text(l, "copy"),
-                        joined(&l["pushers"]),
-                        joined(&l["roots"])
-                    );
+                    println!("{}\t{state}", text(l, "copy"));
+                    for k in l["keys"].as_array().into_iter().flatten() {
+                        let role = match k["role"].as_str() {
+                            Some("push") => "pusher",
+                            _ => "reader",
+                        };
+                        println!("  {}\t{role}\t{}", text(k, "key"), text(k, "state"));
+                    }
                 }
             });
         }
         ["link", name, partition] => {
             let pusher = pusher.as_deref().ok_or("--pusher <pusher.pub|ID>")?;
-            let mut body = json!({ "pushers": [key_id_of(pusher)?] });
-            if let Some(root) = root.as_deref() {
-                body["roots"] = json!([key_id_of(root)?]);
-            }
+            let body = json!({ "pusher": key_id_of(pusher)? });
             let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}");
             let v = s.call("PUT", &path, Some(body))?;
             s.show(&v, |v| {
@@ -1032,6 +1037,32 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                     text(v, "relay"),
                     text(&v["link"], "copy")
                 )
+            });
+        }
+        ["key", name, partition, key, what] => {
+            let body = match *what {
+                "read" | "push" => json!({ "role": what, "state": "active" }),
+                "stop" => json!({ "state": "stopped" }),
+                "revoke" => json!({ "state": "revoked" }),
+                "activate" => json!({ "state": "active" }),
+                other => return Err(format!("{other}: read, push, stop, revoke or activate")),
+            };
+            let key = key_id_of(key)?;
+            let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}/keys/{key}");
+            let v = s.call("PUT", &path, Some(body))?;
+            s.show(&v, |v| {
+                let k = v["link"]["keys"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|k| k["key"] == key.as_str());
+                if let Some(k) = k {
+                    println!(
+                        "{partition}: {key} {} {}",
+                        text(k, "role"),
+                        text(k, "state")
+                    );
+                }
             });
         }
         ["root", name] => {
@@ -1045,10 +1076,7 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
                 &path,
                 Some(json!({ "key": key_id_of(key)?, "now": now })),
             )?;
-            s.show(&v, |v| {
-                print_root(name, &v["project"]);
-                println!("links updated: {}", v["links_updated"]);
-            });
+            s.show(&v, |v| print_root(name, &v["project"]));
         }
         ["root", name, "finish"] => {
             let path = format!("/v1/teams/{t}/projects/{name}/root/finish");
@@ -1121,16 +1149,6 @@ fn utc(ms: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 60, rem % 60)
-}
-
-fn joined(v: &Value) -> String {
-    v.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|k| k.chars().take(8).collect::<String>() + "…")
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 /// A key ID given as itself (64 hex digits) or as a `.pub` file holding one. Never another file:

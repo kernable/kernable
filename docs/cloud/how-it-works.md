@@ -115,8 +115,10 @@ A relay cannot change a record: every reader checks each one against the writer'
 checkpoints. It could only hold records back, and a reader that falls behind its maximum lag
 refuses queries rather than answer from old data.
 
-New readers get the copy key only on your word: a grant signed by your root key, or by a narrow
-**enrol key** you hold that may grant nothing but reading. Never on a key of kernable's.
+The copy key never passes through kernable Cloud: you give it to your instances yourself. The
+relay lets in only the keys you name for each partition, while they are active, and kernable's
+list of them opens nothing: a key it let in without the copy key would get sealed bytes, and
+could not make a record your readers accept.
 
 ### Backups
 

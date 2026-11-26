@@ -6,7 +6,7 @@ yours to watch.
 ## What kernable watches
 
 Every minute: the relays and their copies, the backups of each copy, the servers behind them,
-and your [managed nodes](/cloud/link-kernels#_6-managed-nodes-optional) as they report. An operator
+and your [managed nodes](/cloud/link-kernels#_7-managed-nodes-optional) as they report. An operator
 bot restarts what fails and asks a person about anything else. Upgrades and fixes on kernable's
 side need nothing from you.
 

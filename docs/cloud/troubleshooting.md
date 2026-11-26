@@ -7,8 +7,8 @@ Most of what goes wrong shows on a reader's `/ready`: it answers 503 with the re
 | Why | What to do |
 |---|---|
 | the writer is away | The pusher has not been heard from for a few seconds. Check that the writer runs and that its node runs the pusher (`[push]` in `project.toml`); the pusher's log names why it cannot connect. |
-| refused: its grant, its root | The relay does not let the reader in. `kernable cloud projects links <project>` lists the roots allowed for each partition: the reader's key must be granted `read` by one of them, or by an enrol key one of them granted. |
-| no copy key | The reader asks the pusher for it. The pusher hands it over only if it was given your root (`root` in `[push]`) and the reader's grant comes from it. |
+| refused: the key is not named, stopped or revoked | The relay does not let the reader in. `kernable cloud projects links <project>` lists each partition's keys with their role and state: add the reader's key (`kernable cloud projects key <project> <partition> reader.pub read`) or let a stopped one in again (`… activate`). A revoked key stays out: use a new one. |
+| no copy key | The reader's `--reader-copy-key` file is missing. Copy the partition's copy key there yourself: kernable Cloud never has it. |
 | behind | The reader is further behind the writer than `--reader-max-lag-ms` (30 s by default) and refuses queries until it catches up. Look at what slows it: its machine, its network to the relay. |
 
 A refused reader keeps asking (at most every 60 s) and follows as soon as it is let in, without a
