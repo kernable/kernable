@@ -67,6 +67,10 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           kept 30 days, linking again brings it back (admins)
   kernable cloud projects [--team <team>] node-token <name> <instance>
                                           A one-time join token (24 h) for a managed node (admins)
+  kernable cloud projects [--team <team>] alerts <name> [set <email>...]
+                                          Where the project's alerts go: always the team's owners
+                                          and admins, and these addresses (at most 10; set with
+                                          none leaves only the owners and admins; admins)
   --team defaults to your personal team; --json prints the API's answer as it is.";
 
 const DEFAULT_API: &str = "https://api.kernable.cloud";
@@ -932,6 +936,20 @@ fn tokens(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bo
     Ok(true)
 }
 
+/// Where a project's alerts go, besides the team's owners and admins.
+fn print_alert_to(name: &str, to: &serde_json::Value) {
+    match to.as_array().filter(|a| !a.is_empty()) {
+        None => println!("{name}: alerts go to the team's owners and admins"),
+        Some(to) => println!(
+            "{name}: alerts go to the team's owners and admins, and to {}",
+            to.iter()
+                .filter_map(|a| a.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<bool, String> {
     let mut rest: Vec<String> = rest.iter().map(|w| (*w).to_owned()).collect();
     let month = flag(&mut rest, "--month")?;
@@ -1036,6 +1054,15 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
             let path = format!("/v1/teams/{t}/projects/{name}/root/finish");
             let v = s.call("POST", &path, None)?;
             s.show(&v, |v| print_root(name, &v["project"]));
+        }
+        ["alerts", name] => {
+            let v = s.call("GET", &format!("/v1/teams/{t}/projects/{name}"), None)?;
+            s.show(&v, |v| print_alert_to(name, &v["project"]["alert_to"]));
+        }
+        ["alerts", name, "set", to @ ..] => {
+            let path = format!("/v1/teams/{t}/projects/{name}/alerts");
+            let v = s.call("PUT", &path, Some(json!({ "to": to })))?;
+            s.show(&v, |v| print_alert_to(name, &v["alert_to"]));
         }
         ["unlink", name, partition] => {
             let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}");
