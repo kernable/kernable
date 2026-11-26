@@ -29,11 +29,32 @@ console or the CLI; a self-run relay takes it from its file as today. Nothing in
 data: a key the list lets in without the copy key gets sealed bytes, and cannot make a record any
 reader would accept.
 
+## Each key's state
+
+Every key in a relay's access list has a state, set by the team's members (metadata, like the list
+itself, so it opens no data):
+
+| State | The relay | The instance |
+|---|---|---|
+| **active** | lets it push or read | works as usual |
+| **stopped** | if connected, tells it so, takes what it still has to push, then refuses it | stops taking writes, pushes the rest, stays read-only |
+| **revoked** | refuses it at once, telling it so if connected | stays read-only; what it never pushed is set aside |
+
+A partition gets a new pusher only once its current one is stopped or revoked; while it is
+active, the console and the CLI refuse and say so plainly ("stop or revoke the current writer of
+`plant-a` first"). No waiting time and no override decide it: a person does. A planned move stops
+the old writer (it pushes everything, nothing is lost); a lost machine is revoked (what it never
+pushed is lost with it). Readers have the same states: a stopped or revoked reader gets nothing
+more from the relay, without a new copy key.
+
+The relay cannot stop an instance it cannot reach: a writer cut off from it keeps taking writes
+until it connects again, learns that it is revoked, and turns read-only.
+
 ## Starting a writer from a copy
 
 1. On the new machine: `kernable keys new` for the kernel and its pusher.
-2. The pusher's public key is named as the copy's pusher in the relay's access list. From then on
-   the relay takes pushes only from it; the old pusher is refused.
+2. The old pusher is stopped or revoked, and the new pusher's public key is named as the copy's
+   pusher in the relay's access list. From then on the relay takes pushes only from it.
 3. `kernable start --from-copy <relay> --copy <name> --copy-key <file> …`: the kernel loads the
    copy (from the relay; a large copy may start from the relay's newest backup and take the rest
    from the relay), opens it, checks every record as a reader does, and then serves as the
@@ -44,8 +65,6 @@ usually the last seconds.
 
 ## Questions still open
 
-- **A running old writer.** The takeover is refused while the old pusher pushed within the last
-  60 s, unless forced (proposed, not decided).
 - **An old writer that comes back.** Its pusher is refused; it may rejoin only as a reader of the
   new state, with the records it never pushed set aside and listed (proposed, not decided).
 - **The kernel's own grants.** The new writer's pusher key needs `read` granted by the root key,
