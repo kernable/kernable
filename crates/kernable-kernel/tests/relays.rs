@@ -418,6 +418,12 @@ async fn a_writer_whose_log_no_longer_continues_the_copy_empties_it_only_when_to
 
     // Told with the copy's position: the copy begins anew from the second writer's first record.
     let _pusher = start_pusher_anew(&dir.0, &second_config.listen, &relay, "shop", Some(copy_at));
+    // Once the copy began anew: a reader that caught up with the old copy first would hold
+    // records the new one lacks, and stop at once (as the first reader does below).
+    until("the copy begins anew", || {
+        head().is_some_and(|h| h < copy_at)
+    })
+    .await;
     let new = reader_config(&dir.0, "new", 22, &relay, "shop");
     let new_reader = start_reader(&new).await;
     let at = held(&writer_2);
