@@ -1414,13 +1414,13 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
     let mut becoming = reader_config(&dir.0, "becoming", 25, &listen, "become.eu");
     becoming.replication.readers = true;
     becoming.replication.become_writer = true;
-    // The project key (99) approves its kernel key for the copy (`kernable approve`).
-    let project = key(99);
+    // The root approves its kernel key for the copy (`kernable approve`).
+    let project = root();
     let approval = kernable_core::proto::WriterApproval {
         copy: "become.eu".into(),
         kernel_key_id: id(&key(25)),
         issued_at: 1,
-        project_sig: Some(kernable_core::signing::sign(
+        root_sig: Some(kernable_core::signing::sign(
             &project,
             &kernable_core::signing::writer_approval_message("become.eu", &id(&key(25)), 1),
         )),
@@ -1474,18 +1474,19 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
     let new_at = held(&new_writer);
     assert!(new_at > old_at);
 
-    // A reader of the copy that knows the old writer's kernel key and the project key (not the
-    // new writer's) holds the new writer's records: the takeover told it. The copy went on, it
-    // did not begin anew.
-    let mut reading = reader_config(&dir.0, "reading", 21, &listen, "become.eu");
-    reading.replication.project_keys = vec![id(&project)];
+    // A reader of the copy that knows the old writer's kernel key and trusts the root (not the
+    // new writer's key) holds the new writer's records: the takeover told it. The copy went on,
+    // it did not begin anew.
+    let reading = reader_config(&dir.0, "reading", 21, &listen, "become.eu");
     let reader = start_reader(&reading).await;
     until_async("the reader holds the new writer's records", async || {
         held(&reader) >= new_at
     })
     .await;
-    // One that knows neither the project key nor the new writer's key stops at the takeover.
-    let unknowing = reader_config(&dir.0, "unknowing", 23, &listen, "become.eu");
+    // One that trusts another root, and not the new writer's key, stops at the takeover.
+    let mut unknowing = reader_config(&dir.0, "unknowing", 23, &listen, "become.eu");
+    unknowing.roots.push(id(&key(98)));
+    unknowing.roots.retain(|r| *r != id(&root()));
     let stopped = tokio::time::timeout(Duration::from_secs(5), standby::run(unknowing)).await;
     assert!(
         !matches!(stopped, Ok(Ok(()))),
@@ -1494,7 +1495,7 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
     assert!(
         log.text()
             .lines()
-            .any(|l| l.contains("took the partition over") && l.contains("--project-key")),
+            .any(|l| l.contains("took the partition over") && l.contains("not signed by a root")),
         "and says what to give it: {}",
         log.text()
     );

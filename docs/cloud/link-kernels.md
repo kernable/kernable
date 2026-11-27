@@ -25,8 +25,9 @@ tells a reader: keep it as carefully as a reader's key. One copy key per partiti
 
 ## 2. The project's root key
 
-A project has one root key: grants signed by it decide what every key may do in your kernels,
-and it is what kernable Cloud gives the project's [hosted kernel](/cloud/hosted-kernels). The
+A project has one root key, the **project root key**: grants signed by it decide what every
+key may do in your kernels, its approvals decide which kernel may write a partition (below), and
+it is what kernable Cloud gives the project's [hosted kernel](/cloud/hosted-kernels). The
 relay does not use it: it knows keys only by the list you keep for each partition (below). Tell
 kernable Cloud its public half once (admins and owners):
 
@@ -138,7 +139,7 @@ writer-c`, granted `read`); then tell kernable Cloud which key it uses:
 
 ```sh
 kernable cloud projects key shop eu writer-c.pub read          # it follows the copy first
-kernable approve project.key acme.shop.eu writer-c.pub         # where the project key is kept
+kernable approve root.key acme.shop.eu writer-c.pub            # where the root key is kept
 kernable start --root root.pub --readers on \
   --reader https://relay-eu.kernable.cloud:7400 --reader-copy acme.shop.eu --reader-copy-key copy.key \
   --instance-key writer-c.key --primary-kernel-key writer.pub \
@@ -148,12 +149,11 @@ kernable cloud projects link shop eu --pusher writer-c.pub     # now the new one
 ```
 
 The new kernel waits, and says why, until the relay takes its key as the pusher; then it becomes
-the writer and writes a **takeover** with your project key's approval. Start its pusher with
-the same `writer-c.key` (`[push]` on its node). Readers started with `--project-key project.pub` take the
-new writer from the takeover on, and refuse the old one's records from there: nothing to change
-on them. The **project key** is one per project, made once (`kernable keys new project`) and kept
-with you, never on an instance and never with kernable: it only approves which kernel key may
-write a partition.
+the writer and writes a **takeover** with your root key's approval. Start its pusher with the
+same `writer-c.key` (`[push]` on its node). Every reader of the project trusts its root already,
+so it takes the new writer from the takeover on, and refuses the old one's records from there:
+nothing to change on them. The approval is signed in a context of its own, so a grant never
+passes for one; only whoever holds the project's root key, never kernable, can make it.
 
 ## 8. Managed nodes (optional)
 

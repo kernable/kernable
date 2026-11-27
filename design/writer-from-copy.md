@@ -88,6 +88,8 @@ relay's own check, by the pusher key's state, comes with the states (1c).
 
 ## Readers trust a new writer by the project key
 
+> Changed 2026-11-27 ([instance keys](instance-keys.md)): the project root key signs approvals; there is no separate project key and no `--project-key`.
+
 Readers check every record against the writer's checkpoints, signed with its kernel key, and
 accept the kernel keys they are given. Each project has a **project key**, made once locally and
 kept in the team's own secrets; readers are given its public half (`--project-key`). It signs,

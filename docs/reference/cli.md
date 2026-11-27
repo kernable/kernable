@@ -94,10 +94,10 @@ Runs a relay: it keeps copies of writers' records in `<dir>` (one directory per 
 ### `kernable approve`
 
 ```text
-kernable approve <project.key> <copy> <kernel.pub|ID> [--out <file>]
+kernable approve <root.key> <copy> <instance.pub|ID> [--out <file>]
 ```
 
-The project key's approval that the kernel key may write the copy's partition (`<copy>.approval` by default), for a writer taking the copy over (kernable start `--approval`); readers given the project key (`--project-key`) accept it
+The root key's approval that the kernel's key may write the copy's partition (`<copy>.approval` by default), for a writer taking the copy over (kernable start `--approval`); readers and standbys that trust the root accept it
 
 ### `kernable relay key`
 

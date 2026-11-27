@@ -1,6 +1,6 @@
 # One key per instance, trust from the root, the copy key at join
 
-Status: decided 2026-11-27, not built. Builds on [a writer from its copy](writer-from-copy.md),
+Status: decided 2026-11-27; steps 1 and 2 built the same day. Builds on [a writer from its copy](writer-from-copy.md),
 and replaces its "copy key by hand only" and its separate project key.
 
 Today a small setup (one writer, two readers) needs a dozen key files and many public files

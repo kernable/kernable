@@ -621,7 +621,7 @@ pub fn relay_stream_message(rpc: &str, copy: &str, key_id: &str, issued_at: i64)
         .0
 }
 
-/// What a project key signs to let a kernel key write a copy's partition (a writer taking the
+/// What a root key signs to let a kernel key write a copy's partition (a writer taking the
 /// copy over, design/writer-from-copy.md).
 pub fn writer_approval_message(copy: &str, kernel_key_id: &str, issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.writer-approval")

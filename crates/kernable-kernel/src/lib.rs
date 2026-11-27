@@ -370,8 +370,8 @@ impl Kernel {
     }
 
     /// A writer that took its partition over from the copy (`--become-writer --approval`) says
-    /// so in its log, once: a takeover record with the project key's approval, from which the
-    /// copy's readers accept its kernel key (design/writer-from-copy.md).
+    /// so in its log, once: a takeover record with the root key's approval, from which the copy's
+    /// readers accept its kernel key (design/writer-from-copy.md, design/instance-keys.md).
     fn note_takeover(&self) -> Result<(), BoxError> {
         let config = self.config();
         let (Some(path), false) = (&config.replication.approval, config.replication.reader) else {
@@ -414,7 +414,7 @@ impl Kernel {
         tracing::warn!(
             record = filed.from,
             copy = %filed.copy,
-            "wrote the takeover: the copy's readers that know the project key take this kernel as its writer from here"
+            "wrote the takeover: the copy's readers take this kernel as its writer from here, by the root's approval"
         );
         Ok(())
     }

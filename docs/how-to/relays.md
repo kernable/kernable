@@ -168,7 +168,7 @@ the copy key and the root's grant as any writer.
 
 ```sh
 kernable keys new instance-c && kernable grant root.key instance-c.pub 'read=*'
-kernable approve project.key shop instance-c.pub        # where the project key is: shop.approval
+kernable approve root.key shop instance-c.pub           # where the root key is kept: shop.approval
 kernable start --root root.pub --readers on \
   --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
   --instance-key instance-c.key --primary-kernel-key kernel-a.pub \
@@ -185,9 +185,9 @@ serves as the writer. Start its pusher with `instance-c.key`: it continues the c
 copy's readers follow on.
 
 Readers check every record against the writer's kernel key. The new writer's first record is a
-**takeover**: its kernel key, with the **project key**'s approval (`kernable approve`, made where
-the project key is kept; it approves a kernel key for one copy and opens nothing else). Readers
-given the project key's public half (`--project-key project.pub`) take it: from there on they
+**takeover**: its kernel key, with the **root key**'s approval (`kernable approve`, made where the
+root key is kept; it approves a kernel key for one copy, in a signature no grant shares, and opens
+nothing else). Readers and standbys take it by the root they trust (`--root`): from there on they
 accept the new writer's checkpoints and no longer the old writer's, so an old writer that comes
-back cannot add to the history. A reader without the project key stops at the takeover and says
-what to give it (the project key, or the new writer's kernel key with `--primary-kernel-key`).
+back cannot add to the history. A follower that trusts another root stops at the takeover and
+says why; giving it the new writer's key with `--primary-kernel-key` lets it on.
