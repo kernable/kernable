@@ -434,6 +434,23 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             });
         }
     }
+    // A joined node runs its kernel with the key it joined with, the root pinned then and the
+    // approvals that root signed, unless its file names its own.
+    if let Some(link) = crate::managed::link(dir)? {
+        let text = |s: String| toml::Value::String(s);
+        let flags = &mut project.kernel.flags;
+        flags
+            .entry("instance-key".into())
+            .or_insert_with(|| text(link.key.display().to_string()));
+        if !link.roots.is_empty() {
+            flags
+                .entry("root".into())
+                .or_insert_with(|| text(link.roots.join(",")));
+        }
+        flags
+            .entry("approvals".into())
+            .or_insert_with(|| text(crate::managed::APPROVALS.into()));
+    }
     let node = project.node.unwrap_or_default();
     let name = match node.project {
         Some(p) => p,
@@ -1636,7 +1653,12 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         let d = dir.clone();
         match tokio::time::timeout(
             Duration::from_secs(10),
-            tokio::task::spawn_blocking(move || crate::managed::pull(&d)),
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = crate::managed::pull_signed(&d) {
+                    tracing::warn!(error = %e, "[node] what the root signed: starts with what it holds");
+                }
+                crate::managed::pull(&d)
+            }),
         )
         .await
         {

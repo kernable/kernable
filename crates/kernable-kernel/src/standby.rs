@@ -464,7 +464,9 @@ impl Standby {
             return Ok(false);
         };
         self.close_stores().await;
-        let (config, keys) = (self.config.clone(), self.follow.primary_kernel_keys.clone());
+        let mut keys = self.follow.primary_kernel_keys.clone();
+        keys.extend(crate::approved_writers(&self.config));
+        let config = self.config.clone();
         let restored =
             tokio::task::spawn_blocking(move || restore_into(&config, &from, &keys)).await?;
         *self.lock_stores() = Some(Arc::new(Stores::open(&self.config)?));
@@ -546,14 +548,12 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
     })?;
     if config.replication.reader && !follow.copy.is_empty() {
         // The writer's keys it trusts now: a copy key handed over is taken from them only.
-        let mut writers = Trust::of(
-            stores.store.as_ref(),
-            &follow.primary_kernel_keys,
-            &config.roots,
-        )?
-        .keys()
-        .to_vec();
-        writers.extend(follow.primary_kernel_keys.iter().cloned());
+        let mut given = follow.primary_kernel_keys.clone();
+        given.extend(crate::approved_writers(&config));
+        let mut writers = Trust::of(stores.store.as_ref(), &given, &config.roots)?
+            .keys()
+            .to_vec();
+        writers.extend(given);
         ask_copy_key(&follow, &key, &grant, &writers).await?;
     }
     // It becomes the writer with its own key, which pushes the copy from then on.
@@ -1017,7 +1017,8 @@ async fn follow_once(
                 standby.primary_head.store(batch.head, SeqCst);
                 let erased = erased_tenants(&batch);
                 let stores = standby.stores();
-                let keys = follow.primary_kernel_keys.clone();
+                let mut keys = follow.primary_kernel_keys.clone();
+                keys.extend(crate::approved_writers(&standby.config));
                 let roots = standby.config.roots.clone();
                 let applied_to = Arc::clone(&stores);
                 let seq = tokio::task::spawn_blocking(move || {
@@ -1141,7 +1142,8 @@ async fn take_image(standby: &Arc<Standby>, inbound: &mut Inbound) -> Result<u64
                 )?;
                 records += batch.records.len();
                 let stores = standby.stores();
-                let keys = standby.follow.primary_kernel_keys.clone();
+                let mut keys = standby.follow.primary_kernel_keys.clone();
+                keys.extend(crate::approved_writers(&standby.config));
                 let roots = standby.config.roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let mut trust = Trust::of(stores.store.as_ref(), &keys, &roots)?;

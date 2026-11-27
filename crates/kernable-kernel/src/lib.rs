@@ -1710,6 +1710,47 @@ pub fn read_approval(
     )
 }
 
+/// The writer keys the root approved for a follower's copy (`--approvals`): the one in
+/// `<copy>.approval`, if a root it trusts signed it. Read again on every call, so an approval
+/// that arrives later counts from then on.
+pub fn approved_writers(config: &config::Config) -> Vec<String> {
+    let (Some(dir), Some(follow)) = (&config.replication.approvals, &config.replication.follow)
+    else {
+        return Vec::new();
+    };
+    if follow.copy.is_empty() {
+        return Vec::new();
+    }
+    let path = dir.join(format!("{}.approval", follow.copy));
+    if !path.exists() {
+        return Vec::new();
+    }
+    let approval = match read_approval(&path) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(error = %e, "an approval that does not read: left out");
+            return Vec::new();
+        }
+    };
+    let signed = approval.root_sig.as_ref().is_some_and(|sig| {
+        config.roots.contains(&sig.key_id)
+            && signing::verify(
+                sig,
+                &signing::writer_approval_message(
+                    &approval.copy,
+                    &approval.kernel_key_id,
+                    approval.issued_at,
+                ),
+            )
+            .is_ok()
+    });
+    if !signed || approval.copy != follow.copy {
+        tracing::warn!(file = %path.display(), "an approval not signed by a root this kernel trusts, or for another copy: left out");
+        return Vec::new();
+    }
+    vec![approval.kernel_key_id]
+}
+
 pub fn promoted(mut config: config::Config) -> config::Config {
     config.take_over_ms = config.take_over_ms.max(PROMOTED_TAKE_OVER_MS);
     // A reader that took its copy over (`--become-writer`) is the writer from here.

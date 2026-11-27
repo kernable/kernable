@@ -406,11 +406,12 @@ Previews:
                                           Then checks the copy like verify.
 
 Run a node:
-  kernable node join <url> <token> [<dir>] [--ca <pem>]
+  kernable node join <url> <token> [<dir>] --root <root.pub|ID> [--ca <pem>]
                                           Links the node in <dir> (default .) to a control point
                                           (--ca: whose certificate this CA signed, trusted for it
-                                          alone) with a one-time join token: makes node.key (unless
-                                          there is one) and writes managed.toml. kernable node
+                                          alone) with a one-time join token: makes instance.key
+                                          (unless there is one), the kernel's one key, and writes
+                                          managed.toml with the project's root (--root) pinned. kernable node
                                           then pulls signed settings every 5 s and reports every
                                           30 s. Settings set only a fixed list: the role and whom
                                           it follows (writer, standby, reader of a writer or of a
@@ -420,6 +421,10 @@ Run a node:
                                           services. Settings with anything else, not signed by the
                                           settings key pinned at the join, for another node or
                                           older than those held are refused.
+                                          It also pulls what the root signed: the grant for its
+                                          key (written beside it) and the project's writer
+                                          approvals (approvals/), each taken only signed by the
+                                          pinned root.
   kernable node <project.toml>            Runs one node of a project: the kernel and, with a
                                           [backup] section, the backup follower, with a [push]
                                           section the pusher to a relay, as child processes
@@ -669,10 +674,7 @@ async fn main() -> ExitCode {
         }
         ["relay", flags @ ..] => return run_relay(flags).await,
         ["push", flags @ ..] => return run_push(flags).await,
-        ["node", "join", url, token] => node_join(url, token, ".", None),
-        ["node", "join", url, token, "--ca", ca] => node_join(url, token, ".", Some(ca)),
-        ["node", "join", url, token, dir] => node_join(url, token, dir, None),
-        ["node", "join", url, token, dir, "--ca", ca] => node_join(url, token, dir, Some(ca)),
+        ["node", "join", url, token, rest @ ..] => node_join(url, token, rest),
         ["node", project] => return run_node(project).await,
         ["expose", pairs @ ..] if !pairs.is_empty() => return expose(pairs).await,
         ["backup", "key", file] => backup_key(file),
@@ -1473,12 +1475,32 @@ async fn expose(pairs: &[&str]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `kernable node join <url> <token> [<dir>]`: links the node in `dir` to a control point.
-fn node_join(url: &str, token: &str, dir: &str, ca: Option<&str>) -> Result<bool> {
-    let node = kernable_kernel::managed::join(url, token, Path::new(dir), ca.map(Path::new))
-        .map_err(boxed)?;
+/// `kernable node join <url> <token> [<dir>] --root <root> [--ca <pem>]`: links the node in
+/// `dir` to a control point, the project's root pinned.
+fn node_join(url: &str, token: &str, rest: &[&str]) -> Result<bool> {
+    let (mut dir, mut ca, mut roots) = (".", None, Vec::new());
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--ca" => ca = Some(*it.next().ok_or("--ca needs a file")?),
+            "--root" => {
+                let root = it.next().ok_or("--root needs a .pub file or a key ID")?;
+                for r in root.split(',').map(str::trim).filter(|r| !r.is_empty()) {
+                    roots.push(key_id_of("--root", r)?);
+                }
+            }
+            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}").into()),
+            d => dir = d,
+        }
+    }
+    let (node, key) =
+        kernable_kernel::managed::join(url, token, Path::new(dir), ca.map(Path::new), &roots)
+            .map_err(boxed)?;
     println!(
-        "joined as {node}: {dir}/managed.toml written; kernable node takes its settings from {url} from now on"
+        "joined as {node} with the instance key {key} (compare it in the console)\n\
+         {dir}/managed.toml written, the root {} pinned; kernable node takes its settings, and \
+         the grants and approvals the root signed, from {url} from now on",
+        roots.join(", ")
     );
     Ok(true)
 }

@@ -380,10 +380,10 @@ Makes a masked copy (a preview) of a store on this machine, read in one consiste
 ### `kernable node join`
 
 ```text
-kernable node join <url> <token> [<dir>] [--ca <pem>]
+kernable node join <url> <token> [<dir>] --root <root.pub|ID> [--ca <pem>]
 ```
 
-Links the node in `<dir>` (default .) to a control point (`--ca`: whose certificate this CA signed, trusted for it alone) with a one-time join token: makes `node.key` (unless there is one) and writes managed.toml. kernable node then pulls signed settings every 5 s and reports every 30 s. Settings set only a fixed list: the role and whom it follows (writer, standby, reader of a writer or of a copy), the relay and copy a writer pushes to, the kernel version (`versions/<v>/kernable`), a reader's maximum lag and a pair's witness; never keys, grants, secrets or services. Settings with anything else, not signed by the settings key pinned at the join, for another node or older than those held are refused.
+Links the node in `<dir>` (default .) to a control point (`--ca`: whose certificate this CA signed, trusted for it alone) with a one-time join token: makes `instance.key` (unless there is one), the kernel's one key, and writes managed.toml with the project's root (`--root`) pinned. kernable node then pulls signed settings every 5 s and reports every 30 s. Settings set only a fixed list: the role and whom it follows (writer, standby, reader of a writer or of a copy), the relay and copy a writer pushes to, the kernel version (`versions/<v>/kernable`), a reader's maximum lag and a pair's witness; never keys, grants, secrets or services. Settings with anything else, not signed by the settings key pinned at the join, for another node or older than those held are refused. It also pulls what the root signed: the grant for its key (written beside it) and the project's writer approvals (approvals/), each taken only signed by the pinned root.
 
 ### `kernable node`
 

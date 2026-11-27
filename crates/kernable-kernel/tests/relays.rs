@@ -1585,3 +1585,62 @@ async fn a_new_reader_gets_the_copy_key_sealed_to_its_key_by_its_grant() {
         log.text()
     );
 }
+
+/// A reader given no writer key takes the one the root approved for its copy (`--approvals`, as
+/// a joined node writes them), and only one a root it trusts signed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_takes_its_writer_from_the_roots_approval() {
+    let dir = Dir::new("relays-approved");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..3 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let relay = start_relay(&dir.0).await;
+    let _pusher = start_pusher(&dir.0, &writer_config.listen, &relay, "shop");
+    let approvals = dir.0.join("approvals");
+    std::fs::create_dir_all(&approvals).unwrap();
+    let approve = |by: &ed25519_dalek::SigningKey| kernable_core::proto::WriterApproval {
+        copy: "shop".into(),
+        kernel_key_id: id(&key(3)),
+        issued_at: 1,
+        root_sig: Some(kernable_core::signing::sign(
+            by,
+            &kernable_core::signing::writer_approval_message("shop", &id(&key(3)), 1),
+        )),
+    };
+    // Signed by another key than the root: no writer it trusts, it does not catch up.
+    std::fs::write(
+        approvals.join("shop.approval"),
+        hex(&approve(&key(98)).encode_to_vec()),
+    )
+    .unwrap();
+    let mut reading = reader_config(&dir.0, "approved", 21, &relay, "shop");
+    reading.replication.approvals = Some(approvals.clone());
+    if let Some(f) = reading.replication.follow.as_mut() {
+        f.primary_kernel_keys.clear();
+    }
+    let refused = tokio::time::timeout(Duration::from_secs(3), standby::run(reading.clone())).await;
+    assert!(!matches!(refused, Ok(Ok(()))), "{refused:?}");
+    // The root's: it does.
+    std::fs::write(
+        approvals.join("shop.approval"),
+        hex(&approve(&root()).encode_to_vec()),
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(dir.0.join("approved.db"));
+    let mut fresh = reader_config(&dir.0, "approved2", 23, &relay, "shop");
+    fresh.replication.approvals = Some(approvals);
+    if let Some(f) = fresh.replication.follow.as_mut() {
+        f.primary_kernel_keys.clear();
+    }
+    let reader = start_reader(&fresh).await;
+    let at = held(&writer);
+    until_async(
+        "the reader holds the approved writer's records",
+        async || held(&reader) >= at,
+    )
+    .await;
+}

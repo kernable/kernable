@@ -161,20 +161,42 @@ so it takes the new writer from the takeover on, and refuses the old one's recor
 nothing to change on them. The approval is signed in a context of its own, so a grant never
 passes for one; only whoever holds the project's root key, never kernable, can make it.
 
-## 8. Managed nodes (optional)
+## 8. Managed nodes: join instead of copying files
 
-A node can be linked to kernable Cloud, which then sets its role, whom it follows, the copy it
-pushes to, its kernel version and a reader's maximum lag, and nothing else: never keys, grants,
-secrets, your code or your services.
+A node joined to kernable Cloud makes its key on its machine, and from then on gets from kernable
+Cloud everything else it needs that is public or signed by your root key: its role, whom it
+follows, the copy it pushes to, its kernel version and a reader's maximum lag, **its grant** and
+**the writers your root approved**. Never a secret: kernable carries what your root signed and
+can make none of it, and the node checks every signature against the root it pinned when it
+joined.
 
 Owners and admins make a one-time join token (valid 24 hours) per node, in the console under
-**Managed nodes** or with:
+**Managed nodes** or with the CLI, which prints the whole join command, your root included:
 
 ```sh
 kernable cloud projects node-token shop eu-1
-kernable node join https://control.kernable.cloud <join token>   # on the node's machine
+# on the node's machine:
+kernable node join https://control.kernable.cloud <join token> --root 81c2d4e5f6a7…
+# joined as n-… with the instance key 5e0c… (compare it in the console)
 ```
 
-The node keeps its link in `managed.toml` beside its project file, pulls its settings every few
-seconds and reports how it stands. The protocol is open:
-[managed nodes](/reference/managed-node).
+Then sign its grant where your root key is kept; kernable carries it to the node, which writes it
+beside its key within seconds:
+
+```sh
+kernable cloud projects grant shop root.key 5e0c… 'read=*' 'copy=acme.shop.eu'
+kernable cloud projects key shop eu 5e0c… read                 # the relay lets it in
+```
+
+A reader joined this way needs no file by hand: its key and vault are its own, its grant comes
+signed, the writer it trusts comes as your root's approval, and the copy key comes from the
+writer's pusher, sealed to its key (section 5). Approve the writer of a partition once, its first
+or a new one:
+
+```sh
+kernable cloud projects approve shop eu root.key writer.pub
+kernable cloud projects signed shop                            # what kernable carries
+```
+
+The node keeps its link in `managed.toml` beside its project file, pulls every few seconds and
+reports how it stands. The protocol is open: [managed nodes](/reference/managed-node).

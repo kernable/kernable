@@ -1,6 +1,6 @@
 # One key per instance, trust from the root, the copy key at join
 
-Status: decided 2026-11-27; steps 1 to 3 built the same day. Builds on [a writer from its copy](writer-from-copy.md),
+Status: decided 2026-11-27; steps 1 to 4 built the same day. Builds on [a writer from its copy](writer-from-copy.md),
 and replaces its "copy key by hand only" and its separate project key.
 
 Today a small setup (one writer, two readers) needs a dozen key files and many public files
@@ -47,17 +47,22 @@ managed node, below) only takes an approved one, the first writer included.
 
 ## 3. A joined instance pulls what is public or signed
 
-A node joined to a control point (`kernable node join`, [managed nodes](../docs/reference/managed-node.md))
-already pulls its settings. It now also pulls, and checks before using:
+`kernable node join <url> <token> --root <root>` makes the kernel's one key on the machine,
+joins with its public half and pins the root it is given (the console and the CLI print the whole
+command). The node then pulls from the control point, besides its settings
+(`GET /v1/nodes/<id>/signed`):
 
-- the grants for its key, signed by the root;
-- the writer approvals for the copies it follows, signed by the root;
-- the relay's address and its copy's name.
+- the grants for its key, signed by the root: the newest written beside its key;
+- the writer approvals of its project, signed by the root: written to `approvals/<copy>.approval`.
 
-It pins `root.pub` at join (the join prints the root's ID to compare). A changed grant or
-approval fails its signature; the control point can deliver but cannot forge. Joining makes the
-instance key on the machine and sends only its ID: the control point lists it as waiting until
-someone with the root key signs its grant (`kernable grant`, uploaded with the CLI).
+It checks every signature against the pinned root before it writes a file; its kernel checks the
+approvals again (`--approvals`): a reader takes the writer approved for its copy beside any it
+was given, and needs none given; `--become-writer` takes its approval from there. A changed grant
+or approval fails its signature: the control point can deliver but cannot forge.
+
+The member who holds the root signs on their own machine and hands the signed file to the Cloud
+(`kernable cloud projects grant …`, `… approve …`); the account service checks it against the
+project's root to catch mistakes early and the control point stores it, newest per key and copy.
 
 ## 4. The copy key, sealed to a granted instance
 

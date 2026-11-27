@@ -132,6 +132,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "With `--reader-copy`: the file of the key the copy is sealed with (`kernable relay key`), the pusher's `--copy-key`. The relay holds the records sealed and never this key.",
     ),
     (
+        "--approvals",
+        "KERNABLE_APPROVALS",
+        "",
+        "With `--reader` of a copy (`--reader-copy`): a directory of the root's writer approvals, `<copy>.approval` each (`kernable approve`; a joined [node](managed-node) writes them there from its control point). The kernel takes the writer approved for its copy, if a root it trusts (`--root`) signed the approval, beside any `--primary-kernel-key`, which it then needs none of. With `--become-writer` and no `--approval`, its approval is the one there.",
+    ),
+    (
         "--approval",
         "KERNABLE_APPROVAL",
         "",
@@ -470,6 +476,8 @@ pub struct Replication {
     pub become_writer: bool,
     /// `--approval`: the root key's approval this kernel writes into its takeover record.
     pub approval: Option<PathBuf>,
+    /// `--approvals`: the root's writer approvals, `<copy>.approval` each.
+    pub approvals: Option<PathBuf>,
 }
 
 /// A backup a new reader starts from.
@@ -664,8 +672,9 @@ impl Config {
                     .unwrap_or_default(),
             };
             let keys: Vec<String> = keys.into_iter().filter(|k| !k.is_empty()).collect();
-            if keys.is_empty() {
-                return Err("--follow and --witness need --primary-kernel-key: the other kernel's kernel key, to check its checkpoints".into());
+            let approved = get("--reader-copy").is_some() && get("--approvals").is_some();
+            if keys.is_empty() && !approved {
+                return Err("--follow and --witness need --primary-kernel-key: the other kernel's kernel key, to check its checkpoints (a reader of a copy may take it from --approvals instead)".into());
             }
             keys.iter()
                 .map(|k| key_id("--primary-kernel-key", k))
@@ -795,7 +804,17 @@ impl Config {
                 }
             },
             approval: get("--approval").map(PathBuf::from),
+            approvals: get("--approvals").map(PathBuf::from),
         };
+        let mut replication = replication;
+        if replication.become_writer && replication.approval.is_none() {
+            let copy = replication.follow.as_ref().map(|f| f.copy.clone());
+            if let (Some(dir), Some(copy)) = (&replication.approvals, copy)
+                && !copy.is_empty()
+            {
+                replication.approval = Some(dir.join(format!("{copy}.approval")));
+            }
+        }
         if replication.approval.is_some() && !replication.become_writer {
             return Err(
                 "--approval goes with --become-writer: the takeover record it is written into"
@@ -1354,6 +1373,33 @@ mod tests {
         );
         let config = parse(&[&copy[..], &["--readers", "on"]].concat()).unwrap();
         assert!(config.replication.become_writer);
+        assert_eq!(config.replication.approval, None);
+        // With --approvals, its approval is the one there for its copy, and it needs no writer
+        // key given: the approved one counts.
+        let approved = Config::from_args(
+            &[
+                "--root",
+                &root,
+                "--reader",
+                "https://relay.example:7400",
+                "--reader-copy",
+                "shop.eu",
+                "--reader-copy-key",
+                "copy.key",
+                "--approvals",
+                "approvals",
+                "--become-writer",
+                "on",
+                "--readers",
+                "on",
+            ],
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(
+            approved.replication.approval.as_deref(),
+            Some(std::path::Path::new("approvals/shop.eu.approval"))
+        );
         // Once it took the copy over, it runs as the writer.
         let writer = crate::promoted(config);
         assert!(!writer.replication.reader && !writer.replication.become_writer);

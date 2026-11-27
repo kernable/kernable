@@ -8,13 +8,17 @@ machine beyond the fixed list below.
 ## Joining
 
 ```sh
-kernable node join https://control.example.net <token> [<dir>] [--ca <ca.pem>]
+kernable node join https://control.example.net <token> [<dir>] --root <root.pub|ID> [--ca <ca.pem>]
 ```
 
 `--ca`: a control point whose certificate a CA of your own signed; the node trusts that CA alone
 for it, and keeps the path (`ca`) in `managed.toml`.
 
-The node makes its key `node.key` (unless there is one), and sends, unsigned:
+`--root`: the project's root key, pinned. What the control point carries that the root signed
+(below) counts only signed by it.
+
+The node makes the kernel's one key, `instance.key` (unless there is one, with its `.pub`), and
+sends, unsigned:
 
 ```http
 POST /v1/nodes/join
@@ -28,7 +32,9 @@ A token is good once. The answer names the node and the control point's **settin
 ```
 
 The node writes `managed.toml` beside its project file (`url`, `node`, `key`,
-`settings-key`): the settings key is pinned there, and only settings it signed count.
+`settings-key`, `roots`): the settings key and the roots are pinned there, and only settings the
+settings key signed count. Its kernel runs with that key, those roots and `--approvals approvals`
+unless its project file names its own.
 
 ## Signed requests
 
@@ -69,6 +75,24 @@ The settings name **only** these fields; settings with any other field are refus
 Keys, grants, secrets, the vault, the stores and the services stay as the project file says:
 settings never touch them. A setting the node cannot apply (a kernel version it does not have,
 a witness without a `[pair]`) is logged and reported, and the rest applies.
+
+## What the root signed
+
+Every five seconds too:
+
+```http
+GET /v1/nodes/<node>/signed         →  {"grants": ["<hex>", …], "approvals": ["<hex>", …]}
+```
+
+`grants`: encoded `Grant` messages for the node's key; `approvals`: the project's encoded
+`WriterApproval` messages (`storage.proto`). The node takes a grant only if it is for its key and
+signed by a pinned root, the newest one, and writes it beside its key (`instance.grant`) when it
+is newer than the one there; it never takes one back. It takes an approval only signed by a
+pinned root, the newest per copy, and writes it to `approvals/<copy>.approval`; one the control
+point no longer carries is removed. A reader's kernel trusts the writer approved for its copy
+(`--approvals`), and a kernel taking its copy over writes its approval into its takeover. The
+control point checks nothing of this and can make none of it: it carries what the customer's
+root signed.
 
 ## Reports
 

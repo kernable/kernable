@@ -66,14 +66,29 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           read, push: adds the key in that role (a reader, a
                                           writer's pusher), active; stop: refused until activated
                                           again; revoke: refused for good. The relay applies it
-                                          within seconds (developers and up). Copy keys never
-                                          pass through kernable Cloud: give each instance its
-                                          partition's copy key yourself
+                                          within seconds (developers and up)
+  kernable cloud projects [--team <team>] grant <name> <root.key> <instance.pub|ID> <permission>...
+                                          Signs a grant with the project's root key here (it never
+                                          leaves this machine) and hands it to kernable Cloud,
+                                          which carries it to the instance's joined node; the node
+                                          takes it only signed by the root it pinned. Permissions
+                                          as for kernable grant; copy=<copy> lets the writer's
+                                          pusher hand the instance the copy key, sealed to it
+                                          (admins)
+  kernable cloud projects [--team <team>] approve <name> <partition> <root.key> <instance.pub|ID>
+                                          Signs here, with the project's root key, that this
+                                          instance writes the partition: its first writer or a new
+                                          one (kernable start --become-writer). Its readers take it
+                                          from their nodes (admins)
+  kernable cloud projects [--team <team>] signed <name>
+                                          The grants and approvals kernable Cloud carries for the
+                                          project's nodes
   kernable cloud projects [--team <team>] unlink <name> <partition>
                                           Nothing pushes to or reads the copy from then on; it is
                                           kept 30 days, linking again brings it back (admins)
   kernable cloud projects [--team <team>] node-token <name> <instance>
-                                          A one-time join token (24 h) for a managed node (admins)
+                                          A one-time join token (24 h) for a managed node, and the
+                                          command that joins it with the project's root (admins)
   kernable cloud projects [--team <team>] alerts <name> [set <email>...]
                                           Where the project's alerts go: always the team's owners
                                           and admins, and these addresses (at most 10; set with
@@ -1103,13 +1118,104 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
             });
         }
         ["node-token", name, instance] => {
+            let project = s.call("GET", &format!("/v1/teams/{t}/projects/{name}"), None)?;
+            let root = project["project"]["root"]["key_id"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!(
+                        "{name}: no root key yet; set it first: kernable cloud projects root {name} set root.pub"
+                    )
+                })?;
             let path = format!("/v1/teams/{t}/projects/{name}/nodes/tokens");
             let v = s.call("POST", &path, Some(json!({ "instance": instance })))?;
             s.show(&v, |v| {
                 println!(
-                    "once, within 24 hours, on {instance}'s machine:\n  kernable node join https://control.kernable.cloud {}",
+                    "once, within 24 hours, on {instance}'s machine:\n  kernable node join https://control.kernable.cloud {} --root {root}",
                     text(v, "token")
                 )
+            });
+        }
+        ["grant", name, root_key, key, permissions @ ..] if !permissions.is_empty() => {
+            let root = kernable_core::signing::read_signing_key(root_key)
+                .map_err(|e| format!("{root_key}: {e}"))?;
+            let key = key_id_of(key)?;
+            let permissions = permissions
+                .iter()
+                .map(|p| {
+                    let (action, types) = p.split_once('=').unwrap_or(("*", p));
+                    kernable_core::proto::Permission {
+                        action: action.to_owned(),
+                        types: types.split(',').map(str::to_owned).collect(),
+                    }
+                })
+                .collect();
+            let grant =
+                kernable_core::signing::grant(&root, &key, permissions, "", crate::now_ms());
+            let body = json!({ "grant": hex::encode(prost::Message::encode_to_vec(&grant)) });
+            let path = format!("/v1/teams/{t}/projects/{name}/grants/{key}");
+            let v = s.call("PUT", &path, Some(body))?;
+            s.show(&v, |_| {
+                let what: Vec<String> = grant
+                    .permissions
+                    .iter()
+                    .map(|p| format!("{}={}", p.action, p.types.join(",")))
+                    .collect();
+                println!(
+                    "{key}: {} (signed here by the root {}); its node takes it within seconds",
+                    what.join(" "),
+                    kernable_core::signing::key_id(&root.verifying_key())
+                )
+            });
+        }
+        ["approve", name, partition, root_key, key] => {
+            let root = kernable_core::signing::read_signing_key(root_key)
+                .map_err(|e| format!("{root_key}: {e}"))?;
+            let key = key_id_of(key)?;
+            let links = s.call("GET", &format!("/v1/teams/{t}/projects/{name}/links"), None)?;
+            let copy = links["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["copy"].as_str())
+                .find(|c| c.rsplit('.').next() == Some(partition))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!("{name} has no partition {partition} linked: link it first")
+                })?;
+            let issued_at = crate::now_ms();
+            let approval = kernable_core::proto::WriterApproval {
+                copy: copy.clone(),
+                kernel_key_id: key.clone(),
+                issued_at,
+                root_sig: Some(kernable_core::signing::sign(
+                    &root,
+                    &kernable_core::signing::writer_approval_message(&copy, &key, issued_at),
+                )),
+            };
+            let body = json!({ "approval": hex::encode(prost::Message::encode_to_vec(&approval)) });
+            let path = format!("/v1/teams/{t}/projects/{name}/links/{partition}/approval");
+            let v = s.call("PUT", &path, Some(body))?;
+            s.show(&v, |_| {
+                println!("{copy}: {key} writes it, approved here by the root; its readers take it within seconds")
+            });
+        }
+        ["signed", name] => {
+            let v = s.call(
+                "GET",
+                &format!("/v1/teams/{t}/projects/{name}/signed"),
+                None,
+            )?;
+            s.show(&v, |v| {
+                for e in v.as_array().into_iter().flatten() {
+                    println!(
+                        "{}\t{}\tsigned {}\tby {}",
+                        text(e, "kind"),
+                        text(e, "subject"),
+                        utc(e["issued_at"].as_i64().unwrap_or_default()),
+                        text(e, "by")
+                    );
+                }
             });
         }
         _ => return Ok(false),

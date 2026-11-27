@@ -592,7 +592,7 @@ struct Relay {
     copies: Mutex<HashMap<String, Arc<Copy>>>,
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()

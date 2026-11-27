@@ -499,7 +499,8 @@ async fn follow_once(kernel: &Arc<Kernel>, reader: &Arc<Reader>) -> Result<(), E
                         )
                     })
                     .collect();
-                let (k, keys) = (Arc::clone(kernel), reader.kernel_keys.clone());
+                let (k, mut keys) = (Arc::clone(kernel), reader.kernel_keys.clone());
+                keys.extend(crate::approved_writers(&kernel.config()));
                 let roots = kernel.config().roots.clone();
                 let seq = tokio::task::spawn_blocking(move || {
                     let mut trust = standby::Trust::of(k.store.as_ref(), &keys, &roots)?;

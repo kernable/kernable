@@ -1,9 +1,10 @@
 //! A managed node (docs/reference/managed-node.md): `kernable node` linked to a control point
 //! that tells it a few things about its kernel, and that it tells how it stands.
 //!
-//! `kernable node join <url> <token>` makes the node's key (`node.key`), joins with a one-time
-//! token and writes `managed.toml` beside the project file: the control point's address, the
-//! node's ID, its key, and the control point's settings key, pinned. From then on the node pulls
+//! `kernable node join <url> <token> --root <root>` makes the kernel's one key (`instance.key`,
+//! unless there is one), joins with it and a one-time token, and writes `managed.toml` beside the
+//! project file: the control point's address, the node's ID, its key, the control point's
+//! settings key, pinned, and the project's root key, pinned too. From then on the node pulls
 //! its settings every five seconds, signed with its key, and takes them only if the pinned key
 //! signed them, they are for this node, and their version is newer than the one it holds
 //! (`managed-settings.json`); every thirty seconds it reports its role, lag and version.
@@ -14,6 +15,11 @@
 //! `versions/<version>/kernable`), a reader's maximum lag, and the witness of a pair. Keys,
 //! grants, secrets and the customer's services stay in the customer's own file; settings never
 //! touch them.
+//!
+//! What is signed by the project's root key comes from the control point too, checked against
+//! the pinned root before it is used (design/instance-keys.md): the grant for the node's key,
+//! written beside it, and the writer approvals of the project, written to `approvals/`. The
+//! control point carries them and can make none.
 
 use std::{
     collections::BTreeMap,
@@ -35,6 +41,10 @@ pub struct Link {
     pub node: String,
     pub key: PathBuf,
     pub settings_key: String,
+    /// The project's root keys (key IDs), pinned at the join: grants and writer approvals from
+    /// the control point count only signed by one of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
     /// A control point with a certificate of its own CA (one the node does not trust otherwise):
     /// that CA's PEM file (made absolute at the join).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,10 +136,24 @@ fn agent(ca: Option<&Path>) -> Result<ureq::Agent, BoxError> {
     Ok(config.build().into())
 }
 
-/// `kernable node join <url> <token>`: the node's key in `dir` (a new one unless there is
-/// one), joined, `managed.toml` written. Returns the node's ID.
-pub fn join(url: &str, token: &str, dir: &Path, ca: Option<&Path>) -> Result<String, BoxError> {
-    let key_path = dir.join("node.key");
+/// `kernable node join <url> <token> --root <root>`: the kernel's key in `dir` (`instance.key`,
+/// a new one unless there is one), joined, `managed.toml` written with `roots` pinned. Returns
+/// the node's ID and its key's ID.
+pub fn join(
+    url: &str,
+    token: &str,
+    dir: &Path,
+    ca: Option<&Path>,
+    roots: &[String],
+) -> Result<(String, String), BoxError> {
+    if roots.is_empty() {
+        return Err(
+            "give the project's root key with --root (its .pub or ID): the grants and \
+                    approvals the control point brings count only signed by it"
+                .into(),
+        );
+    }
+    let key_path = dir.join(INSTANCE_KEY);
     let key = if key_path.exists() {
         kernable_core::signing::read_signing_key(&key_path)?
     } else {
@@ -140,6 +164,10 @@ pub fn join(url: &str, token: &str, dir: &Path, ca: Option<&Path>) -> Result<Str
         std::io::Write::write_all(
             &mut options.open(&key_path)?,
             format!("{}\n", hex::encode(key.to_bytes())).as_bytes(),
+        )?;
+        std::fs::write(
+            key_path.with_extension("pub"),
+            format!("{}\n", kernable_core::signing::key_id(&key.verifying_key())),
         )?;
         key
     };
@@ -171,12 +199,166 @@ pub fn join(url: &str, token: &str, dir: &Path, ca: Option<&Path>) -> Result<Str
     let link = Link {
         url: url.to_owned(),
         node: joined.node.clone(),
-        key: PathBuf::from("node.key"),
+        key: PathBuf::from(INSTANCE_KEY),
         settings_key: joined.settings_key,
+        roots: roots.to_vec(),
         ca,
     };
     std::fs::write(dir.join(LINK), toml::to_string(&link)?)?;
-    Ok(joined.node)
+    Ok((
+        joined.node,
+        kernable_core::signing::key_id(&key.verifying_key()),
+    ))
+}
+
+/// The kernel's one key a joined node makes, and runs its kernel with unless its file names
+/// another `instance-key`.
+pub const INSTANCE_KEY: &str = "instance.key";
+
+/// Where a joined node keeps the project's writer approvals (`<copy>.approval`), for its kernel's
+/// `--approvals`.
+pub const APPROVALS: &str = "approvals";
+
+/// What the control point carries for a node: what the project's root signed.
+#[derive(Debug, Default, Deserialize)]
+struct Signed {
+    /// Grants for the node's key (hex of the encoded `Grant`).
+    #[serde(default)]
+    grants: Vec<String>,
+    /// The project's writer approvals (hex of the encoded `WriterApproval`).
+    #[serde(default)]
+    approvals: Vec<String>,
+}
+
+/// Takes what the control point carries once it checked out against the pinned roots: the
+/// newest grant for the node's key, written beside it (`<key>.grant`) when newer than the one
+/// there, and the approvals, written to `approvals/`. Whether anything changed.
+fn take_signed(dir: &Path, link: &Link, key_id: &str, signed: &Signed) -> Result<bool, BoxError> {
+    use prost::Message;
+    let mut changed = false;
+    let newest = signed
+        .grants
+        .iter()
+        .filter_map(|g| match hex::decode(g.trim()).map(|b| kernable_core::proto::Grant::decode(b.as_slice())) {
+            Ok(Ok(grant)) => Some(grant),
+            _ => {
+                tracing::warn!("[node] a grant from the control point does not read: left out");
+                None
+            }
+        })
+        .filter(|g| {
+            let ok = g.key_id == key_id && crate::grants::chain(g, &link.roots, None).is_ok();
+            if !ok {
+                tracing::warn!(key = %g.key_id, "[node] a grant from the control point is not this node's, or not signed by the pinned root: left out");
+            }
+            ok
+        })
+        .max_by_key(|g| g.issued_at);
+    if let Some(grant) = newest {
+        let path = dir.join(&link.key).with_extension("grant");
+        let held = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| hex::decode(t.trim()).ok())
+            .and_then(|b| kernable_core::proto::Grant::decode(b.as_slice()).ok());
+        if held.is_none_or(|h| h.issued_at < grant.issued_at) {
+            std::fs::write(&path, format!("{}\n", hex::encode(grant.encode_to_vec())))?;
+            tracing::info!(file = %path.display(), "[node] a new grant for this node's key, signed by the root");
+            changed = true;
+        }
+    }
+    let mut wanted = std::collections::BTreeMap::new();
+    for text in &signed.approvals {
+        let approval = match hex::decode(text.trim())
+            .map(|b| kernable_core::proto::WriterApproval::decode(b.as_slice()))
+        {
+            Ok(Ok(a)) => a,
+            _ => {
+                tracing::warn!("[node] an approval from the control point does not read: left out");
+                continue;
+            }
+        };
+        let signed_by_root = approval.root_sig.as_ref().is_some_and(|sig| {
+            link.roots.contains(&sig.key_id)
+                && kernable_core::signing::verify(
+                    sig,
+                    &kernable_core::signing::writer_approval_message(
+                        &approval.copy,
+                        &approval.kernel_key_id,
+                        approval.issued_at,
+                    ),
+                )
+                .is_ok()
+        });
+        if !signed_by_root || !crate::relay::valid_name(&approval.copy) {
+            tracing::warn!(copy = %approval.copy, "[node] an approval from the control point is not signed by the pinned root: left out");
+            continue;
+        }
+        // The newest approval per copy.
+        let newer =
+            wanted
+                .get(&approval.copy)
+                .is_none_or(|a: &kernable_core::proto::WriterApproval| {
+                    a.issued_at < approval.issued_at
+                });
+        if newer {
+            wanted.insert(approval.copy.clone(), approval);
+        }
+    }
+    let approvals = dir.join(APPROVALS);
+    std::fs::create_dir_all(&approvals)?;
+    for (copy, approval) in &wanted {
+        let path = approvals.join(format!("{copy}.approval"));
+        let text = format!("{}\n", hex::encode(approval.encode_to_vec()));
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+            std::fs::write(&path, text)?;
+            tracing::info!(%copy, writer = %approval.kernel_key_id, "[node] a writer approval, signed by the root");
+            changed = true;
+        }
+    }
+    // An approval the control point no longer carries (another writer approved since) goes.
+    for entry in std::fs::read_dir(&approvals)? {
+        let path = entry?.path();
+        let copy = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".approval"))
+            .map(str::to_owned);
+        if copy.is_some_and(|c| !wanted.contains_key(&c)) {
+            std::fs::remove_file(&path)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Pulls what the project's root signed for this node once (`GET /v1/nodes/<id>/signed`).
+pub fn pull_signed(dir: &Path) -> Result<bool, BoxError> {
+    let Some(link) = link(dir)? else {
+        return Ok(false);
+    };
+    if link.roots.is_empty() {
+        return Ok(false);
+    }
+    let key = kernable_core::signing::read_signing_key(dir.join(&link.key))?;
+    let (status, text) = call(
+        &link,
+        &key,
+        "GET",
+        &format!("/v1/nodes/{}/signed", link.node),
+        b"",
+    )?;
+    match status {
+        200 => {}
+        404 => return Ok(false),
+        _ => return Err(format!("the control point answered {status}: {text}").into()),
+    }
+    let signed: Signed = serde_json::from_str(&text)?;
+    take_signed(
+        dir,
+        &link,
+        &kernable_core::signing::key_id(&key.verifying_key()),
+        &signed,
+    )
 }
 
 /// The link in `dir`, if the node is managed.
@@ -447,6 +629,12 @@ pub(crate) async fn run(
     loop {
         pulls.tick().await;
         let d = dir.clone();
+        let s = dir.clone();
+        match tokio::task::spawn_blocking(move || pull_signed(&s)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "[node] pulling what the root signed failed"),
+            Err(e) => tracing::warn!(error = %e, "[node] pulling what the root signed failed"),
+        }
         match tokio::task::spawn_blocking(move || pull(&d)).await {
             // New settings: reported once the node planned with them (it looks twice a second).
             Ok(Ok(true)) => {
@@ -473,6 +661,84 @@ mod tests {
 
     fn signed(key: &SigningKey, json: &str) -> String {
         hex::encode(key.sign(&settings_message(json)).to_bytes())
+    }
+
+    #[test]
+    fn a_node_takes_only_what_its_pinned_root_signed_for_it() {
+        use prost::Message;
+        let dir = std::env::temp_dir().join(format!("kernable-signed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (root, stranger, own) = (
+            kernable_core::signing::generate_key(),
+            kernable_core::signing::generate_key(),
+            kernable_core::signing::generate_key(),
+        );
+        let id = |k: &SigningKey| kernable_core::signing::key_id(&k.verifying_key());
+        let link = Link {
+            url: "https://control.example".into(),
+            node: "n-1".into(),
+            key: PathBuf::from(INSTANCE_KEY),
+            settings_key: id(&root),
+            roots: vec![id(&root)],
+            ca: None,
+        };
+        let perms = || {
+            vec![kernable_core::proto::Permission {
+                action: "read".into(),
+                types: vec!["*".into()],
+            }]
+        };
+        let grant = |by: &SigningKey, to: &str, at: i64| {
+            hex::encode(kernable_core::signing::grant(by, to, perms(), "", at).encode_to_vec())
+        };
+        let approval = |by: &SigningKey, copy: &str, writer: &str, at: i64| {
+            hex::encode(
+                kernable_core::proto::WriterApproval {
+                    copy: copy.into(),
+                    kernel_key_id: writer.into(),
+                    issued_at: at,
+                    root_sig: Some(kernable_core::signing::sign(
+                        by,
+                        &kernable_core::signing::writer_approval_message(copy, writer, at),
+                    )),
+                }
+                .encode_to_vec(),
+            )
+        };
+        let writer = id(&stranger);
+        let signed = Signed {
+            grants: vec![
+                grant(&root, &id(&own), 5),
+                grant(&stranger, &id(&own), 9), // not the root's: left out
+                grant(&root, &writer, 9),       // another key's: left out
+            ],
+            approvals: vec![
+                approval(&root, "acme.shop.eu", &writer, 3),
+                approval(&stranger, "acme.shop.us", &writer, 3), // not the root's
+            ],
+        };
+        assert!(take_signed(&dir, &link, &id(&own), &signed).unwrap());
+        let held = std::fs::read_to_string(dir.join("instance.grant")).unwrap();
+        let held =
+            kernable_core::proto::Grant::decode(hex::decode(held.trim()).unwrap().as_slice())
+                .unwrap();
+        assert_eq!((held.key_id, held.issued_at), (id(&own), 5));
+        assert!(dir.join("approvals/acme.shop.eu.approval").exists());
+        assert!(!dir.join("approvals/acme.shop.us.approval").exists());
+        // The same again changes nothing; an approval no longer carried goes.
+        assert!(!take_signed(&dir, &link, &id(&own), &signed).unwrap());
+        let fewer = Signed {
+            grants: Vec::new(),
+            approvals: Vec::new(),
+        };
+        assert!(take_signed(&dir, &link, &id(&own), &fewer).unwrap());
+        assert!(!dir.join("approvals/acme.shop.eu.approval").exists());
+        assert!(
+            dir.join("instance.grant").exists(),
+            "a grant is never taken back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
