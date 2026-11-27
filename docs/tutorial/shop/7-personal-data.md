@@ -7,7 +7,7 @@ Events are kept forever and form a signed hash chain: you cannot change or delet
 - **Personal** values belong to a person (a subject) and are deleted when an event erases that person.
 - **Secret** values, like passwords, are deleted as soon as their command completed.
 
-The kernel you started in part 1 already has a vault: `--dev` turned it on with `vault.key`, and it keeps the values in `vault.db`.
+The kernel you started in part 1 already has a vault: every kernel has one, its key derived from the kernel's own key (`instance.key`, which `--dev` made), and it keeps the values in `vault.db`.
 
 ## Declare what is personal
 

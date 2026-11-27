@@ -924,6 +924,7 @@ pub fn with_vault(config: &mut Config, dir: &Path) {
     config.vault = Some(kernable_kernel::config::VaultConfig {
         store: format!("sqlite:{}", dir.join("vault.db").display()),
         key: dir.join("vault.key"),
+        derived: false,
     });
 }
 

@@ -8,16 +8,15 @@ Read this before you run a kernel with data you cannot lose. The event store is 
 |---|---|---|---|
 | the event store | `--store` (`sqlite:kernable.db`) | commands, events, checkpoints, revocations, registrations of listeners and workers, applied memberships | everything is lost |
 | the vault | `--vault-store` (`sqlite:vault.db`) | personal and secret values | personal data reads as `null` everywhere |
-| the vault key | `--vault-key` | decrypts the vault | the vault cannot be read: same as losing it |
+| the instance key | `--instance-key` (`instance.key`) | the kernel's own: signs checkpoints and revocations, and the vault's key is derived from it | the vault cannot be read: same as losing it; keep every old public key for `kernable verify` ([Keys](./keys#the-instance-key)) |
 | files | `--data-store` (`file:data`) | files your processes put ([Store files](./data-and-cache)) | the files are gone |
-| the kernel key | `--kernel-key` (`kernel.key`) | signs checkpoints and revocations | change it ([Keys](./keys#the-kernel-s-key)); keep every old public key for `kernable verify` |
 | the root key | `--root` takes its `.pub` | signs grants and revocations | start with a new root and grant every key again ([Keys](./keys#the-root-key)) |
 | process keys and `.grant` files | — | sign requests; say what each key may do | create new keys and grant them with the root key |
 | snapshots | `--snapshots` (`sqlite:kernable-snapshots.db`, next to the event store) | a cache | nothing: workers rebuild them, the first command per aggregate reads all its events |
 | the cache | `--cache-store` (`memory:`) | values that expire | nothing: it is in memory and empty after every restart |
 | read model stores | in your processes | caches of your views | nothing: read models rebuild from the events |
 
-With `kernable start --dev`, all of these are in the working directory: `kernable.db`, `kernable-snapshots.db`, `vault.db`, `data/`, and the keys `root`, `kernel`, `vault` and `app` (`.key` and `.pub`), with `app.grant`. Where each kind of data lives and how long it is kept: [Data over time](../concepts/data#where-kernable-keeps-what).
+With `kernable start --dev`, all of these are in the working directory: `kernable.db`, `kernable-snapshots.db`, `vault.db`, `data/`, and the keys `root`, `instance` and `app` (`.key` and `.pub`), with `app.grant`. Where each kind of data lives and how long it is kept: [Data over time](../concepts/data#where-kernable-keeps-what).
 
 ## Back up
 
@@ -37,7 +36,7 @@ With `kernable start --dev`, all of these are in the working directory: `kernabl
 3. **Check the backup** of the event store:
 
    ```sh
-   kernable verify sqlite:backup/kernable.db kernel.pub
+   kernable verify sqlite:backup/kernable.db instance.pub
    ```
 
    Name every public key the kernel ever had. It works on a copy, without a running kernel:
@@ -56,7 +55,7 @@ Keep keys apart from the data, as you would keep any secret, and the vault key a
 1. **Stop the kernel.**
 2. **Put back** the event store, the vault, the data directory, the keys and the `.grant` files.
 3. **Delete the snapshot store** if it is a SQLite file (`--snapshots sqlite:…`). Snapshots newer than the restored log would not match it; workers rebuild them.
-4. **Check the store:** `kernable verify <store> <kernel.pub>...` must say `OK`.
+4. **Check the store:** `kernable verify <store> <instance.pub>...` must say `OK`.
 5. **Start the kernel** of the build that made the backup. A backup from an earlier development build does not carry over: before the first release, formats change in place and there are no migrations.
 6. **Rebuild the read models that have a store** ([Rebuild a read model](./rebuild-read-model)): their stores may be ahead of the restored log. Read models in memory read every event again on start anyway.
 
@@ -145,12 +144,12 @@ The follower sends `method` to `url`, with `headers` (if any) and the body. `met
 
 ```sh
 kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
-  --at 2026-11-04T13:39:00Z --store sqlite:kernable.db --vault-store sqlite:vault.db --vault-key vault.key
+  --at 2026-11-04T13:39:00Z --store sqlite:kernable.db --vault-store sqlite:vault.db --instance-key instance.key
 ```
 
-It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. If the backup ends earlier, or holds nothing between the end of that generation and the base of the next, it says so in a `note:` line and restores up to there. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key of that generation's time: each generation's values are sealed with one vault key, which `kernable backup list` names, and a restore with another is refused before it writes anything. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore).
+It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. If the backup ends earlier, or holds nothing between the end of that generation and the base of the next, it says so in a `note:` line and restores up to there. Then it checks the store like `kernable verify`. The vault's key must be the source's of that generation's time: its `--instance-key`, or the vault key `kernable keys vault` derives from it (`--vault-key`), so the instance key itself need not be there. Each generation's values are sealed with one vault key, which `kernable backup list` names, and a restore with another is refused before it writes anything. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore).
 
-**A copy for a preview.** `--mask-vault --vault-key <new file>` restores a masked copy instead: the backup's events without its vault values, so personal data reads as `null`, with a new vault of its own; the source's vault key is not needed ([Previews and copies](./previews)).
+**A copy for a preview.** `--mask-vault --instance-key <new file>` restores a masked copy instead: the backup's events without its vault values, so personal data reads as `null`, with a new vault of its own; the source's vault key is not needed ([Previews and copies](./previews)).
 
 **Erasures after the point.** Before it writes anything, a restore to a point lists the erasures the backup holds after it:
 
@@ -168,13 +167,13 @@ kernable erasures apply 127.0.0.1:7233 support.key erasures.json
 
 submits each erasing command again, signed with a key granted `submit` for those commands, with its original context (so the domain authorizes it as before) and the original command as its cause. The kernel commits new erasing events and erases, as for any [erasure request](./erasure). An erasing command that was queued before the point is in the restored store already, and the kernel runs it; one whose command carries vault values is listed, not submitted: send it again from your application. A privileged one (its context sets `bypass_authorization`) is marked (`"privileged": true` in the list): the key that submits it again needs a grant for `privileged=bypass_authorization` too. `kernable backup plan <target> --backup-key <file> --at <time>` shows the same list without restoring (`--json <file>` for scripts).
 
-A **vault key that changes** (`kernable vault rekey`, or a kernel started with another key) begins a new backup generation: no generation needs two keys. Files you keep per vault key next to the backup, under `vault-keys/<key id>/` (an escrow of the key, say; the key ID is the one `kernable backup list` prints, the key ID of the key's `.pub`), are deleted by the follower with the last generation that needs that key. In a bucket with object lock or versioning, a delete adds a delete marker and the old versions stay until their retention ends, as the generations' objects do.
+A **vault key that changes** (a new instance key, with `kernable vault rekey`) begins a new backup generation: no generation needs two keys. Files you keep per vault key next to the backup, under `vault-keys/<key id>/` (an escrow of the key, say; the key ID is the one `kernable backup list` prints, the key ID of the key's `.pub`), are deleted by the follower with the last generation that needs that key. In a bucket with object lock or versioning, a delete adds a delete marker and the old versions stay until their retention ends, as the generations' objects do.
 
 **After a restore**, start the backup follower against the restored kernel, with the same target. A generation only ever holds one history:
 
 - **Restored to the end** of the newest generation, the store holds all of it, so the follower continues that generation: the new kernel's records chain on from its last one, in segments after the old ones.
 - **Restored to an earlier point** (`--at` or `--at-record` before the end, or a generation that is not the newest), the generation holds records after the point that the restored kernel never gets, and the kernel writes other records at those positions. The follower finds that the kernel's log differs from the backup's (the kernel's log does not reach the generation's last record yet, or holds another record there) and begins a new generation; it never writes into the old one. The old one stays as it was, for a restore to a point in it, until `--keep` prunes it.
-- **A new kernel key** (the restored kernel runs on a new server with a key of its own) begins no generation: the history goes on, and its later checkpoints are signed by the new key, as after a [change of the kernel key](./keys#the-kernel-s-key). A new generation would not help: its base holds the old checkpoints with their old signatures. A later restore names every kernel key with `--kernel-pub` (or none, to take the ones the backup names); one left out is named in the refusal.
+- **A new instance key** (the restored kernel runs on a new server with a key of its own) begins a new generation, since the vault's key changes with it; the history goes on, and its later checkpoints are signed by the new key, as after [replacing the instance key](./keys#replacing-it). A later restore names every kernel key with `--kernel-pub` (or none, to take the ones the backup names); one left out is named in the refusal.
 
 ### Check a backup
 

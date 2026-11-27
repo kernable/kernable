@@ -25,7 +25,7 @@ DURABILITY=${DURABILITY:-full}
 start_kernel() { # <listen>
   rm -f "$DIR"/k.db* "$DIR"/k.log* "$DIR/k.sock" # a stale socket would look like a ready kernel
   # Relative store paths resolve against the working directory: run the kernel in $DIR.
-  (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$STORE" --durability "$DURABILITY" --listen "$1" --kernel-key kernel.key 2>/dev/null) &
+  (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$STORE" --durability "$DURABILITY" --listen "$1" --instance-key kernel.key 2>/dev/null) &
   KERNEL=$!
   # Wait until it accepts connections; the Rust worker does not retry.
   for _ in $(seq 200); do

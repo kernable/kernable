@@ -88,9 +88,6 @@ impl TestKernel {
         // Files and the cache in the `shop` domain only, so other domains are refused.
         grant.extend(["data_read=shop.*", "data_write=shop.*", "cache=shop.*"]);
         kernable(&grant);
-        let mut vault_key = [0u8; 32];
-        getrandom_fill(&mut vault_key);
-        std::fs::write(dir.join("vault.key"), hex(&vault_key)).unwrap();
         let store = format!("sqlite:{}", dir.join("k.db").display());
         let url = format!("unix:{}", dir.join("kernable.sock").display());
         let mut flags: Vec<String> = [
@@ -100,8 +97,8 @@ impl TestKernel {
             &store,
             "--checkpoint-interval-ms",
             "50",
-            "--vault-key",
-            "vault.key",
+            "--instance-key",
+            "kernel.key",
             "--listen",
             &url,
         ]
@@ -252,21 +249,6 @@ impl Drop for TestKernel {
 fn unique() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-}
-
-fn getrandom_fill(b: &mut [u8]) {
-    // Tests need no strong randomness; the time is enough to tell runs apart.
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    for (i, x) in b.iter_mut().enumerate() {
-        *x = (t >> (i % 16 * 8)) as u8 ^ i as u8;
-    }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Waits up to two seconds for `done`.

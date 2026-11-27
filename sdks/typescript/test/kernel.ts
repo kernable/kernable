@@ -1,7 +1,6 @@
 // Test helper: runs the real kernel binary (`cargo build` first) in a temp dir.
 
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
@@ -72,12 +71,11 @@ export class TestKernel {
       ...["data_read", "data_write", "cache"].map((action) => `${action}=${(options.stores ?? ["*"]).join(",")}`),
       ...(options.processes ? ["process=*"] : []),
     );
-    writeFileSync(join(this.dir, "vault.key"), randomBytes(32).toString("hex"));
     this.flags = [
       "--root", "root.pub",
       "--store", this.store,
       "--checkpoint-interval-ms", "50",
-      "--vault-key", "vault.key",
+      "--instance-key", "kernel.key",
       ...extraFlags,
     ];
   }

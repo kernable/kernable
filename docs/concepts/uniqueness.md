@@ -174,7 +174,7 @@ funds_domain.event("InvestorRegistered", 1).personal(["email"], lambda d, invest
 
 :::
 
-- **Kept in the vault.** The kernel keeps a personal key in the [vault](./data#personal-data-the-vault), as a value of its subject, never in the store. The kernel needs a vault (`--vault-key`); without one, the command is rejected with `no_vault`.
+- **Kept in the vault.** The kernel keeps a personal key in the [vault](./data#personal-data-the-vault), as a value of its subject, never in the store. The kernel needs a vault (every kernel has one, `--vault-store`); without one, the command is rejected with `no_vault`.
 - **Erasing the subject frees it.** After an erasure another aggregate can take the value, and neither the log nor the store keeps a trace of it.
 - **No subject, no key.** A personal key whose subject is empty or null is not held.
 - **The worker must see the value.** Declare the field personal on the command and the event, as above, and grant the worker's key `vault_read`: without it the state holds `null`, and the aggregate holds no key.

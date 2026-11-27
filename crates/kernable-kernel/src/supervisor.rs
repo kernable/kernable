@@ -14,7 +14,7 @@
 //! [kernel]
 //! binary = "/opt/kernable/1.0.1/kernable"   # optional: default this binary
 //! stop-seconds = 30                          # optional
-//! flags = { root = "root.pub", store = "sqlite:kernable.db", vault-key = "vault.key" }
+//! flags = { root = "root.pub", store = "sqlite:kernable.db", instance-key = "instance.key" }
 //! env = { KERNABLE_LOG = "info" }            # optional
 //!
 //! [backup]                                   # optional
@@ -27,8 +27,7 @@
 //!
 //! [push]                                     # optional: a copy at a relay (docs/how-to/relays.md)
 //! to = "relay.example.net:7400"
-//! copy = "shop"
-//! key = "pusher.key"
+//! copy = "shop"                              # pushed with the kernel's instance-key
 //! copy-key = "copy.key"
 //! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
 //! start-anew = 1234                          # only after a refusal: the copy's position it named
@@ -75,7 +74,7 @@
 //!
 //! Secrets are named in `[[secret]]` (a `file`, or a `command` run at start and on SIGHUP)
 //! and mounted read-only at `/run/secrets/<name>` into the services that list them; a new value
-//! restarts those. A `[pair]` section (witness, node-key, advertise, peer, kernel-keys,
+//! restarts those. A `[pair]` section (witness, advertise, peer, kernel-keys,
 //! witness-generation, which every pair needs) sets the kernel's pair flags and gives the backup
 //! follower and the services both kernels' addresses.
 //!
@@ -334,7 +333,6 @@ struct KernelSection {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct PairSection {
     witness: String,
-    node_key: String,
     /// Where the other node, the backup follower and the services reach this kernel. Default:
     /// the kernel's `listen`.
     advertise: Option<String>,
@@ -348,9 +346,8 @@ struct PairSection {
 }
 
 /// The kernel flags `[pair]` sets.
-const PAIR_FLAGS: [&str; 6] = [
+const PAIR_FLAGS: [&str; 5] = [
     "witness",
-    "node-key",
     "advertise",
     "primary-kernel-key",
     "standby-timeout-ms",
@@ -382,7 +379,6 @@ struct PushSection {
     /// The relay's address.
     to: String,
     copy: String,
-    key: String,
     copy_key: String,
     follow: Option<String>,
     /// `--start-anew`: the copy's position, as the pusher's refusal named it, when the writer's
@@ -423,7 +419,6 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             project.push = Some(PushSection {
                 to,
                 copy,
-                key: "pusher.key".into(),
                 copy_key: "copy.key".into(),
                 follow: None,
                 start_anew: None,
@@ -587,6 +582,8 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
     };
     let mut args = vec!["start".to_owned()];
     let mut listen = "127.0.0.1:7233".to_owned();
+    // The kernel's one key: its pusher pushes with it too.
+    let mut instance_key = "instance.key".to_owned();
     for (flag, value) in &k.flags {
         if flag.starts_with('-') {
             return Err(format!("[kernel] flags: write {flag} without its dashes").into());
@@ -610,6 +607,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         }
         if flag == "listen" {
             listen.clone_from(&value);
+        }
+        if flag == "instance-key" {
+            instance_key.clone_from(&value);
         }
         if flag == "admin-socket" {
             return Err(
@@ -670,13 +670,10 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         if pair.kernel_keys.is_empty() {
             return Err("[pair] kernel-keys: name both kernels' kernel keys".into());
         }
-        inside("[pair] node-key", &pair.node_key)?;
         let advertise = pair.advertise.clone().unwrap_or_else(|| listen.clone());
         args.extend([
             "--witness".into(),
             pair.witness.clone(),
-            "--node-key".into(),
-            pair.node_key.clone(),
             "--advertise".into(),
             advertise.clone(),
         ]);
@@ -746,15 +743,13 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         specs.push(kernable("backup", args, b.env, &b.cpus, &b.memory));
     }
     if let Some(p) = project.push {
-        for (what, value) in [("[push] key", &p.key), ("[push] copy-key", &p.copy_key)] {
-            inside(what, value)?;
-        }
+        inside("[push] copy-key", &p.copy_key)?;
         let mut args = vec![
             "push".to_owned(),
             "--follow".into(),
             p.follow.unwrap_or_else(|| followed.clone()),
-            "--key".into(),
-            p.key,
+            "--instance-key".into(),
+            instance_key.clone(),
             "--to".into(),
             p.to,
             "--copy".into(),
@@ -2122,7 +2117,7 @@ async fn handing_over(c: &mut Running) {
 
 /// The kernel's settings for following a primary: flags with their values, and the TLS
 /// environment it reaches the primary with.
-const FOLLOW_FLAGS: [&str; 3] = ["--follow", "--follow-key", "--primary-kernel-key"];
+const FOLLOW_FLAGS: [&str; 2] = ["--follow", "--primary-kernel-key"];
 const FOLLOW_ENV: [&str; 3] = ["KERNABLE_TLS_CA", "KERNABLE_TLS_CERT", "KERNABLE_TLS_KEY"];
 
 /// `args` without the follow flags (and their values) and `--env` of the follow environment.
@@ -2564,7 +2559,7 @@ segment-seconds = 2
     #[test]
     fn a_push_section_runs_the_pusher_and_lets_the_kernel_keep_readers() {
         let text = format!(
-            "{PROJECT}\n[push]\nto = \"relay.example.net:7400\"\ncopy = \"shop\"\nkey = \"pusher.key\"\ncopy-key = \"copy.key\"\n"
+            "{PROJECT}\n[push]\nto = \"relay.example.net:7400\"\ncopy = \"shop\"\ncopy-key = \"copy.key\"\n"
         );
         let specs = specs(&text, Path::new("/srv/shop"), Path::new("/bin/kernable")).unwrap();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -2576,8 +2571,8 @@ segment-seconds = 2
                 "push",
                 "--follow",
                 "0.0.0.0:7233",
-                "--key",
-                "pusher.key",
+                "--instance-key",
+                "instance.key",
                 "--to",
                 "relay.example.net:7400",
                 "--copy",
@@ -2920,7 +2915,6 @@ flags = { listen = "10.0.0.1:7233", root = "root.pub" }
 
 [pair]
 witness = "10.0.0.9:7300"
-node-key = "node-a.key"
 witness-generation = "witness.generation"
 peer = "10.0.0.2:7233"
 kernel-keys = ["kernel-a.pub", "kernel-b.pub"]
@@ -2939,7 +2933,7 @@ build = "."
             specs[0].args.join(" "),
             "start --listen 10.0.0.1:7233 --root root.pub --admin-socket /srv/shop/admin.sock \
              --witness 10.0.0.9:7300 \
-             --node-key node-a.key --advertise 10.0.0.1:7233 --primary-kernel-key kernel-a.pub \
+             --advertise 10.0.0.1:7233 --primary-kernel-key kernel-a.pub \
              --primary-kernel-key kernel-b.pub --witness-generation witness.generation --backup on"
         );
         assert_eq!(
@@ -3393,7 +3387,7 @@ build = "."
         let error = plan_on(&listen, dir, this, true).unwrap_err().to_string();
         assert!(error.contains("network = \"host\""), "{error}");
         let pair = format!(
-            "{text}\n[pair]\nwitness = \"10.0.0.9:7300\"\nnode-key = \"n.key\"\nwitness-generation = \"w.generation\"\npeer = \"10.0.0.2:7233\"\nkernel-keys = [\"a.pub\"]\n"
+            "{text}\n[pair]\nwitness = \"10.0.0.9:7300\"\nwitness-generation = \"w.generation\"\npeer = \"10.0.0.2:7233\"\nkernel-keys = [\"a.pub\"]\n"
         );
         let error = plan_on(&pair, dir, this, true).unwrap_err().to_string();
         assert!(
@@ -3457,7 +3451,7 @@ build = "."
         let this = Path::new("/bin/kernable");
         let following = r#"
 [kernel]
-flags = { root = "root.pub", store = "sqlite:k.db", follow = "a.example:443", follow-key = "follow.key", primary-kernel-key = "abcd" }
+flags = { root = "root.pub", store = "sqlite:k.db", follow = "a.example:443", primary-kernel-key = "abcd" }
 env = { KERNABLE_TLS_CA = "ca.pem", KERNABLE_LOG = "info" }
 "#;
         let own = r#"

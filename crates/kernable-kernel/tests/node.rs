@@ -274,7 +274,7 @@ async fn a_new_kernel_binary_takes_the_stores_over_while_writes_go_on() {
         std::fs::write(
             dir.join("project.toml"),
             format!(
-                "[kernel]\nbinary = \"{version}/kernable\"\nflags = {{ root = \"{}\", kernel-key = \"kernel.key\", store = \"sqlite:k.db\", ui-listen = \"\", listen = \"{addr}\", drain-timeout-ms = 2000 }}\nstop-seconds = 5\n",
+                "[kernel]\nbinary = \"{version}/kernable\"\nflags = {{ root = \"{}\", instance-key = \"kernel.key\", store = \"sqlite:k.db\", ui-listen = \"\", listen = \"{addr}\", drain-timeout-ms = 2000 }}\nstop-seconds = 5\n",
                 id(&root())
             ),
         )

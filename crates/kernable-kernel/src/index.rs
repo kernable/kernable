@@ -241,7 +241,7 @@ fn read(
 
 /// Why a kernel without its vault cannot run on a store with personal keys.
 pub(crate) const NO_VAULT: &str = "the store holds personal unique keys, which live in the vault: \
-                                   start the kernel with its vault (kernable start --vault-key)";
+                                   start the kernel with its vault (kernable start --vault-store)";
 
 /// The identity a personal key's vault value holds: its hex as a JSON string.
 fn key_id_from(value: &VaultValue) -> Result<[u8; 32], BoxError> {

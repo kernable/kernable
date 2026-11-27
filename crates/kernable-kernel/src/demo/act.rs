@@ -534,7 +534,7 @@ async fn crash(
 }
 
 async fn verify(run: &Run) -> Result<Value, BoxError> {
-    let (code, lines) = cli(run, &["verify", "sqlite:kernable.db", "kernel.pub"]).await?;
+    let (code, lines) = cli(run, &["verify", "sqlite:kernable.db", "instance.pub"]).await?;
     // Exit 2: intact, but something was signed at or after its key's revocation.
     let ok = code == 0 || code == 2;
     // `PROBLEM event 2: …` names a changed event.

@@ -34,6 +34,7 @@ pub mod global_keys;
 pub mod grants;
 mod http;
 mod index;
+pub mod instance;
 mod listeners;
 pub mod managed;
 mod memberships;
@@ -422,7 +423,15 @@ impl Kernel {
     /// tests that wrap the store, e.g. in one that fails on purpose.
     pub fn open_on(config: Config, store: Box<dyn Store>) -> Result<Arc<Self>, BoxError> {
         let usage_base = usage::read(&config.store).unwrap_or_default();
-        let key = config.read_signing_key(&config.kernel_key)?;
+        let key = config
+            .read_signing_key(&config.kernel_key)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::InvalidData => format!(
+                    "--instance-key {}: not a key: 32 bytes, hex encoded",
+                    config.kernel_key.display()
+                ),
+                _ => format!("--instance-key {}: {e}", config.kernel_key.display()),
+            })?;
         let revoked: HashMap<String, i64> = store
             .revocations()?
             .into_iter()
@@ -450,7 +459,7 @@ impl Kernel {
         }
         let vault = match &config.vault {
             Some(v) => {
-                let key = config.read_secret(&v.key).map_err(|e| match e.kind() {
+                let key = config.read_vault_key(v).map_err(|e| match e.kind() {
                     std::io::ErrorKind::InvalidData => {
                         "the vault key must be 32 bytes, hex encoded".into()
                     }
@@ -668,11 +677,23 @@ impl Kernel {
         self.changes.subscribe()
     }
 
-    /// Reads the kernel key again (on SIGHUP), so a new key signs from now on.
+    /// Reads the instance key again (on SIGHUP): a wrapped key unwrapped anew. It must be the
+    /// same key: the vault's key is derived from it, so another one is a new instance (a new
+    /// grant, the vault rekeyed, a restart), never a swap while running.
     pub fn reload(&self) -> Result<(), BoxError> {
         config::forget_unwrapped_keys();
         let key = self.config().read_signing_key(&self.config().kernel_key)?;
-        *self.key.lock().unwrap_or_else(PoisonError::into_inner) = key;
+        let mut held = self.key.lock().unwrap_or_else(PoisonError::into_inner);
+        if key.verifying_key() != held.verifying_key() {
+            return Err(format!(
+                "--instance-key {} now holds another key ({}): the running kernel keeps its own; \
+                 replacing an instance key needs its vault rekeyed and a restart",
+                self.config().kernel_key.display(),
+                signing::key_id(&key.verifying_key())
+            )
+            .into());
+        }
+        *held = key;
         Ok(())
     }
 
@@ -888,7 +909,7 @@ impl Kernel {
     /// The vault, or a refusal for requests that need one.
     fn vault(&self) -> Result<&Vault, Status> {
         self.vault.as_ref().ok_or_else(|| {
-            Status::failed_precondition("this kernel has no vault (kernable start --vault-key)")
+            Status::failed_precondition("this kernel has no vault (kernable start --vault-store)")
         })
     }
 
@@ -1692,7 +1713,7 @@ pub fn read_approval(
 pub fn promoted(mut config: config::Config) -> config::Config {
     config.take_over_ms = config.take_over_ms.max(PROMOTED_TAKE_OVER_MS);
     // A reader that took its copy over (`--become-writer`) is the writer from here.
-    if config.replication.become_writer.take().is_some() {
+    if std::mem::take(&mut config.replication.become_writer) {
         config.replication.reader = false;
     }
     config

@@ -1466,6 +1466,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "hex",
+ "hkdf",
  "hmac",
  "http-body",
  "http-body-util",

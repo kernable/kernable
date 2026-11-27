@@ -44,18 +44,18 @@ With the kernel stopped, read the stores directly. The flags are those of `kerna
 
 ```sh
 kernable export kernable.kx --store sqlite:kernable.db --data-store file:data \
-  --vault-store sqlite:vault.db --vault-key vault.key
+  --vault-store sqlite:vault.db --instance-key instance.key
 ```
 
-Without `--vault-key` the vault is left out, which fails if the store refers to any vault value.
+The vault opens with the key derived from the kernel's `--instance-key`, or with `--vault-key` and the vault key `kernable keys vault` derives from it. Without either the vault is left out, which fails if the store refers to any vault value.
 
 ## Import
 
-Import into **new, empty** stores, with the source's vault key:
+Import into **new, empty** stores, with the source's instance key (or its vault key):
 
 ```sh
 kernable import kernable.kx --store sqlite:kernable.db --data-store file:data \
-  --vault-store sqlite:vault.db --vault-key vault.key --kernel-pub old-kernel.pub
+  --vault-store sqlite:vault.db --instance-key instance.key --kernel-pub old-instance.pub
 ```
 
 ```text
@@ -71,10 +71,9 @@ Name the source's kernel keys with `--kernel-pub`. Without them, the store is ch
 ## Start the new kernel
 
 ```sh
-kernable start --root root.pub --store sqlite:kernable.db --vault-key vault.key ...
+kernable start --root root.pub --store sqlite:kernable.db --instance-key instance.key ...
 ```
 
 - **The root key:** grants are imported with the store and stay valid only under the root key that signed them. Start with the same `--root`, or grant every key again with a new one ([Keys](./keys)).
-- **The kernel key:** use the source's, or a new one ([Keys](./keys#the-kernel-s-key)). Keep the source's `.pub` files: `kernable verify` needs every key that ever signed a checkpoint.
-- **The vault key:** the import kept the values encrypted with the source's key, so the new kernel uses it. To change it afterwards, run `kernable vault rekey` ([CLI](../reference/cli)).
+- **The instance key:** the import kept the vault's values encrypted with the source's vault key, so the new kernel starts with the source's instance key. For a new one, [replace it](./keys#replacing-it) afterwards. Keep the source's `.pub` files: `kernable verify` needs every key that ever signed a checkpoint.
 - **Listeners** keep their positions. Read models with their own store carry on where they were if they come along; new ones read every event from the start.

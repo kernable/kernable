@@ -37,6 +37,7 @@ tonic.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 hmac.workspace = true
+hkdf.workspace = true
 aes-gcm.workspace = true
 chacha20poly1305.workspace = true
 # The copy key sealed for a reader's own key: X25519 from its Ed25519 key.

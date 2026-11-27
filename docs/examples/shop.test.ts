@@ -265,7 +265,7 @@ async function deployed(lang: Lang, production: boolean) {
     assert.equal(await ready(), 200);
     const [cmd, args] = command(lang, "part7");
     assert.equal(execFileSync(cmd, args, { cwd: dir, env: env("part7"), encoding: "utf8" }), readFileSync(`${HERE}${lang}/part7.out`, "utf8"));
-    assert.match(kernable("verify", production ? "sqlite:data/shop.db" : "sqlite:kernable.db", production ? "keys/kernel.pub" : "kernel.pub"), /\nOK$/);
+    assert.match(kernable("verify", production ? "sqlite:data/shop.db" : "sqlite:kernable.db", production ? "keys/instance.pub" : "instance.pub"), /\nOK$/);
     for (const p of running) p.kill();
     kernel.kill("SIGTERM");
     const [code] = await new Promise<[number | null]>((resolve) => kernel.on("exit", (c) => resolve([c])));

@@ -84,14 +84,14 @@ Every setting is a flag of `kernable start`, each with an environment variable (
 | `--root <key-id or .pub>` (repeatable) | `KERNABLE_ROOT` (comma-separated) | required |
 | `--store` | `KERNABLE_STORE` | `sqlite:kernable.db` |
 | `--listen` | `KERNABLE_LISTEN` | `127.0.0.1:7233` |
-| `--kernel-key` | `KERNABLE_KERNEL_KEY` | `kernel.key` |
+| `--instance-key` | `KERNABLE_INSTANCE_KEY` | `instance.key`: the kernel's one key, its vault key derived from it ([instance keys](instance-keys.md)) |
 | `--snapshots` | `KERNABLE_SNAPSHOTS` | SQLite next to the event store (`kernable-snapshots.db`); `memory:` for a `memory:` store |
-| `--vault-key`, `--vault-store` | `KERNABLE_VAULT_KEY`, `KERNABLE_VAULT_STORE` | no vault; store `sqlite:vault.db` once a key is given |
+| `--vault-store` | `KERNABLE_VAULT_STORE` | `sqlite:vault.db`; `memory:` for a `memory:` store |
 | `--tls-cert`, `--tls-key`, `--tls-client-ca` | `KERNABLE_KERNEL_TLS_CERT`, `KERNABLE_KERNEL_TLS_KEY`, `KERNABLE_KERNEL_TLS_CLIENT_CA` | no TLS |
 | `--metrics-listen` | `KERNABLE_METRICS_LISTEN` | off |
 | `--lease-ttl-ms`, `--checkpoint-interval-ms`, `--submit-timeout-ms`, `--settle-timeout-ms`, `--query-timeout-ms`, `--middleware-timeout-ms`, `--drain-timeout-ms` | `KERNABLE_LEASE_TTL_MS`, … | see the reference |
 
-Relative paths resolve against the working directory. SIGHUP reads the kernel key again (key rotation); everything else needs a restart.
+Relative paths resolve against the working directory. SIGHUP reads the instance key again (a wrapped key unwrapped anew; another key is refused); everything else needs a restart.
 
 ## Consequences
 

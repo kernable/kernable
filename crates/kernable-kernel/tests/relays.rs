@@ -445,6 +445,8 @@ async fn writer_process(dir: &Path) -> (KillOnDrop, String) {
         .current_dir(dir)
         .arg("start")
         .args([
+            "--instance-key",
+            "kernel.key",
             "--root",
             &id(&root()),
             "--store",
@@ -1367,17 +1369,18 @@ async fn stopped_and_revoked_keys_are_refused_on_the_streams_they_hold() {
 async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher() {
     let log = captured_log();
     let dir = Dir::new("relays-become");
-    // The old writer's pusher 90; readers 71 (a reader) and 75 (the new writer, following).
+    // The old writer's pusher 90; readers 71 (a reader) and 75 (the new writer, following, and
+    // pushing with the same key once the relay names it the copy's pusher).
     let access = |old: &str, new: Option<&str>| {
         let mut keys = vec![
             (id(&key(90)), "push", old),
             (id(&key(71)), "read", "active"),
             (id(&key(73)), "read", "active"),
-            (id(&key(75)), "read", "active"),
         ];
-        if let Some(state) = new {
-            keys.push((id(&key(91)), "push", state));
-        }
+        keys.push(match new {
+            Some(state) => (id(&key(75)), "push", state),
+            None => (id(&key(75)), "read", "active"),
+        });
         std::fs::write(
             dir.0.join("access.toml"),
             access_toml(&[("become.eu", keys)]),
@@ -1406,10 +1409,11 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
     let old_pusher = start_pusher(&dir.0, &writer_config.listen, &listen, "become.eu");
     let old_at = held(&writer);
 
-    // The new writer: a reader of the copy with its own kernel key (25) and pusher key (91).
+    // The new writer: a reader of the copy with its own kernel key (25); it follows, and then
+    // pushes, with its key 75.
     let mut becoming = reader_config(&dir.0, "becoming", 25, &listen, "become.eu");
     becoming.replication.readers = true;
-    becoming.replication.become_writer = Some(reading_key(&dir.0, "pusher-new", 91));
+    becoming.replication.become_writer = true;
     // The project key (99) approves its kernel key for the copy (`kernable approve`).
     let project = key(99);
     let approval = kernable_core::proto::WriterApproval {
@@ -1454,11 +1458,10 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
     assert_eq!(new_writer.role()["role"], "writer", "{}", new_writer.role());
     grant_defaults(&new_writer);
     start_worker(becoming.listen.clone(), TestWorker::honest()).await;
-    let pusher_path = dir.0.join("pusher-new.key");
     let pusher = push::Pusher {
         follow: vec![becoming.listen.clone()],
-        key: key(91),
-        grant_file: pusher_path.with_extension("grant"),
+        key: key(75),
+        grant_file: dir.0.join("becoming.grant"),
         relay: listen.clone(),
         copy: "become.eu".into(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),

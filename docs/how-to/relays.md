@@ -4,9 +4,9 @@ A [reader](./readers) normally follows the writer directly. When readers run whe
 reach the writer (another site, another cloud, behind a firewall that takes no connection
 inward), a **relay** holds a copy of the writer's records for them:
 
-- a **pusher** (`kernable push`) runs beside the writer, follows it as a reader does and sends
-  every record to the relay over a connection it opens itself, so the writer accepts no
-  connection from outside its network;
+- a **pusher** (`kernable push`) runs beside the writer, with the writer's own key, follows it as
+  a reader does and sends every record to the relay over a connection it opens itself, so the
+  writer accepts no connection from outside its network;
 - the **relay** (`kernable relay`) writes the records to the copy's log and serves them to
   readers as a writer would;
 - **readers** follow the copy at the relay (`--reader <relay> --reader-copy <copy>`), and send
@@ -100,12 +100,13 @@ the file is read at every check, so a change applies at once:
 
 ```toml
 [copies."shop.eu".keys]
-"<pusher's key ID>" = { role = "push", state = "active" }
+"<the writer's key ID>" = { role = "push", state = "active" }
 "<reader-1's key ID>" = { role = "read", state = "active" }
 "<reader-2's key ID>" = { role = "read", state = "stopped" }
 ```
 
-Only an `active` key is let in. A `stopped` or `revoked` one is refused, and so are the streams it
+Only an `active` key is let in. A key that may push a copy may read it too: a reader that
+becomes the writer follows and pushes with its one key. A `stopped` or `revoked` one is refused, and so are the streams it
 holds: they are checked again every 5 seconds, so a key whose state changes, a key taken off the
 file, or a copy taken out of it ends its streams within that. Stopped and revoked differ in what
 the instance behind the key does (a writer that is stopped hands over first; see
@@ -126,7 +127,7 @@ they come, without the copy key and without a stop.
 ## 3. The pusher, beside the writer
 
 ```sh
-kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --key pusher.key \
+kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --instance-key instance.key \
   --to https://relay.example.net:7400 --copy shop --copy-key copy.key
 ```
 
@@ -134,16 +135,17 @@ kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --key pusher.key \
 `KERNABLE_TLS_CA` if set); `KERNABLE_TLS_*` are needed only for mutual TLS, to the relay or to a
 writer that listens on TCP with it. The writer's Unix socket (`--follow unix:/srv/shop/kernel.sock`)
 is reached without. With a pair,
-name both kernels: it follows whichever is the writer. It reads `pusher.grant`
-again on every connection and tries again after every failure. A [node](./node) runs it for you
-with a `[push]` section (`to`, `copy`, `key`, `copy-key`).
+name both kernels: it follows whichever is the writer. It pushes with the writer's own
+`--instance-key`, which needs a grant for `read` (`instance.grant` beside it, read again on every
+connection), and tries again after every failure. A [node](./node) runs it for you with a
+`[push]` section (`to`, `copy`, `copy-key`), with the kernel's instance key.
 
 ## Partitions at several sites
 
 [Partitions](./partitions#partitions-at-several-sites) whose writers sit in networks that do not
 reach each other ask each other through the relay too: global keys, moves, the trust records. The
 map names such a partition as `relay:<relay>/<its copy>`; its pusher makes those calls on it. The
-relay must let the other partitions' node keys read that copy, and each of them needs its copy
+relay must let the other partitions' instance keys read that copy, and each of them needs its copy
 key, as `<copy>.key` in its `--partition-copy-keys` directory.
 
 ## 4. Readers at the relay
@@ -151,9 +153,8 @@ key, as `<copy>.key` in its `--partition-copy-keys` directory.
 ```sh
 kernable start --root root.pub \
   --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
-  --follow-key reader-1.key \
-  --primary-kernel-key kernel-a.pub --primary-kernel-key kernel-b.pub \
-  --kernel-key reader-1-kernel.key --vault-key reader-1-vault.key --listen 10.1.0.5:7233
+  --instance-key reader-1.key \
+  --primary-kernel-key kernel-a.pub --primary-kernel-key kernel-b.pub --listen 10.1.0.5:7233
 ```
 
 Everything else is as for [readers](./readers).
@@ -162,27 +163,26 @@ Everything else is as for [readers](./readers).
 
 The copy is enough to start a writer again, after its machine is lost or at a new site: a new
 kernel catches up from the copy as a reader does, then becomes the writer on the same history,
-and its pusher continues the copy where it stands. Its own keys are made on its machine; it needs
-the copy key and the root's grants as any writer.
+and its pusher continues the copy where it stands. Its one key is made on its machine; it needs
+the copy key and the root's grant as any writer.
 
 ```sh
-kernable keys new kernel-c && kernable keys new reader-c && kernable keys new pusher-c
-kernable grant root.key reader-c.pub 'read=*' && kernable grant root.key pusher-c.pub 'read=*'
-kernable approve project.key shop kernel-c.pub          # where the project key is: shop.approval
+kernable keys new instance-c && kernable grant root.key instance-c.pub 'read=*'
+kernable approve project.key shop instance-c.pub        # where the project key is: shop.approval
 kernable start --root root.pub --readers on \
   --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
-  --follow-key reader-c.key --primary-kernel-key kernel-a.pub \
-  --become-writer pusher-c.key --approval shop.approval \
-  --kernel-key kernel-c.key --vault-key vault-c.key --listen 10.2.0.5:7233
+  --instance-key instance-c.key --primary-kernel-key kernel-a.pub \
+  --become-writer on --approval shop.approval --listen 10.2.0.5:7233
 ```
 
-The relay must let `reader-c` read the copy. The kernel catches up, then waits, and says why,
-until the relay takes `pusher-c` as the copy's pusher: named there, active, and no other pusher
-connected. So first stop or revoke the old writer's pusher key in the access list (a stopped one
-has pushed what it had; a revoked one, on a machine that is lost, may have held the last records
-it never pushed), then name `pusher-c`'s. The kernel then holds the copy's push while it takes
-the last records, so the old pusher cannot come back meanwhile, and serves as the writer. Start
-its pusher with `pusher-c.key`: it continues the copy, and the copy's readers follow on.
+The relay must let `instance-c` read the copy. The kernel catches up, then waits, and says why,
+until the relay takes `instance-c` as the copy's pusher: named there with the role `push`, active,
+and no other pusher connected. So first stop or revoke the old writer's key in the access list (a
+stopped one has pushed what it had; a revoked one, on a machine that is lost, may have held the
+last records it never pushed), then give `instance-c` the role `push`. The kernel then holds the
+copy's push while it takes the last records, so the old pusher cannot come back meanwhile, and
+serves as the writer. Start its pusher with `instance-c.key`: it continues the copy, and the
+copy's readers follow on.
 
 Readers check every record against the writer's kernel key. The new writer's first record is a
 **takeover**: its kernel key, with the **project key**'s approval (`kernable approve`, made where

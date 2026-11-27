@@ -350,8 +350,8 @@ async fn run(a: Args) -> Result<(), String> {
             .to_owned(),
     };
     let kernel_key_ids = vec![
-        signing::key_id(&key(&dir.join("kernel.key"))?.verifying_key()),
-        signing::key_id(&key(&dir.join("kernel-b.key"))?.verifying_key()),
+        signing::key_id(&key(&dir.join("node-a.key"))?.verifying_key()),
+        signing::key_id(&key(&dir.join("node-b.key"))?.verifying_key()),
     ];
 
     let store_of = |name: &str| match backend.as_str() {
@@ -370,8 +370,16 @@ async fn run(a: Args) -> Result<(), String> {
         format!("http://127.0.0.1:{pport}")
     };
     let kernel = |name: &str, store: &str, kport: u64, pport: u64, suffix: &str| {
+        // One key per kernel: node-a's and node-b's, as a pair names them.
+        let instance_key = if suffix.is_empty() {
+            "node-a.key"
+        } else {
+            "node-b.key"
+        };
         let mut p = Proc::new(name, &kernable_bin, &dir, log(name)).args(&[
             "start",
+            "--instance-key",
+            instance_key,
             "--root",
             "root.pub",
             "--store",
@@ -383,12 +391,15 @@ async fn run(a: Args) -> Result<(), String> {
         ]);
         if pair {
             p = p.args(&[
-                "--kernel-key",
-                &format!("kernel{suffix}.key"),
                 "--snapshots",
                 &format!(
                     "sqlite:{}",
                     data.join(format!("snapshots{suffix}.db")).display()
+                ),
+                "--vault-store",
+                &format!(
+                    "sqlite:{}",
+                    data.join(format!("vault{suffix}.db")).display()
                 ),
                 "--data-store",
                 &format!("file:{}", data.join(format!("files{suffix}")).display()),
@@ -396,18 +407,12 @@ async fn run(a: Args) -> Result<(), String> {
                 &format!("127.0.0.1:{wport}"),
                 "--witness-generation",
                 "witness.generation",
-                "--node-key",
-                if suffix.is_empty() {
-                    "node-a.key"
-                } else {
-                    "node-b.key"
-                },
                 "--advertise",
                 &format!("127.0.0.1:{pport}"),
                 "--primary-kernel-key",
-                "kernel.pub",
+                "node-a.pub",
                 "--primary-kernel-key",
-                "kernel-b.pub",
+                "node-b.pub",
             ]);
         }
         p
@@ -517,21 +522,14 @@ async fn run(a: Args) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     if kit_on {
-        // The kit keeps personal data in the vault: its kernel has one.
-        let vault_key = dir.join("kit-vault.key");
-        if !vault_key.exists() {
-            let mut rng = Rng::new(seed ^ 0x7a17);
-            let hex: String = (0..32)
-                .map(|_| format!("{:02x}", rng.step() as u8))
-                .collect();
-            std::fs::write(&vault_key, hex).map_err(|e| e.to_string())?;
-        }
+        // The kit keeps personal data in the vault: its kernel has one, its key derived from
+        // the kernel's (node-a's, so the checks take its checkpoints as the main kernel's).
         let kit_vault = format!("sqlite:{}", data.join("kit-vault.db").display());
         procs.push(
             Proc::new("kit-kernel", &kernable_bin, &dir, log("kit-kernel")).args(&[
                 "start",
-                "--vault-key",
-                "kit-vault.key",
+                "--instance-key",
+                "node-a.key",
                 "--vault-store",
                 &kit_vault,
                 "--root",

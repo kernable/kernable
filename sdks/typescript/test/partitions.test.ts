@@ -27,7 +27,7 @@ test("one client serves the tenants of two partitions", async () => {
   const p1 = new TestKernel(["counters.*"], ["--partition", "p1"]);
   p1.cli("keys", "new", "node");
   p1.cli("grant", "root.key", "node.pub", "replicate=*");
-  const p2 = new TestKernel(["counters.*"], ["--partition", "p2", "--control", p1.url, "--node-key", "node.key"]);
+  const p2 = new TestKernel(["counters.*"], ["--partition", "p2", "--control", p1.url, "--instance-key", "node.key"]);
   for (const file of ["root.pub", "app.key", "app.pub", "app.grant", "node.key", "node.grant"]) {
     copyFileSync(join(p1.dir, file), join(p2.dir, file));
   }

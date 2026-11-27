@@ -105,10 +105,12 @@ fn flags(dir: &Dir, name: &str, kernel_seed: u8) -> Vec<String> {
         dir.store(name),
         "--listen".into(),
         dir.sock(name),
-        "--kernel-key".into(),
+        "--instance-key".into(),
         at(&format!("{name}-kernel.key")),
         "--snapshots".into(),
         format!("sqlite:{}", at(&format!("{name}-snapshots.db"))),
+        "--vault-store".into(),
+        format!("sqlite:{}", at(&format!("{name}-vault.db"))),
         "--data-store".into(),
         format!("file:{}", at(&format!("{name}-data"))),
         "--checkpoint-interval-ms".into(),
@@ -296,7 +298,7 @@ async fn random_kills_of_primary_and_standby_lose_nothing_a_client_was_told() {
     standby_args.extend([
         "--follow".into(),
         dir.sock("p"),
-        "--follow-key".into(),
+        "--instance-key".into(),
         standby_key.display().to_string(),
         "--primary-kernel-key".into(),
         id(&key(3)),
@@ -378,7 +380,7 @@ async fn random_kills_of_primary_and_standby_lose_nothing_a_client_was_told() {
     };
     promoted.unwrap();
     worker(dir.sock("s"));
-    let ids = [id(&key(3)), id(&key(8))];
+    let ids = [id(&key(3)), id(&key(7))];
     every_order_once(&[dir.sock("s")], &dir.store("s"), &placed, &told, &ids).await;
     eprintln!("{} kills under {} orders", kills(), placed.len());
     drop(standby);
@@ -414,14 +416,14 @@ async fn a_pair_under_random_kills_of_its_primary_loses_nothing_a_client_was_tol
             dir.sock("w"),
             "--witness-generation".into(),
             dir.generation(),
-            "--node-key".into(),
+            "--instance-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
             LEASE_MS.to_string(),
             "--primary-kernel-key".into(),
-            id(&key(3)),
+            id(&key(11)),
             "--primary-kernel-key".into(),
-            id(&key(8)),
+            id(&key(12)),
         ]);
         args
     };
@@ -459,7 +461,7 @@ async fn a_pair_under_random_kills_of_its_primary_loses_nothing_a_client_was_tol
     let (placed, told) = load.finish().await;
     assert!(!told.is_empty());
     let at = primary().expect("a primary");
-    let ids = [id(&key(3)), id(&key(8))];
+    let ids = [id(&key(11)), id(&key(12))];
     every_order_once(&addrs, &dir.store(nodes[at].0), &placed, &told, &ids).await;
     eprintln!(
         "{} kills, {failovers} failovers under {} orders",
@@ -503,14 +505,14 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
             dir.sock("w"),
             "--witness-generation".into(),
             dir.generation(),
-            "--node-key".into(),
+            "--instance-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
             LONG_LEASE_MS.to_string(),
             "--primary-kernel-key".into(),
-            id(&key(3)),
+            id(&key(11)),
             "--primary-kernel-key".into(),
-            id(&key(8)),
+            id(&key(12)),
         ]);
         args
     };
@@ -614,7 +616,7 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
     assert!(!told.is_empty());
     let now = primary().expect("a primary");
     assert_ne!(now, at);
-    let ids = [id(&key(3)), id(&key(8))];
+    let ids = [id(&key(11)), id(&key(12))];
     every_order_once(&addrs, &dir.store(nodes[now].0), &placed, &told, &ids).await;
     // Started again, the old primary follows on from its own log: it wrote nothing after the
     // head it handed over at (its log sealed), so it need not start over, empty.
@@ -694,14 +696,14 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
             dir.sock("w"),
             "--witness-generation".into(),
             dir.generation(),
-            "--node-key".into(),
+            "--instance-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
             "2000".into(),
             "--primary-kernel-key".into(),
-            id(&key(3)),
+            id(&key(11)),
             "--primary-kernel-key".into(),
-            id(&key(8)),
+            id(&key(12)),
         ]);
         args
     };
@@ -805,7 +807,7 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
     tokio::time::sleep(Duration::from_millis(1000)).await;
     let (placed, told) = load.finish().await;
     assert!(!told.is_empty());
-    let ids = [id(&key(3)), id(&key(8))];
+    let ids = [id(&key(11)), id(&key(12))];
     every_order_once(&addrs, &dir.store(nodes[first].0), &placed, &told, &ids).await;
     eprintln!("both kernels updated under {} orders", placed.len());
     drop(running);
@@ -943,14 +945,14 @@ async fn pair_model(seed: u64, steps: u32) {
             dir.sock("w"),
             "--witness-generation".into(),
             dir.generation(),
-            "--node-key".into(),
+            "--instance-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
             LEASE_MS.to_string(),
             "--primary-kernel-key".into(),
-            id(&key(3)),
+            id(&key(11)),
             "--primary-kernel-key".into(),
-            id(&key(8)),
+            id(&key(12)),
         ]);
         args
     };
@@ -1069,7 +1071,7 @@ async fn pair_model(seed: u64, steps: u32) {
     stop.store(true, SeqCst);
 
     // P1, P3: everything a client or the listener was told is in the primary's log, as told.
-    let ids = [id(&key(3)), id(&key(8))];
+    let ids = [id(&key(11)), id(&key(12))];
     let primary_store = dir.store(nodes[at].0);
     {
         let read = kernable_store::open_read_only(&primary_store).unwrap();
@@ -1234,14 +1236,14 @@ async fn a_primary_cut_off_answers_unavailable_and_its_standby_takes_over() {
             dir.generation(),
             "--advertise".into(),
             dir.sock(&format!("{name}-plug")),
-            "--node-key".into(),
+            "--instance-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
             LEASE_MS.to_string(),
             "--primary-kernel-key".into(),
-            id(&key(3)),
+            id(&key(11)),
             "--primary-kernel-key".into(),
-            id(&key(8)),
+            id(&key(12)),
         ]);
         args
     };
@@ -1362,14 +1364,14 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
             dir.generation(),
             "--advertise".into(),
             dir.sock(&format!("{name}-plug")),
-            "--node-key".into(),
+            "--instance-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
             LEASE_MS.to_string(),
             "--primary-kernel-key".into(),
-            id(&key(3)),
+            id(&key(11)),
             "--primary-kernel-key".into(),
-            id(&key(8)),
+            id(&key(12)),
         ]);
         args
     };

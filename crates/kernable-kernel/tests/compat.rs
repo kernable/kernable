@@ -423,6 +423,7 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
             config.vault = Some(VaultConfig {
                 store: vault_url.clone(),
                 key: dir.join("vault.key"),
+                derived: false,
             });
         })
         .await;
@@ -525,6 +526,7 @@ async fn stores_of_every_format_report_what_revoked_keys_signed() {
                     dir.join(format!("vault-{backend}.db")).display()
                 ),
                 key: dir.join("vault.key"),
+                derived: false,
             });
         })
         .await;

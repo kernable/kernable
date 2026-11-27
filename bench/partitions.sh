@@ -14,10 +14,9 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$DIR"; }
 trap cleanup EXIT
 
-for name in root client worker node ops; do "$BIN/kernable" keys new "$DIR/$name" >/dev/null; done
+for name in root client worker ops; do "$BIN/kernable" keys new "$DIR/$name" >/dev/null; done
 "$BIN/kernable" grant "$DIR/root.key" "$DIR/client.pub" 'submit=bench.*' >/dev/null
 "$BIN/kernable" grant "$DIR/root.key" "$DIR/worker.pub" 'run=bench.*' 'listen=*' >/dev/null
-"$BIN/kernable" grant "$DIR/root.key" "$DIR/node.pub" 'replicate=*' >/dev/null
 "$BIN/kernable" grant "$DIR/root.key" "$DIR/ops.pub" 'manage=*' >/dev/null
 STORE=${STORE:-sqlite}
 DURABILITY=${DURABILITY:-full}
@@ -32,10 +31,12 @@ run() { # <partitions>
   rm -rf "$DIR"/p*.db* "$DIR"/p*.log* "$DIR"/p*.sock "$DIR"/p*-snapshots.db* "$DIR"/p*-data
   for i in $(seq "$n"); do
     "$BIN/kernable" keys new "$DIR/kernel$i" >/dev/null 2>&1 || true
+    # Its one key also takes the map from the control partition.
+    "$BIN/kernable" grant "$DIR/root.key" "$DIR/kernel$i.pub" 'replicate=*' >/dev/null
     local control=()
-    [ "$i" -gt 1 ] && control=(--control "$(sock 1)" --node-key node.key)
+    [ "$i" -gt 1 ] && control=(--control "$(sock 1)")
     (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$(store_of "$i")" --durability "$DURABILITY" \
-      --listen "$(sock "$i")" --kernel-key "kernel$i.key" --snapshots "sqlite:p$i-snapshots.db" --data-store "file:p$i-data" \
+      --listen "$(sock "$i")" --instance-key "kernel$i.key" --snapshots "sqlite:p$i-snapshots.db" --vault-store "sqlite:p$i-vault.db" --data-store "file:p$i-data" \
       --partition "p$i" ${control[@]+"${control[@]}"} 2>/dev/null) &
     PIDS+=($!)
     for _ in $(seq 200); do [ -S "$DIR/p$i.sock" ] && break; sleep 0.05; done

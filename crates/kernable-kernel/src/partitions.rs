@@ -489,7 +489,7 @@ pub(crate) async fn connect(
     let key = kernel
         .config()
         .read_signing_key(&partition.node_key)
-        .map_err(|e| format!("--node-key {}: {e}", partition.node_key.display()))?;
+        .map_err(|e| format!("--instance-key {}: {e}", partition.node_key.display()))?;
     let grant = std::fs::read_to_string(partition.node_key.with_extension("grant"))
         .map_err(|e| format!("the node key's grant: {e}"))?
         .trim()
@@ -518,7 +518,7 @@ async fn sync_once(
     let key = kernel
         .config()
         .read_signing_key(node_key)
-        .map_err(|e| format!("--node-key {}: {e}", node_key.display()))?;
+        .map_err(|e| format!("--instance-key {}: {e}", node_key.display()))?;
     let grant = std::fs::read_to_string(node_key.with_extension("grant"))?;
     let issued_at = now_ms();
     let mut request = Request::new(TrustSyncRequest {

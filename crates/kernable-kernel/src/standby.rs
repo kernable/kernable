@@ -529,7 +529,7 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
     }
     let key = config
         .read_signing_key(&follow.key)
-        .map_err(|e| format!("--follow-key {}: {e}", follow.key.display()))?;
+        .map_err(|e| format!("--instance-key {}: {e}", follow.key.display()))?;
     let grant_path = follow.key.with_extension("grant");
     let grant = std::fs::read_to_string(&grant_path)
         .map_err(|e| format!("the standby's grant {}: {e}", grant_path.display()))?
@@ -544,14 +544,8 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         }
         Stores::open_on(&config, store)
     })?;
-    let become_writer = match &config.replication.become_writer {
-        Some(path) => Some(
-            config
-                .read_signing_key(path)
-                .map_err(|e| format!("--become-writer {}: {e}", path.display()))?,
-        ),
-        None => None,
-    };
+    // It becomes the writer with its own key, which pushes the copy from then on.
+    let become_writer = config.replication.become_writer.then(|| key.clone());
     let (promoted, promoted_rx) = oneshot::channel();
     let reader = config.replication.reader;
     let first = crate::reader::addresses(&follow.primary)
@@ -1195,7 +1189,10 @@ fn import(vault: Option<&Vault>, rows: &[kernable_core::proto::VaultRow]) -> Res
     match vault {
         Some(vault) => Ok(vault.import(rows)?),
         None if rows.is_empty() => Ok(()),
-        None => Err("the primary sends vault values: start the standby with --vault-key".into()),
+        None => Err(
+            "the primary sends vault values: start the standby with its vault (--vault-store)"
+                .into(),
+        ),
     }
 }
 
@@ -1462,7 +1459,7 @@ fn restore_into(
     kernel_keys: &[String],
 ) -> Result<crate::backup::Restored, BoxError> {
     // Through the signer, as `kernable restore` does: the reader holds no S3 keys then. It
-    // asks with KERNABLE_S3_SIGNER_KEY, else with its own follow key.
+    // asks with KERNABLE_S3_SIGNER_KEY, else with its own instance key.
     let signer = match &from.signer {
         None => None,
         Some(url) => {

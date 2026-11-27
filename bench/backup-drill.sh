@@ -50,7 +50,7 @@ t=$(now)
 read -r events _ < <(head_of k.db)
 printf '  filled: %s events, %s MB, in %.1f s\n' "$events" "$(du -m k.db | cut -f1)" "$(since "$t")"
 "$BIN/kernable" start --root root.pub --store "sqlite:$DIR/k.db" --listen "unix:$DIR/k.sock" \
-  --kernel-key kernel.key --data-store "file:$DIR/data" --backup on 2>kernel.err &
+  --instance-key kernel.key --data-store "file:$DIR/data" --backup on 2>kernel.err &
 pids+=($!)
 ready "$DIR/k.sock"
 "$BIN/kernable-bench" worker "unix:$DIR/k.sock" worker.key 64 >/dev/null 2>worker.err &
@@ -85,7 +85,7 @@ t=$(now)
 restored_s=$(since "$t")
 read -r restored restored_ms < <(head_of r.db)
 "$BIN/kernable" start --root root.pub --store "sqlite:$DIR/r.db" --listen "unix:$DIR/r.sock" \
-  --kernel-key kernel.key --data-store "file:$DIR/rdata" 2>restored-kernel.err &
+  --instance-key kernel.key --data-store "file:$DIR/rdata" 2>restored-kernel.err &
 pids+=($!)
 ready "$DIR/r.sock"
 # It answers: a command goes through on the restored kernel.

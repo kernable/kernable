@@ -25,7 +25,7 @@ cd "$DIR"
 K="$ROOT/target/debug/kernable"
 for name in root kernel app; do "$K" keys new "$name" >/dev/null; done
 "$K" grant root.key app.pub 'submit=*' 'run=demo.*' 'listen=*' 'query=*' 'answer=demo.*' >/dev/null
-"$K" start --root root.pub --store sqlite:k.db --listen "unix:$DIR/k.sock" --kernel-key kernel.key 2>kernel.log &
+"$K" start --root root.pub --store sqlite:k.db --listen "unix:$DIR/k.sock" --instance-key kernel.key 2>kernel.log &
 KERNEL_PID=$!
 for _ in $(seq 50); do [ -S k.sock ] && break; sleep 0.1; done
 

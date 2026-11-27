@@ -17,7 +17,7 @@ Put this file into a project that uses kernable (as `AGENTS.md`, `CLAUDE.md` or 
 
 ```sh
 mkdir shop && cd shop
-kernable start --dev          # in its own terminal: creates app.key, app.grant, vault.key; UI at http://127.0.0.1:7234
+kernable start --dev          # in its own terminal: creates instance.key, app.key, app.grant; UI at http://127.0.0.1:7234
 npm init -y && npm pkg set type=module && npm install @kernable/sdk   # Node >= 22.18 runs .ts directly
 ```
 
@@ -226,7 +226,7 @@ Never:
    ```
 2. **Run against a real kernel**: `kernable start --dev --store memory: --listen 127.0.0.1:17233` in a temporary directory, point `KERNABLE_URL` and `KERNABLE_KEY` at it, start the app, `await app.ready`, then submit and query. Settled submits mean the next query must see the change.
 3. **Look**: the UI at http://127.0.0.1:7234 says whether anything needs attention (Overview), shows the services and their lag (Operations), the domains with their commands, events and readers, the log and every aggregate's history with its commands (Explore), and the business processes with their cases (Processes).
-4. **Check the log**: `kernable verify kernable.db kernel.pub` recomputes the hash chain and every signature.
+4. **Check the log**: `kernable verify kernable.db instance.pub` recomputes the hash chain and every signature.
 
 ## 8. Where to read more
 

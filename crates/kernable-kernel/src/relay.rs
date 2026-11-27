@@ -719,7 +719,9 @@ impl Relay {
     }
 
     /// Whether `key` (proven by its signature) may act on `copy` in `role` now: named for it in
-    /// `--access`, active; else among the relay's own `--allow-push` or `--allow-read`.
+    /// `--access`, active; else among the relay's own `--allow-push` or `--allow-read`. A key
+    /// that may push a copy may read it too: one key per instance, so a reader that became the
+    /// writer follows and pushes with the same key.
     fn may(&self, key: &str, copy: &str, role: KeyRole) -> Result<(), Status> {
         if !valid_name(copy) {
             return Err(invalid_name());
@@ -729,11 +731,12 @@ impl Relay {
             KeyRole::Read => "read",
         };
         let Some(path) = &self.config.access else {
-            let keys = match role {
-                KeyRole::Push => &self.config.pushers,
-                KeyRole::Read => &self.config.readers,
+            let pusher = self.config.pushers.iter().any(|k| k == key);
+            let allowed = match role {
+                KeyRole::Push => pusher,
+                KeyRole::Read => pusher || self.config.readers.iter().any(|k| k == key),
             };
-            return if keys.iter().any(|k| k == key) {
+            return if allowed {
                 Ok(())
             } else {
                 Err(Status::permission_denied(format!(
@@ -750,17 +753,19 @@ impl Relay {
             Status::permission_denied(format!("this relay holds no copy {copy} for anyone"))
         })?;
         match entry.keys.get(key) {
-            Some(KeyAccess { role: r, state }) if *r == role => match state {
-                KeyState::Active => Ok(()),
-                KeyState::Stopped => Err(Status::permission_denied(format!(
-                    "the key {} is stopped for {copy}: it may no longer {what} it",
-                    short(key)
-                ))),
-                KeyState::Revoked => Err(Status::permission_denied(format!(
-                    "the key {} is revoked for {copy}",
-                    short(key)
-                ))),
-            },
+            Some(KeyAccess { role: r, state }) if *r == role || *r == KeyRole::Push => {
+                match state {
+                    KeyState::Active => Ok(()),
+                    KeyState::Stopped => Err(Status::permission_denied(format!(
+                        "the key {} is stopped for {copy}: it may no longer {what} it",
+                        short(key)
+                    ))),
+                    KeyState::Revoked => Err(Status::permission_denied(format!(
+                        "the key {} is revoked for {copy}",
+                        short(key)
+                    ))),
+                }
+            }
             _ => Err(Status::permission_denied(format!(
                 "the key {} may not {what} {copy}: its access list does not name it so",
                 short(key)

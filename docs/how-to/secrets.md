@@ -4,7 +4,7 @@ Use this page when a command carries a value that must never be stored: a passwo
 
 ## Set it up
 
-1. **Turn the vault on:** start the kernel with `--vault-key` (`kernable start --dev` does). Secrets are kept in the vault while their command runs; without a vault, the kernel refuses commands with secret fields (`FAILED_PRECONDITION`).
+1. **The vault is on** in every kernel, its key derived from the kernel's `--instance-key`. Secrets are kept in the vault while their command runs; without a vault, the kernel refuses commands with secret fields (`FAILED_PRECONDITION`).
 2. **Mark the field secret** on the command, as the shop does for `SetPassword` and `SignIn` (highlighted below). Only top-level fields of commands can be secret.
 3. **Give the client the domain**, so it seals the field before signing: `new Kernable().use(shopDomain)`, Python `Kernable().use(shop_domain)`, Rust `.with_domain(&shop_domain)`. A client without it sends the password in clear, and it is stored in the command log for good. `kernable submit` cannot seal fields: never use it for such commands.
 4. **Store a hash, not the value**, in the handler (see the rules below). The example stores an scrypt hash in `PasswordSet`, marked personal, so it is erased with the customer.

@@ -527,7 +527,7 @@ mod tests {
         let mut flags = BTreeMap::from([
             ("follow".to_owned(), toml::Value::String("old".into())),
             (
-                "follow-key".to_owned(),
+                "instance-key".to_owned(),
                 toml::Value::String("reader.key".into()),
             ),
         ]);
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(flags["reader-copy-key"].as_str(), Some("copy.key"));
         assert_eq!(flags["reader-max-lag-ms"].as_integer(), Some(10_000));
         assert_eq!(
-            flags["follow-key"].as_str(),
+            flags["instance-key"].as_str(),
             Some("reader.key"),
             "keys stay the customer's"
         );

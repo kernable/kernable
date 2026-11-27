@@ -43,16 +43,16 @@ fn args(dir: &Path, name: &str) -> Vec<String> {
         store(dir, name),
         "--listen".into(),
         sock(dir, name),
-        "--kernel-key".into(),
+        "--instance-key".into(),
         at(&format!("{name}-kernel.key")),
         "--snapshots".into(),
         format!("sqlite:{}", at(&format!("{name}-snapshots.db"))),
+        "--vault-store".into(),
+        format!("sqlite:{}", at(&format!("{name}-vault.db"))),
         "--data-store".into(),
         format!("file:{}", at(&format!("{name}-data"))),
         "--partition".into(),
         name.into(),
-        "--node-key".into(),
-        at("node.key"),
     ];
     if name == "p2" {
         args.extend(["--control".into(), sock(dir, "p1")]);
@@ -207,16 +207,20 @@ async fn crash_and_recover(point: &str) {
     let dir = std::env::temp_dir().join(format!("kn-mc-{point}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    // Each partition's one key, which also takes the map and moves tenants (`replicate`).
     for (name, k) in [("p1", 3), ("p2", 8)] {
         std::fs::write(
             dir.join(format!("{name}-kernel.key")),
             hex(key(k).as_bytes()),
         )
         .unwrap();
+        let node_grant = grant(&key(k), &[("replicate", &["*"])]);
+        std::fs::write(
+            dir.join(format!("{name}-kernel.grant")),
+            hex(&node_grant.encode_to_vec()),
+        )
+        .unwrap();
     }
-    std::fs::write(dir.join("node.key"), hex(key(13).as_bytes())).unwrap();
-    let node_grant = grant(&key(13), &[("replicate", &["*"])]);
-    std::fs::write(dir.join("node.grant"), hex(&node_grant.encode_to_vec())).unwrap();
     let (p1_addr, p2_addr) = (sock(&dir, "p1"), sock(&dir, "p2"));
     let on_source = point == "move.dropped";
     let mut p1 = start(&dir, "p1", on_source.then_some(point));

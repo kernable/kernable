@@ -172,7 +172,7 @@ impl Kernel {
             .read_signing_key(&partition.node_key)
             .map_err(|e| {
                 Status::failed_precondition(format!(
-                    "global keys need --node-key ({}): {e}",
+                    "global keys need --instance-key ({}): {e}",
                     partition.node_key.display()
                 ))
             })?;

@@ -8,12 +8,13 @@ keys you name for each partition.
 
 ## 1. Keys
 
-Every key is made on the machine that uses it; only its public half (`.pub`, 64 hex digits) ever
-reaches kernable Cloud. On the writer's machine, the pusher's key, granted `read` by your root
-key (which stays offline), and the partition's copy key:
+Every kernel has one key of its own, made on its machine; only its public half (`.pub`, 64 hex
+digits) ever reaches kernable Cloud. The kernel signs with it, follows and pushes with it, and
+its vault key is derived from it. On the writer's machine, its key, granted `read` by your root
+key (which stays offline) so its pusher may follow it, and the partition's copy key:
 
 ```sh
-kernable keys new pusher && kernable grant root.key pusher.pub 'read=*'
+kernable keys new writer && kernable grant root.key writer.pub 'read=*'
 kernable relay key copy.key
 ```
 
@@ -55,10 +56,10 @@ If the root key **leaked**, end it at once: `kernable cloud projects root shop s
 
 ## 3. Link a partition
 
-Tell kernable Cloud which pusher may push a partition's copy, by its public key:
+Tell kernable Cloud which kernel may push a partition's copy, by its public key:
 
 ```sh
-kernable cloud projects link shop eu --pusher pusher.pub
+kernable cloud projects link shop eu --pusher writer.pub
 # acme.shop.eu: linked; push it with: kernable push … --to https://relay-eu.kernable.cloud:7400 --copy acme.shop.eu
 ```
 
@@ -73,14 +74,13 @@ partition again brings it back; after that they are deleted.
 
 ## 4. The writer's node
 
-The writer runs with `--readers on`; a `[push]` section in its `project.toml` runs the pusher
-beside it:
+The writer runs with `--readers on` and `--instance-key writer.key`; a `[push]` section in its
+`project.toml` runs the pusher beside it, with the same key:
 
 ```toml
 [push]
 to = "https://relay-eu.kernable.cloud:7400"
 copy = "acme.shop.eu"                # <team>.<project>.<partition>: `kernable cloud projects show` names it
-key = "pusher.key"
 copy-key = "copy.key"
 ```
 
@@ -91,7 +91,7 @@ its history. See [backups](/cloud/backups#if-your-writer-was-restored).
 
 ## 5. Readers at the copy
 
-A reader needs a key of its own, granted `read`, named for the partition, and the copy key:
+A reader needs its one key, granted `read`, named for the partition, and the copy key:
 
 ```sh
 kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*'
@@ -99,14 +99,13 @@ kernable cloud projects key shop eu reader-1.pub read
 # eu: 5e0c… read active
 kernable start --root root.pub \
   --reader https://relay-eu.kernable.cloud:7400 --reader-copy acme.shop.eu --reader-copy-key copy.key \
-  --follow-key reader-1.key --primary-kernel-key kernel.pub \
-  --kernel-key reader-1-kernel.key --vault-key reader-1-vault.key
+  --instance-key reader-1.key --primary-kernel-key writer.pub
 ```
 
-The keys: `--follow-key`, the reader's own, granted `read`; `--reader-copy-key`, the partition's
-copy key, which you brought there; `--primary-kernel-key`, the writer's kernel key (name both of
-a pair), to check its signed checkpoints; `--kernel-key` and `--vault-key`, the reader's own for
-its checkpoints and its vault. Every flag: [readers](/how-to/readers#_3-start-a-reader).
+The keys: `--instance-key`, the reader's own, granted `read`, which also signs its checkpoints and
+seals its vault; `--reader-copy-key`, the partition's copy key, which you brought there;
+`--primary-kernel-key`, the writer's public key (name both of a pair), to check its signed
+checkpoints. Every flag: [readers](/how-to/readers#_3-start-a-reader).
 
 A reader refuses queries while it is further behind the writer than `--reader-max-lag-ms` (30 s
 by default), and reports itself not ready while the writer is away.
@@ -134,24 +133,23 @@ under it.
 
 If the writer's machine is lost, or the writer moves to another site, a new kernel takes the copy
 over: it catches up from the copy, then becomes the writer on the same history, and its pusher
-continues the copy where it stands. On the new machine, its own keys; then tell kernable Cloud
-which keys it uses:
+continues the copy where it stands. On the new machine, its one key (`kernable keys new
+writer-c`, granted `read`); then tell kernable Cloud which key it uses:
 
 ```sh
-kernable cloud projects key shop eu reader-c.pub read          # it follows the copy first
-kernable approve project.key acme.shop.eu kernel-c.pub         # where the project key is kept
+kernable cloud projects key shop eu writer-c.pub read          # it follows the copy first
+kernable approve project.key acme.shop.eu writer-c.pub         # where the project key is kept
 kernable start --root root.pub --readers on \
   --reader https://relay-eu.kernable.cloud:7400 --reader-copy acme.shop.eu --reader-copy-key copy.key \
-  --follow-key reader-c.key --primary-kernel-key kernel.pub \
-  --become-writer pusher-c.key --approval acme.shop.eu.approval \
-  --kernel-key kernel-c.key --vault-key vault-c.key
-kernable cloud projects key shop eu pusher.pub revoke          # the old writer's pusher (or stop)
-kernable cloud projects link shop eu --pusher pusher-c.pub     # now the new one's
+  --instance-key writer-c.key --primary-kernel-key writer.pub \
+  --become-writer on --approval acme.shop.eu.approval
+kernable cloud projects key shop eu writer.pub revoke          # the old writer (or stop)
+kernable cloud projects link shop eu --pusher writer-c.pub     # now the new one pushes
 ```
 
-The new kernel waits, and says why, until the relay takes its pusher key; then it becomes the
-writer and writes a **takeover** with your project key's approval. Start its pusher with
-`pusher-c.key` (`[push]` on its node). Readers started with `--project-key project.pub` take the
+The new kernel waits, and says why, until the relay takes its key as the pusher; then it becomes
+the writer and writes a **takeover** with your project key's approval. Start its pusher with
+the same `writer-c.key` (`[push]` on its node). Readers started with `--project-key project.pub` take the
 new writer from the takeover on, and refuse the old one's records from there: nothing to change
 on them. The **project key** is one per project, made once (`kernable keys new project`) and kept
 with you, never on an instance and never with kernable: it only approves which kernel key may

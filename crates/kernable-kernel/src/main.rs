@@ -39,17 +39,16 @@ Run the kernel:
   kernable start --dev [<flag> <value>]...
                                           Runs the kernel in the foreground, trusting grants signed
                                           by the root keys; the flags are listed by kernable start
-                                          --help. On Unix, SIGHUP reads the kernel key again.
+                                          --help. On Unix, SIGHUP reads the instance key again.
                                           SIGTERM or SIGINT refuses new requests, lets running ones
                                           finish and stops; SIGTERM to a pair's primary hands its
                                           role to the standby in sync first. SIGUSR1 stops the same
                                           way, never handing over (a new binary takes the stores
                                           over). --dev is for trying kernable out: it
-                                          creates root.key, kernel.key, vault.key, app.key and
-                                          app.grant in the working directory if missing (app may do
-                                          everything) and defaults to --root root.pub, --vault-key
-                                          vault.key, --ui-listen 127.0.0.1:7234 and --durability
-                                          normal. With --reader <writer>[,<writer>] it runs as a
+                                          creates root.key, instance.key, app.key and app.grant in
+                                          the working directory if missing (app may do everything)
+                                          and defaults to --root root.pub, --ui-listen
+                                          127.0.0.1:7234 and --durability normal. With --reader <writer>[,<writer>] it runs as a
                                           reader, a read-only copy of the writer (started with
                                           --readers on): it catches up, from --from-backup if it
                                           is new, then answers queries from its copy and forwards
@@ -65,7 +64,14 @@ Run the kernel:
 Keys and trust:
   kernable keys new <name>                Writes <name>.key (the secret key, readable by the owner
                                           only, never overwritten) and <name>.pub (the key ID), and
-                                          prints the key ID.
+                                          prints the key ID. A kernel's one key is such a key
+                                          (kernable start --instance-key).
+  kernable keys vault <instance.key> <file>
+                                          Writes the vault key derived from an instance key to
+                                          <file> (never overwritten): what kernable restore, export,
+                                          import, copy or vault rekey take as --vault-key, or a
+                                          reader as --from-backup-vault-key, without the instance
+                                          key itself.
   kernable grant <root.key> <name.pub> [--succeeds <old.pub>] [--delegated] <permission>...
                                           Writes <name>.grant, signed by the root key, and prints
                                           its permissions. A permission is <action>=<type>,<type>...
@@ -144,15 +150,16 @@ Keys and trust:
                                           copy's readers open it (--reader-copy-key). The relay
                                           never holds it: it sees records' positions, hashes and
                                           sizes, nothing else.
-  kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--start-anew <position>]
+  kernable push --follow <addr>[,<addr>] --instance-key <key> --to <relay> --copy <name> --copy-key <file> [--start-anew <position>]
                                           Follows the writer at <addr> (started with --readers on;
                                           both kernels of a pair, comma-separated) as a reader and
                                           sends every record, sealed with the copy key, to the copy
                                           <name> at the relay <relay> over a connection it opens
-                                          itself, until stopped. <key>
-                                          needs a grant for read on * (the grant file next to it is
-                                          sent along, read again on every connection) and must be
-                                          one the relay takes (--allow-push). The writer keeps its
+                                          itself, until stopped. <key> is
+                                          the writer's own instance key; it needs a grant for read
+                                          on * (the grant file next to it is sent along, read again
+                                          on every connection) and must be one the relay takes as
+                                          the copy's pusher (--allow-push, or role push). The writer keeps its
                                           records until the copy holds them. Beside the push it
                                           takes the writes the copy's readers send through the
                                           relay and makes them on the writer. The copy key reaches
@@ -353,33 +360,37 @@ Export and import:
                                           not finish. Snapshots and the cache are not exported.
                                           Prints the counts and the kernel keys that signed the
                                           store.
-  kernable export <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>]
+  kernable export <file> [--store <s>] [--data-store <d>] [--vault-store <v> --instance-key <k> | --vault-key <k>]
                                           The same from stores read directly, kernel stopped. The
                                           flags name the stores as for kernable start, with its
-                                          defaults; without --vault-key the vault is left out, which
-                                          fails if the store refers to vault values.
-  kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+                                          defaults; the vault opens with the key derived from the
+                                          kernel's --instance-key, or with a vault key from
+                                          kernable keys vault. Without either the vault is left
+                                          out, which fails if the store refers to vault values.
+  kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --instance-key <k> | --vault-key <k>] [--kernel-pub <kernel.pub>]...
                                           Fills new, empty stores from an export, then checks the
                                           store like verify, with the same output and exit codes.
-                                          --vault-key must be the source's vault key. The whole file
+                                          The vault's key must be the source's (its instance key,
+                                          or its vault key). The whole file
                                           is checked before anything is written: a copy cut short or
                                           changed, or a wrong vault key, is refused. Without
                                           --kernel-pub, the store is checked with the kernel keys
                                           the export names; compare them with the source's .pub
                                           files, or name those. Keep the source's kernel .pub files
                                           for verify after the kernel runs on the new stores.
-  kernable import <file> --mask-vault --vault-key <new file> [--with-files] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+  kernable import <file> --mask-vault --instance-key <new file> [--with-files] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
                                           Makes a masked copy (a preview) from an export: its
                                           records without a vault value, so every personal value
-                                          reads as null, as after an erasure. --vault-key names a
-                                          file that does not exist: the copy's own, new vault key,
-                                          which it writes, with a new, empty vault at
-                                          --vault-store. Files are left out unless --with-files.
-                                          The store is marked as a copy: a kernel runs it only
-                                          alone, with that vault key.
+                                          reads as null, as after an erasure. --instance-key names
+                                          a file that does not exist: the copy's own, new instance
+                                          key, which it writes with its .pub, and a new, empty
+                                          vault at --vault-store with the vault key derived from
+                                          it. Files are left out unless --with-files. The store is
+                                          marked as a copy: a kernel runs it only alone, with that
+                                          instance key.
 
 Previews:
-  kernable copy <source store> --mask-vault --vault-key <new file> [--files-from <d>] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+  kernable copy <source store> --mask-vault --instance-key <new file> [--files-from <d>] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
                                           Makes a masked copy (a preview) of a store on this
                                           machine, read in one consistent view, also while its
                                           kernel runs (SQLite): as import --mask-vault, without an
@@ -416,7 +427,7 @@ Run a node:
                                           key, backup-key, follow, segment-seconds, base-hours,
                                           keep, check-hours, signer, cpus, memory, env), [push] (to,
                                           copy, key, copy-key, root, follow, cpus, memory, env), [pair] (witness,
-                                          node-key, advertise, peer, kernel-keys,
+                                          advertise, peer, kernel-keys,
                                           standby-timeout-ms, witness-generation: this node's
                                           kernel of a pair), [node]
                                           (instance, project, podman, metrics-listen: GET /metrics,
@@ -480,14 +491,15 @@ Continuous backup:
                                           the records chain from the base to the last segment.
                                           Prints the record a restore reaches and how old it is;
                                           exits 1 if the backup does not check out.
-  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--mask-vault [--with-files]] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--mask-vault [--with-files]] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --instance-key <k> | --vault-key <k>] [--kernel-pub <kernel.pub>]...
                                           Fills new, empty stores from a backup: the newest
                                           generation that begins before --at (UTC, like
                                           2026-11-04T13:40:00Z) or --at-record, its base, then its
                                           segments up to there (default: everything), then checks
                                           the store like verify, with the same output and exit
-                                          codes. --vault-key must be the source's vault key of
-                                          that generation's time; the flags name the stores as
+                                          codes. The vault's key must be the source's of that
+                                          generation's time (its instance key, or the vault key
+                                          kernable keys vault derives); the flags name the stores as
                                           for kernable start. Without --kernel-pub, the store is
                                           checked with the kernel keys the backup names. To a
                                           point, it first lists the erasures committed after it:
@@ -496,7 +508,7 @@ Continuous backup:
                                           asked) writes them to <file> for kernable erasures apply.
                                           With --signer and --signer-key, it reads an s3:// target
                                           through a signer, as backup list, plan and check do.
-                                          With --mask-vault, and --vault-key naming a file that
+                                          With --mask-vault, and --instance-key naming a file that
                                           does not exist yet, it makes a masked copy (a preview)
                                           as import --mask-vault does, with the files only if
                                           --with-files; no vault key of the source is needed.
@@ -534,8 +546,9 @@ Maintenance, with the kernel stopped:
                                           (NOT_FOUND) unless a membership lists it. Exit 1 if there
                                           is no such aggregate.
   kernable vault rekey <vault> <old.key> <new.key>
-                                          Re-encrypts every vault value with a new key; then start
-                                          the kernel with --vault-key <new.key>. <vault> is the
+                                          Re-encrypts every vault value with a new vault key (from
+                                          kernable keys vault <new instance.key>); then start the
+                                          kernel with that instance key. <vault> is the
                                           --vault-store, for example sqlite:vault.db. A key
                                           encrypts at most 2^32 values (each with a random nonce):
                                           the kernel warns at startup past half of that and refuses
@@ -603,7 +616,6 @@ async fn main() -> ExitCode {
                     flags.iter().any(|f| f.starts_with(flag)) || std::env::var_os(var).is_some()
                 };
                 let root = !given("--root", "KERNABLE_ROOT");
-                let vault = !given("--vault-key", "KERNABLE_VAULT_KEY");
                 let ui = !given("--ui-listen", "KERNABLE_UI_LISTEN");
                 let durability = !given("--durability", "KERNABLE_DURABILITY");
                 if ui {
@@ -614,9 +626,6 @@ async fn main() -> ExitCode {
                 }
                 if root {
                     flags.extend(["--root", "root.pub"]);
-                }
-                if vault {
-                    flags.extend(["--vault-key", "vault.key"]);
                 }
             }
             return match Config::from_args(&flags, |var| std::env::var(var).ok()) {
@@ -673,6 +682,7 @@ async fn main() -> ExitCode {
             });
         }
         ["keys", "new", name] => keys_new(name),
+        ["keys", "vault", instance, file] => keys_vault(instance, file),
         ["checkpoint", store, key] => checkpoint(store, key),
         ["verify", store, keys @ ..] if !keys.is_empty() => {
             return verify(store, keys).unwrap_or_else(|e| {
@@ -843,12 +853,12 @@ async fn demo(ui: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// `kernable start --dev`: creates what is missing of `root.key`, `kernel.key`, `vault.key`,
+/// `kernable start --dev`: creates what is missing of `root.key`, `instance.key`,
 /// `app.key` and `app.grant` in the working directory, with a grant that lets `app` do everything.
 /// Returns what it did, to show after the banner.
 fn development_setup() -> Result<Vec<String>> {
     let mut notes = Vec::new();
-    for name in ["root", "kernel", "vault", "app"] {
+    for name in ["root", "instance", "app"] {
         if !Path::new(&format!("{name}.key")).exists() {
             write_key(name)?;
             notes.push(format!("created {name}.key"));
@@ -879,10 +889,9 @@ fn development_setup() -> Result<Vec<String>> {
 fn start_help() -> String {
     let mut help = String::from(
         "kernable start flags (each also as an environment variable):\n  \
-         --dev                      creates root.key, kernel.key, vault.key, app.key and app.grant\n                             \
+         --dev                      creates root.key, instance.key, app.key and app.grant\n                             \
          (app may do everything) if missing; trusts root.pub unless --root is given,\n                             \
-         uses vault.key unless --vault-key is given, and serves the UI on\n                             \
-         127.0.0.1:7234 unless --ui-listen is given\n",
+         and serves the UI on 127.0.0.1:7234 unless --ui-listen is given\n",
     );
     for (flag, var, default, _) in config::FLAGS {
         let default = if default.is_empty() {
@@ -1090,8 +1099,8 @@ async fn run_kernel_on(
             }
             _ = hangup.recv() => {
                 match kernel.reload() {
-                    Ok(()) => tracing::info!("kernel key read again"),
-                    Err(e) => tracing::error!(error = %e, "reading the kernel key failed; the previous key stays"),
+                    Ok(()) => tracing::info!("instance key read again"),
+                    Err(e) => tracing::error!(error = %e, "reading the instance key failed; the previous key stays"),
                 }
                 continue;
             }
@@ -1682,14 +1691,15 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
     }
 }
 
-/// `kernable push --follow <addr> --key <key> --to <relay> --copy <name>`: pushes until stopped.
+/// `kernable push --follow <addr> --instance-key <key> --to <relay> --copy <name>`: pushes until
+/// stopped.
 async fn run_push(flags: &[&str]) -> ExitCode {
     let parsed = (|| -> Result<push::Pusher> {
         let values = flag_values(
             flags,
             &[
                 "--follow",
-                "--key",
+                "--instance-key",
                 "--to",
                 "--copy",
                 "--copy-key",
@@ -1698,9 +1708,9 @@ async fn run_push(flags: &[&str]) -> ExitCode {
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
         let need = |flag: &str| one(flag).ok_or_else(|| format!("{flag} is missing"));
-        let key_path = need("--key")?;
-        let key =
-            signing::read_signing_key(key_path).map_err(|e| format!("--key {key_path}: {e}"))?;
+        let key_path = need("--instance-key")?;
+        let key = signing::read_signing_key(key_path)
+            .map_err(|e| format!("--instance-key {key_path}: {e}"))?;
         let follow: Vec<String> = need("--follow")?
             .split(',')
             .map(str::trim)
@@ -2208,12 +2218,16 @@ fn mask_flags<'a>(
     ))
 }
 
-/// The copy's own vault: a new key at `--vault-key`, a new, empty vault at `--vault-store`.
+/// The copy's own vault: a new instance key at `--instance-key`, whose vault key it is, and a
+/// new, empty vault at `--vault-store`.
 fn masked_vault(flags: &StoreFlags) -> Result<kernable_store::vault::Vault> {
-    let (store, key) = flags.vault.as_ref().ok_or(
-        "--mask-vault needs --vault-key <new file>: the copy's own vault key, which the copy makes",
-    )?;
-    kernable_kernel::copy::new_vault(store, key).map_err(boxed)
+    let need = "--mask-vault needs --instance-key <new file>: the copy's own key, which the copy \
+                makes; its vault key is derived from it";
+    let vault = flags.vault.as_ref().ok_or(need)?;
+    if !vault.derived {
+        return Err(need.into());
+    }
+    kernable_kernel::copy::new_vault(&vault.store, &vault.key).map_err(boxed)
 }
 
 /// Marks the copy and says how to start it.
@@ -2225,11 +2239,16 @@ fn masked_done(
     kernel_keys: &[String],
 ) -> Result<()> {
     let mark = kernable_kernel::copy::mark(store, vault, source, kernel_keys).map_err(boxed)?;
-    let (vault_store, vault_key) = flags.vault.clone().unwrap_or_default();
+    let VaultFlags {
+        store: vault_store,
+        key: instance_key,
+        ..
+    } = flags.vault.clone().unwrap_or_default();
     println!(
         "masked copy of {}: no vault value of the source, so its personal values read as null. \
-         Its own vault key is {vault_key} (key ID {}); start it alone with --store {} \
-         --vault-store {vault_store} --vault-key {vault_key} and a new snapshot store",
+         Its own instance key is {instance_key} (its vault key's ID {}); start it alone with \
+         --store {} --vault-store {vault_store} --instance-key {instance_key} and a new snapshot \
+         store",
         kernable_kernel::copy::describe(&mark),
         mark.vault_key,
         flags.store,
@@ -2787,6 +2806,25 @@ fn keys_new(name: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// `kernable keys vault <instance.key> <file>`: the vault key derived from an instance key.
+fn keys_vault(instance: &str, file: &str) -> Result<bool> {
+    let seed = signing::read_secret(instance).map_err(|e| format!("{instance}: {e}"))?;
+    let vault = kernable_kernel::instance::vault_key(&seed);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(file)
+        .map_err(|e| format!("{file}: {e}"))?
+        .write_all(Zeroizing::new(format!("{}\n", hex::encode(*vault))).as_bytes())?;
+    println!(
+        "wrote the vault key {} of the instance {} to {file}",
+        signing::vault_key_id(&vault),
+        signing::key_id(&ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key())
+    );
+    Ok(true)
+}
+
 /// Writes `<name>.key` (secret, never overwritten) and `<name>.pub`; returns the key ID.
 fn write_key(name: &str) -> Result<String> {
     let key = signing::generate_key();
@@ -2865,15 +2903,22 @@ fn report_verify(report: &kernable_store::Report) -> ExitCode {
 struct StoreFlags {
     store: String,
     data: String,
-    /// The vault store and its key, with `--vault-key`.
-    vault: Option<(String, String)>,
+    /// The vault store and its key: a vault key's file (`--vault-key`), or an instance key's
+    /// (`--instance-key`) the vault key is derived from.
+    vault: Option<VaultFlags>,
     kernel_pubs: Vec<String>,
 }
 
 impl StoreFlags {
     fn parse(flags: &[&str], kernel_pubs: bool) -> Result<Self> {
         let mut values: HashMap<&str, Vec<&str>> = HashMap::new();
-        let mut known = vec!["--store", "--data-store", "--vault-store", "--vault-key"];
+        let mut known = vec![
+            "--store",
+            "--data-store",
+            "--vault-store",
+            "--vault-key",
+            "--instance-key",
+        ];
         if kernel_pubs {
             known.push("--kernel-pub");
         }
@@ -2892,15 +2937,28 @@ impl StoreFlags {
                 Some(_) => Err(format!("{flag} is given twice").into()),
             }
         };
-        let vault = match values.contains_key("--vault-key") {
-            true => Some((
-                one("--vault-store", "sqlite:vault.db")?,
-                one("--vault-key", "")?,
-            )),
-            false if values.contains_key("--vault-store") => {
-                return Err("--vault-store needs --vault-key".into());
+        let store = || one("--vault-store", "sqlite:vault.db");
+        let vault = match (
+            values.contains_key("--vault-key"),
+            values.contains_key("--instance-key"),
+        ) {
+            (true, true) => {
+                return Err("give --vault-key or --instance-key, not both".into());
             }
-            false => None,
+            (true, false) => Some(VaultFlags {
+                store: store()?,
+                key: one("--vault-key", "")?,
+                derived: false,
+            }),
+            (false, true) => Some(VaultFlags {
+                store: store()?,
+                key: one("--instance-key", "")?,
+                derived: true,
+            }),
+            (false, false) if values.contains_key("--vault-store") => {
+                return Err("--vault-store needs --vault-key or --instance-key".into());
+            }
+            (false, false) => None,
         };
         Ok(StoreFlags {
             store: one("--store", "sqlite:kernable.db")?,
@@ -2914,15 +2972,33 @@ impl StoreFlags {
     }
 
     fn open_vault(&self) -> Result<Option<kernable_store::vault::Vault>> {
-        let Some((store, key)) = &self.vault else {
+        let Some(VaultFlags {
+            store,
+            key,
+            derived,
+        }) = &self.vault
+        else {
             return Ok(None);
         };
-        let key = signing::read_secret(key).map_err(|e| match e.kind() {
+        let secret = signing::read_secret(key).map_err(|e| match e.kind() {
             io::ErrorKind::InvalidData => format!("{key}: not a 32-byte key in hex").into(),
             _ => Box::<dyn std::error::Error>::from(format!("{key}: {e}")),
         })?;
+        let key = match derived {
+            true => kernable_kernel::instance::vault_key(&secret),
+            false => secret,
+        };
         Ok(Some(kernable_store::vault::Vault::open(store, &key)?))
     }
+}
+
+/// The vault of `export`, `import`, `copy` and `restore`.
+#[derive(Clone, Default)]
+struct VaultFlags {
+    store: String,
+    /// The vault key's file, or with `derived` the instance key's.
+    key: String,
+    derived: bool,
 }
 
 fn boxed(e: BoxError) -> Box<dyn std::error::Error> {
@@ -3125,7 +3201,10 @@ fn vault_rekey(vault: &str, old: &str, new: &str) -> Result<bool> {
     };
     let (old, new) = (read(old)?, read(new)?);
     let count = kernable_store::vault::Vault::open(vault, &old)?.rekey(&new)?;
-    println!("re-encrypted {count} values; start the kernel with --vault-key <new.key>");
+    println!(
+        "re-encrypted {count} values; start the kernel with the instance key the new vault key \
+         belongs to"
+    );
     Ok(true)
 }
 
@@ -4008,8 +4087,6 @@ mod tests {
         let args = [
             "--root",
             &root,
-            "--vault-key",
-            "vault.key",
             "--metrics-listen",
             "127.0.0.1:9233",
             "--ui-listen",

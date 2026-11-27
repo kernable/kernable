@@ -1130,6 +1130,7 @@ async fn a_running_kernel_exports_to_a_key_granted_export() {
         config.vault = Some(kernable_kernel::config::VaultConfig {
             store: format!("sqlite:{}", dir.join("vault.db").display()),
             key: dir.join("vault.key"),
+            derived: false,
         });
     })
     .await;

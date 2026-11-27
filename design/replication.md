@@ -83,7 +83,7 @@ So that a single kernel can be moved to another machine without a witness and wi
 
 ## The standby while it follows
 
-`kernable start --follow <address> --follow-key <key> --primary-kernel-key <pub>` with the usual store, vault, data, key and TLS flags (the connection to the primary uses `KERNABLE_TLS_*`, as the SDKs do). It serves no requests: every RPC but `ReplicationService` answers `UNAVAILABLE` with `not_primary` and the primary's address (a tower layer in front of the server); `/ready` answers 503; `/metrics` shows the record it applied and how far it is behind. It clears its snapshot store when it starts. While it applies an image, a marker file `<store>.image` exists; a standby that finds one starts over, empty.
+`kernable start --follow <address> --instance-key <key> --primary-kernel-key <pub>` with the usual store, vault, data, key and TLS flags (the connection to the primary uses `KERNABLE_TLS_*`, as the SDKs do). It serves no requests: every RPC but `ReplicationService` answers `UNAVAILABLE` with `not_primary` and the primary's address (a tower layer in front of the server); `/ready` answers 503; `/metrics` shows the record it applied and how far it is behind. It clears its snapshot store when it starts. While it applies an image, a marker file `<store>.image` exists; a standby that finds one starts over, empty.
 
 ## Promotion
 

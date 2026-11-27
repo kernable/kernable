@@ -39,6 +39,7 @@ fn start_kernel(dir: &Path, flags: &[String], crash_at: Option<&str>) -> Kernel 
     process
         .current_dir(dir)
         .arg("start")
+        .args(["--instance-key", "kernel.key"])
         .args(flags)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -584,11 +585,14 @@ fn vault_values_of(store: &str, vault: &str, command_id: &str) -> usize {
         .flat_map(|e| e.vault_refs.clone())
         .collect();
     assert!(!refs.is_empty(), "{command_id} has no vault references");
-    kernable_store::vault::Vault::open(vault, &[6; 32])
-        .unwrap()
-        .get(&refs)
-        .unwrap()
-        .len()
+    kernable_store::vault::Vault::open(
+        vault,
+        &kernable_kernel::instance::vault_key(key(3).as_bytes()),
+    )
+    .unwrap()
+    .get(&refs)
+    .unwrap()
+    .len()
 }
 
 /// One state crash point: the kernel aborts right after storing a vault value, an erasure, a
@@ -598,7 +602,6 @@ async fn state_crash_and_recover(point: &str, round: u32) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
-    std::fs::write(dir.join("vault.key"), hex(&[6; 32])).unwrap();
     let addr = format!("unix:{}", dir.join("k.sock").display());
     let store = store_url(&dir);
     let vault = format!("sqlite:{}", dir.join("vault.db").display());
@@ -609,8 +612,6 @@ async fn state_crash_and_recover(point: &str, round: u32) {
         &store,
         "--listen",
         &addr,
-        "--vault-key",
-        &dir.join("vault.key").display().to_string(),
         "--vault-store",
         &vault,
         "--checkpoint-interval-ms",
@@ -650,10 +651,13 @@ async fn state_crash_and_recover(point: &str, round: u32) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             };
             assert_eq!(committed_versions(&result), [1], "{point}: {result:?}");
-            let held = kernable_store::vault::Vault::open(&vault, &[6; 32])
-                .unwrap()
-                .get(&cmd.vault_refs)
-                .unwrap();
+            let held = kernable_store::vault::Vault::open(
+                &vault,
+                &kernable_kernel::instance::vault_key(key(3).as_bytes()),
+            )
+            .unwrap()
+            .get(&cmd.vault_refs)
+            .unwrap();
             assert_eq!(held.len(), 1, "{point}: the client's value is kept once");
         }
         "erasure.intended" | "erasure.pending" | "erasure.done" => {

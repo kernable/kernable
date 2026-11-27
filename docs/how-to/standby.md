@@ -35,15 +35,14 @@ kernable witness --root root.pub --listen 10.0.0.9:7300 --state witness.state \
 
 # machines A and B, the same flags but their own keys, stores and addresses
 kernable start --root root.pub --witness 10.0.0.9:7300 --witness-generation witness.generation \
-  --node-key node-a.key --advertise 10.0.0.1:7233 \
-  --primary-kernel-key kernel-a.pub --primary-kernel-key kernel-b.pub \
-  --kernel-key kernel-a.key --vault-key vault-a.key \
+  --instance-key node-a.key --advertise 10.0.0.1:7233 \
+  --primary-kernel-key node-a.pub --primary-kernel-key node-b.pub \
   --listen 10.0.0.1:7233 --tls-cert … --tls-key … --tls-client-ca …
 ```
 
 - Start the kernel that holds the data first: on a new witness, the first kernel to ask becomes the primary of term 1. The other one follows it, taking an image if it is empty.
 - Every pair has a [witness generation](#replace-a-lost-witness), 1 to begin with: the witness and both kernels refuse to start without one.
-- `--advertise` is where the other kernel reaches this one; `--primary-kernel-key` names both kernels' kernel keys, since either may be the primary.
+- `--advertise` is where the other kernel reaches this one; `--primary-kernel-key` names both kernels' keys, since either may be the primary: each kernel's one key (`--instance-key`) signs its checkpoints, takes part in the pair, and its vault key is derived from it.
 - The kernels reach the witness and each other with the `KERNABLE_TLS_*` variables, as the SDKs do.
 
 **What happens:**
@@ -69,7 +68,7 @@ A new witness knows no primary: the first kernel to ask it becomes one. If the o
 
 - `kernable witness generation <root.key> <n> <address>` writes `witness.generation`: generation `n` for the witness the kernels reach at `<address>`, exactly as they name it in `--witness`.
 - The witness sends its generation with every answer: `kernable witness … --generation witness.generation`. A kernel ignores an answer without one.
-- A kernel of the pair reads `--witness-generation <file>` (in a [project](./node), `[pair] witness-generation`) before every question to the witness, so a running kernel takes a new file without a restart. It keeps the newest generation it has seen, from that file, from its witness or from the other kernel (the primary tells its standby on their stream, the standby tells the primary when it connects), in `<node key>.generation` next to its node key: the generation on the first line, the signed message on the second. It never goes back.
+- A kernel of the pair reads `--witness-generation <file>` (in a [project](./node), `[pair] witness-generation`) before every question to the witness, so a running kernel takes a new file without a restart. It keeps the newest generation it has seen, from that file, from its witness or from the other kernel (the primary tells its standby on their stream, the standby tells the primary when it connects), in `<instance key>.generation` next to its instance key: the generation on the first line, the signed message on the second. It never goes back.
 
 To replace a lost witness:
 
@@ -112,25 +111,23 @@ Without a witness, the roles stay as you start them: you promote the standby by 
 
 ## 1. Keys
 
-The standby needs three keys of its own:
+The standby needs one key of its own: it proves the standby to the primary, signs the checkpoints it writes once promoted, and its vault key is derived from it.
 
 ```sh
-kernable keys new standby          # proves the standby to the primary
+kernable keys new standby
 kernable grant root.key standby.pub 'replicate=*'
-kernable keys new standby-kernel   # signs the checkpoints it writes once promoted
-kernable keys new standby-vault    # encrypts its vault
 ```
 
 `replicate` lets a key receive everything: every event, command and file, and every vault value in plaintext. Keep `standby.key` as carefully as the root key, and run replication over mutual TLS only (see [Mutual TLS](./tls)). Revoke it, and the standby's stream ends at once; in a pair, the primary commits alone, so the revoked key can never take its place.
 
-The standby encrypts its vault with its own key; no secret is copied between the machines.
+The standby encrypts its vault with the key derived from its own; no secret is copied between the machines.
 
 ## 2. Start the primary with `--replication sync`
 
 ```sh
 kernable start --root root.pub --replication sync \
   --listen 10.0.0.1:7233 --tls-cert … --tls-key … --tls-client-ca … \
-  --vault-key vault.key
+  --instance-key primary.key
 ```
 
 Until a standby has caught up once, the primary serves alone, and the standby takes its image and catches up meanwhile without holding up a write. Once it holds every write the primary told, the primary waits for it from the next write on, notes so beside its store (`<store>.standby-caught-up`, so that started again it waits at once), and tells the standby it is in sync. From then on, writes wait without a standby in sync and `/ready` answers `waiting for a standby in sync`.
@@ -142,13 +139,12 @@ On the second machine, with its own stores:
 ```sh
 KERNABLE_TLS_CA=ca.tls.crt KERNABLE_TLS_CERT=standby.tls.crt KERNABLE_TLS_KEY=standby.tls.key \
 kernable start --root root.pub \
-  --follow 10.0.0.1:7233 --follow-key standby.key --primary-kernel-key kernel.pub \
-  --kernel-key standby-kernel.key --vault-key standby-vault.key \
+  --follow 10.0.0.1:7233 --instance-key standby.key --primary-kernel-key primary.pub \
   --listen 10.0.0.2:7233 --tls-cert … --tls-key … --tls-client-ca …
 ```
 
 - `--follow` is the primary's address; the connection uses the `KERNABLE_TLS_*` variables, as the SDKs do.
-- `--primary-kernel-key` is the primary's kernel public key: the standby checks the primary's checkpoints with it. Give every key the primary had, if it changed its key.
+- `--primary-kernel-key` is the primary's public key (its instance key's `.pub`): the standby checks the primary's checkpoints with it. Give every key the primary had, if it changed its key.
 - Start it with the flags it should have as the primary later, such as `--replication sync` if it should wait for a standby of its own once promoted.
 
 An **empty** standby takes a full image of the primary first, then follows. The first standby of a primary does so while the primary serves alone. A standby that replaces one that caught up before makes the primary's writes wait while it takes the image: with a large store, add it in a quiet hour. To let it catch up without the wait instead, stop the primary, delete `<store>.standby-caught-up`, and start it again; from then on, the old standby must not be promoted. A standby that was away only briefly catches up from where it stopped: SQLite keeps 100,000 records beyond what the standby acknowledged.
@@ -200,7 +196,7 @@ If the old primary stops before the standby heard it (it crashed in between), th
 
 ## Bring the old primary back
 
-Never start the old primary as a primary again; after a switchover it refuses to. Start it as a standby of the new one, with `--follow` and the new primary's kernel key. After a switchover or a planned stop it follows on from its own log. Cut off by the network, it may hold writes it never told anyone of (the commits under way when it lost its standby); then its log differs from the new primary's, and it takes exactly those writes back and follows on (`the standby took back its records the primary does not hold`). Only if one of them cannot be taken back (an erasure, a data file's change, a completed command whose vault values are gone) it moves its stores aside (`<file>.diverged-<ms>`) and takes an image. Only the newest copy stays: a kernel that starts over again removes the one before, so they take one store's size at most. The files it moves aside can hold personal data: delete them once you know nothing in them is needed.
+Never start the old primary as a primary again; after a switchover it refuses to. Start it as a standby of the new one, with `--follow` and the new primary's key. After a switchover or a planned stop it follows on from its own log. Cut off by the network, it may hold writes it never told anyone of (the commits under way when it lost its standby); then its log differs from the new primary's, and it takes exactly those writes back and follows on (`the standby took back its records the primary does not hold`). Only if one of them cannot be taken back (an erasure, a data file's change, a completed command whose vault values are gone) it moves its stores aside (`<file>.diverged-<ms>`) and takes an image. Only the newest copy stays: a kernel that starts over again removes the one before, so they take one store's size at most. The files it moves aside can hold personal data: delete them once you know nothing in them is needed.
 
 A primary that still ran when you promoted its standby tells nobody of anything it writes from then on: no standby acknowledges it any more.
 

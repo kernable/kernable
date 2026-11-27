@@ -113,7 +113,7 @@ impl Reader {
             .ok_or("--reader needs the writer's address")?;
         let key = config
             .read_signing_key(&follow.key)
-            .map_err(|e| format!("--follow-key {}: {e}", follow.key.display()))?;
+            .map_err(|e| format!("--instance-key {}: {e}", follow.key.display()))?;
         let grant_path = follow.key.with_extension("grant");
         let grant = std::fs::read_to_string(&grant_path)
             .map_err(|e| format!("the reader's grant {}: {e}", grant_path.display()))?

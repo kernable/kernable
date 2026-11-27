@@ -54,7 +54,7 @@ Each service gets a key and a grant from the root key ([Keys per service](./keys
 
 ```toml
 [kernel]
-flags = { root = "root.pub", kernel-key = "kernel.key", vault-key = "vault.key", store = "sqlite:kernable.db", listen = "unix:/srv/kernable/shop/kernel.sock", metrics-listen = "127.0.0.1:9233" }
+flags = { root = "root.pub", instance-key = "instance.key", store = "sqlite:kernable.db", listen = "unix:/srv/kernable/shop/kernel.sock", metrics-listen = "127.0.0.1:9233" }
 
 [node]
 project = "shop"

@@ -59,5 +59,5 @@ While the kernel is away, workers and listeners reconnect on their own (their co
 |---|---|
 | a new service, new rights | issue a grant; no change to the kernel |
 | a leaked key | `kernable revoke` against the running kernel ([Keys](./keys#revoking-a-stolen-key)) |
-| the kernel's key | replace the file and send SIGHUP ([Keys](./keys#the-kernel-s-key)) |
+| the instance key | a new instance: grant the new key, rekey the vault, restart ([Keys](./keys#the-instance-key)) |
 | TLS certificates, the vault key, any other flag of `kernable start` | restart the kernel ([kernable start](../reference/configuration)) |

@@ -31,19 +31,17 @@ Start the writer with `--readers on`; with a standby, give both kernels of the p
 
 ```sh
 kernable start --root root.pub --readers on --replication sync \
-  --listen 10.0.0.1:7233 --tls-cert … --tls-key … --tls-client-ca … --vault-key vault.key
+  --listen 10.0.0.1:7233 --tls-cert … --tls-key … --tls-client-ca … --instance-key node-a.key
 ```
 
 The writer then keeps its record log (as for a standby or a backup), and SQLite keeps what a reader that is away needs, a million records at most. A reader further behind starts anew.
 
 ## 2. Keys
 
-Each reader needs a key granted `read`, and keys of its own for its vault and its checkpoints:
+Each reader needs one key of its own, granted `read`: it follows the writer with it, signs its own checkpoints with it, and its vault key is derived from it.
 
 ```sh
 kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*'
-kernable keys new reader-1-kernel
-kernable keys new reader-1-vault
 ```
 
 `read` lets a key receive everything, every vault value in plaintext included: keep the reader's key as carefully as the root key, and run readers over mutual TLS only (see [Mutual TLS](./tls)). Revoke it and its stream ends. Unlike `replicate`, a standby's action, `read` never lets the key follow as a standby, so a reader's key cannot take the standby's place in a pair (and a standby's key does not follow as a reader: each role has its own key).
@@ -53,14 +51,13 @@ kernable keys new reader-1-vault
 ```sh
 KERNABLE_TLS_CA=ca.tls.crt KERNABLE_TLS_CERT=reader-1.tls.crt KERNABLE_TLS_KEY=reader-1.tls.key \
 kernable start --root root.pub \
-  --reader 10.0.0.1:7233,10.0.0.2:7233 --follow-key reader-1.key \
-  --primary-kernel-key kernel-a.pub --primary-kernel-key kernel-b.pub \
-  --kernel-key reader-1-kernel.key --vault-key reader-1-vault.key \
+  --reader 10.0.0.1:7233,10.0.0.2:7233 --instance-key reader-1.key \
+  --primary-kernel-key node-a.pub --primary-kernel-key node-b.pub \
   --listen 10.0.0.5:7233 --tls-cert … --tls-key … --tls-client-ca …
 ```
 
 - `--reader` names the writer, or both kernels of a pair: the reader follows whichever is the primary (a standby answers `not_primary`, and it turns to the next address).
-- `--primary-kernel-key`: the writers' kernel keys, as for a standby; the reader checks their checkpoints with them.
+- `--primary-kernel-key`: the writers' keys, as for a standby; the reader checks their checkpoints with them.
 - The connection to the writer uses the `KERNABLE_TLS_*` variables, as the SDKs do.
 
 A new reader first catches up: it takes a full image of the writer (or a backup, below), then follows, and only then serves. Meanwhile every request gets `UNAVAILABLE` `reader_catching_up` and `/ready` answers 503.
@@ -71,11 +68,11 @@ A full image comes from the writer and loads it. A new reader can start from the
 
 ```sh
 kernable start … --reader 10.0.0.1:7233,10.0.0.2:7233 \
-  --from-backup s3://backups/shop --from-backup-key backup.key --from-backup-vault-key vault.key
+  --from-backup s3://backups/shop --from-backup-key backup.key --from-backup-vault-key writer-vault.key
 ```
 
-- `--from-backup` takes a target as `kernable restore` does, with the same `KERNABLE_S3_*` and `AWS_*` variables. With a [backup signer](./backup#continuous-backup) (`KERNABLE_S3_SIGNER`, and `KERNABLE_S3_SIGNER_CA` for its certificate) the reader holds no S3 keys: it asks the signer with `KERNABLE_S3_SIGNER_KEY`, or else with its own `--follow-key`, which the signer must sign for.
-- `--from-backup-vault-key` is the writer's vault key of the time the backup was taken: its values are encrypted with it. The reader encrypts them with its own `--vault-key` right after the restore, so the writer's key stays only where you keep it.
+- `--from-backup` takes a target as `kernable restore` does, with the same `KERNABLE_S3_*` and `AWS_*` variables. With a [backup signer](./backup#continuous-backup) (`KERNABLE_S3_SIGNER`, and `KERNABLE_S3_SIGNER_CA` for its certificate) the reader holds no S3 keys: it asks the signer with `KERNABLE_S3_SIGNER_KEY`, or else with its own `--instance-key`, which the signer must sign for.
+- `--from-backup-vault-key` is the writer's vault key of the time the backup was taken: its values are encrypted with it. Derive it where the writer's key is kept, `kernable keys vault node-a.key writer-vault.key`, so the writer's instance key itself never leaves. The reader encrypts the values with its own vault key right after the restore.
 - It is used only by a reader whose store is empty, or one the writer no longer keeps the records for. If the backup cannot be read, or the writer no longer holds the records after it, the reader takes a full image from the writer instead.
 
 ## 4. Your code beside a reader

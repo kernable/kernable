@@ -570,7 +570,7 @@ async fn a_kernel_needs_a_vault_for_personal_keys() {
         let refused = kernable_kernel::Kernel::open_on(config.clone(), store)
             .err()
             .unwrap();
-        assert!(refused.to_string().contains("--vault-key"), "{refused}");
+        assert!(refused.to_string().contains("--vault-store"), "{refused}");
         std::fs::remove_file(dir.join("k.db")).ok();
         std::fs::remove_file(dir.join("k.db-wal")).ok();
     })

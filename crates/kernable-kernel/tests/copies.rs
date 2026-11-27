@@ -217,7 +217,7 @@ impl Copy {
         Copy {
             store: format!("{}:{}", backend(), dir.join(file).display()),
             vault_store: format!("sqlite:{}", dir.join("vault.db").display()),
-            vault_key: dir.join("vault.key"),
+            vault_key: dir.join("instance.key"),
             data: format!("file:{}", dir.join("data").display()),
             dir,
         }
@@ -229,7 +229,7 @@ impl Copy {
             self.store.clone(),
             "--vault-store".into(),
             self.vault_store.clone(),
-            "--vault-key".into(),
+            "--instance-key".into(),
             self.vault_key.display().to_string(),
             "--data-store".into(),
             self.data.clone(),
@@ -242,6 +242,7 @@ impl Copy {
         VaultConfig {
             store: self.vault_store.clone(),
             key: self.vault_key.clone(),
+            derived: true,
         }
     }
 }
@@ -269,7 +270,10 @@ async fn a_masked_copy_of_a_store_reads_personal_values_as_null_and_writes_its_o
     assert_eq!(code, 1, "{printed}");
     assert!(printed.contains("add --mask-vault"), "{printed}");
     let mut existing = args.clone();
-    let at = existing.iter().position(|a| *a == "--vault-key").unwrap();
+    let at = existing
+        .iter()
+        .position(|a| *a == "--instance-key")
+        .unwrap();
     existing[at + 1] = "vault.key";
     let (code, printed) = run(&env.dir, &existing).await;
     assert_eq!(code, 1, "{printed}");
@@ -383,6 +387,7 @@ async fn a_masked_copy_of_a_store_reads_personal_values_as_null_and_writes_its_o
     production_vault.vault = Some(VaultConfig {
         store: format!("sqlite:{}", env.dir.join("vault.db").display()),
         key: env.dir.join("vault.key"),
+        derived: false,
     });
     let e = refused(production_vault.clone());
     assert!(e.contains("in use by another process"), "{e}");
@@ -393,9 +398,13 @@ async fn a_masked_copy_of_a_store_reads_personal_values_as_null_and_writes_its_o
     production_key.vault = Some(VaultConfig {
         store: format!("sqlite:{}", copied.display()),
         key: env.dir.join("vault.key"),
+        derived: false,
     });
     let e = refused(production_key);
-    assert!(e.contains("only with the vault key its copy made"), "{e}");
+    assert!(
+        e.contains("only with the instance key its copy made"),
+        "{e}"
+    );
     // Production's snapshots, while production runs: their own lock refuses them.
     let mut live_snapshots = config.clone();
     live_snapshots.snapshots = env.snapshots.clone();
@@ -530,7 +539,10 @@ async fn a_masked_copy_from_an_export_stays_a_copy() {
     let again = Copy::new(&env.dir, "production");
     let mut args = vec!["import".to_owned(), "copy.kx".into()];
     args.extend(again.flags().into_iter().take(4));
-    args.extend(["--vault-key".into(), copy.vault_key.display().to_string()]);
+    args.extend([
+        "--instance-key".into(),
+        copy.vault_key.display().to_string(),
+    ]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (code, printed) = run(&env.dir, &args).await;
     assert_eq!(code, 1, "{printed}");
@@ -552,7 +564,9 @@ async fn a_masked_copy_from_an_export_stays_a_copy() {
     assert_eq!(mark.source, "export copy.kx");
     assert_eq!(
         mark.vault_key,
-        signing::vault_key_id(&signing::read_secret(&second.vault_key).unwrap())
+        signing::vault_key_id(&kernable_kernel::instance::vault_key(
+            &signing::read_secret(&second.vault_key).unwrap()
+        ))
     );
 
     // A standby on a copy's store does not start.

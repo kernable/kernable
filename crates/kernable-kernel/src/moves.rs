@@ -171,7 +171,7 @@ impl Kernel {
             .read_signing_key(&partition.node_key)
             .map_err(|e| {
                 Status::failed_precondition(format!(
-                    "moving tenants needs --node-key ({}): {e}",
+                    "moving tenants needs --instance-key ({}): {e}",
                     partition.node_key.display()
                 ))
             })?;

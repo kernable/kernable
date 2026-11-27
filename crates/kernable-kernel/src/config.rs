@@ -24,10 +24,10 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "The gRPC address for every service and client: `host:port`, or `unix:<path>` on Unix, whose owner and group may connect (mode 0660). Plain TCP is accepted only on a loopback address (`127.0.0.1`, `::1`, `localhost`); any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`), or the kernel does not start.",
     ),
     (
-        "--kernel-key",
-        "KERNABLE_KERNEL_KEY",
-        "kernel.key",
-        "The kernel's own signing key, written by `kernable keys new kernel`. It signs checkpoints and stored revocations. The file must exist. On Unix, SIGHUP reads it again, so a new key signs from then on without a restart.",
+        "--instance-key",
+        "KERNABLE_INSTANCE_KEY",
+        "instance.key",
+        "This kernel's one key, written by `kernable keys new instance`; the file must exist. Its ID (the `.pub` beside it) names the kernel everywhere: it signs checkpoints and stored revocations, follows a primary or a writer (its grant, `<name>.grant` next to it, allows `replicate` for a standby, a kernel of a pair or a partition, `read` for a reader), and pushes and reads at a relay. The vault's key is derived from it, so the vault belongs to this key: `kernable vault rekey` moves a vault to another one.",
     ),
     (
         "--snapshots",
@@ -48,16 +48,10 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Where the cache service keeps values. Only `memory:` exists: values last until they expire, are deleted, or the kernel restarts.",
     ),
     (
-        "--vault-key",
-        "KERNABLE_VAULT_KEY",
-        "",
-        "The key that encrypts the vault: a file with 32 random bytes, hex encoded (`kernable keys new vault` writes one). Without it the kernel has no vault: commands and events with vault values are refused. `--dev` uses `vault.key` if none is given.",
-    ),
-    (
         "--vault-store",
         "KERNABLE_VAULT_STORE",
-        "sqlite:vault.db",
-        "Where the vault keeps personal and secret values, encrypted with `--vault-key`. `sqlite:<path>` or a bare path: SQLite. `memory:`: every value is lost on a restart, for tests. Ignored without `--vault-key`. One kernel per vault: a second one is refused (`<path>.lock`).",
+        "",
+        "Where the vault keeps personal and secret values, encrypted with the vault key derived from `--instance-key`. `sqlite:<path>` or a bare path: SQLite. `memory:`: every value is lost on a restart, for tests. Default: `sqlite:vault.db`, or `memory:` for a `memory:` store. One kernel per vault: a second one is refused (`<path>.lock`).",
     ),
     (
         "--tls-cert",
@@ -117,7 +111,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--reader",
         "KERNABLE_READER",
         "",
-        "Run as a reader, a read-only copy of the writer at these addresses (comma-separated: both kernels of a pair; it follows whichever is the primary). It applies the writer's records as a standby does, answers queries, subscriptions and live listeners from its own copy, forwards commands and every other write to the writer, and is never promoted. Reactors and workers that connect to it wait (`reader_of`); scheduled commands and business processes run on the writer. Needs `--follow-key` (granted `read`, not `replicate`: a reader's key never follows as a standby) and `--primary-kernel-key`; the writer needs `--readers on`. Not with `--follow`, `--witness`, `--replication sync`, `--backup on` or `--readers on`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
+        "Run as a reader, a read-only copy of the writer at these addresses (comma-separated: both kernels of a pair; it follows whichever is the primary). It applies the writer's records as a standby does, answers queries, subscriptions and live listeners from its own copy, forwards commands and every other write to the writer, and is never promoted. Reactors and workers that connect to it wait (`reader_of`); scheduled commands and business processes run on the writer. Its `--instance-key` needs a grant for `read` (not `replicate`: a reader's key never follows as a standby), and it needs `--primary-kernel-key`; the writer needs `--readers on`. Not with `--follow`, `--witness`, `--replication sync`, `--backup on` or `--readers on`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
     ),
     (
         "--reader-max-lag-ms",
@@ -152,14 +146,14 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
     (
         "--become-writer",
         "KERNABLE_BECOME_WRITER",
-        "",
-        "With `--reader-copy`: the key file of the pusher this kernel will have as the writer (`kernable push --key`). It catches up from the copy as a reader does, then becomes the copy's writer on the same history, once the relay takes that key as the copy's pusher: named there and active, and no other pusher connected (the old writer's stopped or revoked). Until then it keeps following and says why it waits. While it takes the copy's last records it holds the relay's push for that key, so the old pusher cannot come back meanwhile. It then serves as the writer; start its pusher (`kernable push` with that key, or `[push]` on a node) and it continues the copy where it stands. Needs `--readers on`, for that pusher.",
+        "off",
+        "`on`, with `--reader-copy`: this kernel takes the copy over as its writer. It catches up from the copy as a reader does, then becomes the copy's writer on the same history, once the relay takes its key (`--instance-key`) as the copy's pusher: named there with the role `push` and active, and no other pusher connected (the old writer's stopped or revoked). Until then it keeps following and says why it waits. While it takes the copy's last records it holds the relay's push for that key, so the old pusher cannot come back meanwhile. It then serves as the writer; start its pusher (`kernable push` with the same instance key, or `[push]` on a node) and it continues the copy where it stands. Needs `--readers on`, for that pusher.",
     ),
     (
         "--from-backup",
         "KERNABLE_FROM_BACKUP",
         "",
-        "With `--reader`: a new or empty reader first restores the newest generation of this backup (a target as for `kernable restore`) and then catches up the rest from the writer, so a large store need not come from the writer. Needs `--from-backup-key`; if the backup holds vault values, also `--from-backup-vault-key`. With `KERNABLE_S3_SIGNER` it reads the backup through that signer, asked with `KERNABLE_S3_SIGNER_KEY` or else its `--follow-key`, and needs no S3 keys. If the writer no longer keeps the records after the backup, or the backup cannot be read, the reader takes a full image from the writer instead.",
+        "With `--reader`: a new or empty reader first restores the newest generation of this backup (a target as for `kernable restore`) and then catches up the rest from the writer, so a large store need not come from the writer. Needs `--from-backup-key`; if the backup holds vault values, also `--from-backup-vault-key`. With `KERNABLE_S3_SIGNER` it reads the backup through that signer, asked with `KERNABLE_S3_SIGNER_KEY` or else its `--instance-key`, and needs no S3 keys. If the writer no longer keeps the records after the backup, or the backup cannot be read, the reader takes a full image from the writer instead.",
     ),
     (
         "--from-backup-key",
@@ -171,7 +165,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--from-backup-vault-key",
         "KERNABLE_FROM_BACKUP_VAULT_KEY",
         "",
-        "With `--from-backup`: the vault key the backup's values are encrypted with, the writer's when it was taken. The reader encrypts them with its own `--vault-key` right after the restore.",
+        "With `--from-backup`: the vault key the backup's values are encrypted with, the writer's when it was taken (`kernable keys vault <the writer's instance key> <file>` writes it, without the instance key itself). The reader encrypts them with its own vault key right after the restore.",
     ),
     (
         "--partition",
@@ -183,7 +177,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--control",
         "KERNABLE_CONTROL",
         "",
-        "With `--partition`: the control partition's addresses, comma-separated (both kernels of a pair). This kernel takes the partition map, grants, revocations and memberships from there every second, with `--node-key` (granted `replicate`). Without it, this kernel is the control partition: maps are applied here (`kernable partitions apply`).",
+        "With `--partition`: the control partition's addresses, comma-separated (both kernels of a pair). This kernel takes the partition map, grants, revocations and memberships from there every second, with `--instance-key` (granted `replicate`). Without it, this kernel is the control partition: maps are applied here (`kernable partitions apply`).",
     ),
     (
         "--partition-copy-keys",
@@ -195,13 +189,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--witness",
         "KERNABLE_WITNESS",
         "",
-        "Run as one kernel of a pair whose roles a witness (`kernable witness`) decides, at this address: the primary of the newest term serves with `--replication sync`, the other follows it, and takes its place on its own once the primary's lease runs out. Needs `--node-key` and `--primary-kernel-key`; not with `--follow`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
-    ),
-    (
-        "--node-key",
-        "KERNABLE_NODE_KEY",
-        "node.key",
-        "With `--witness` or `--control`: this kernel's key towards the witness, the other kernel and the control partition, whose grant (`<name>.grant` next to it) allows `replicate`.",
+        "Run as one kernel of a pair whose roles a witness (`kernable witness`) decides, at this address: the primary of the newest term serves with `--replication sync`, the other follows it, and takes its place on its own once the primary's lease runs out. Needs `--primary-kernel-key`, and a grant for `replicate` for its `--instance-key`; not with `--follow`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
     ),
     (
         "--advertise",
@@ -213,7 +201,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--witness-generation",
         "KERNABLE_WITNESS_GENERATION",
         "",
-        "With `--witness`, and needed then: a file of the witness's generation (`kernable witness generation`), signed by a root key; a new pair starts with generation 1. The kernel keeps the newest generation it has seen (from this file, its witness or the other kernel) in `<node-key>.generation` and ignores every witness of an older one, or one answering with another witness's generation, so a replaced witness that comes back cannot make a second primary. It reads the file again before every question to the witness: raise it on both kernels before they turn to a new witness.",
+        "With `--witness`, and needed then: a file of the witness's generation (`kernable witness generation`), signed by a root key; a new pair starts with generation 1. The kernel keeps the newest generation it has seen (from this file, its witness or the other kernel) in `<instance-key>.generation` and ignores every witness of an older one, or one answering with another witness's generation, so a replaced witness that comes back cannot make a second primary. It reads the file again before every question to the witness: raise it on both kernels before they turn to a new witness.",
     ),
     (
         "--standby-timeout-ms",
@@ -226,12 +214,6 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "KERNABLE_FOLLOW",
         "",
         "Run as the standby of the primary at this address: apply its records, serve nothing else (every request is refused with `UNAVAILABLE`, `not_primary`) until `kernable promote` makes this kernel the primary. The connection uses `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, as the SDKs do.",
-    ),
-    (
-        "--follow-key",
-        "KERNABLE_FOLLOW_KEY",
-        "standby.key",
-        "With `--follow`: the standby's key, whose grant (`<name>.grant` next to it) allows `replicate`. With `--reader`: the reader's key, whose grant allows `read`.",
     ),
     (
         "--primary-kernel-key",
@@ -249,7 +231,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--checkpoint-interval-ms",
         "KERNABLE_CHECKPOINT_INTERVAL_MS",
         "5000",
-        "How often, in milliseconds, the kernel signs a checkpoint of the hash chain with `--kernel-key`, if new events arrived. Events after the last checkpoint are not yet covered by a signature (`kernable verify` counts them).",
+        "How often, in milliseconds, the kernel signs a checkpoint of the hash chain with `--instance-key`, if new events arrived. Events after the last checkpoint are not yet covered by a signature (`kernable verify` counts them).",
     ),
     (
         "--submit-timeout-ms",
@@ -489,9 +471,9 @@ pub struct Replication {
     /// `--reader-max-lag-ms`: a reader that has not held everything its writer may tell for
     /// longer refuses queries and is not ready; 0: never.
     pub reader_max_lag_ms: u64,
-    /// `--become-writer`: the key file of the pusher this reader of a relay's copy takes the
-    /// copy over with, as its writer.
-    pub become_writer: Option<PathBuf>,
+    /// `--become-writer on`: this reader of a relay's copy takes the copy over as its writer,
+    /// pushing it with its own key.
+    pub become_writer: bool,
     /// `--approval`: the project key's approval this kernel writes into its takeover record.
     pub approval: Option<PathBuf>,
     /// `--project-key`: key IDs of the project keys whose approvals of a takeover count.
@@ -510,7 +492,7 @@ pub struct FromBackup {
     /// `KERNABLE_S3_SIGNER`: a signer that presigns the requests to the backup's bucket, as
     /// for `kernable restore`, so the reader holds no S3 keys.
     pub signer: Option<String>,
-    /// `KERNABLE_S3_SIGNER_KEY`: the key it asks the signer with; else its `--follow-key`.
+    /// `KERNABLE_S3_SIGNER_KEY`: the key it asks the signer with; else its `--instance-key`.
     pub signer_key: Option<PathBuf>,
 }
 
@@ -598,7 +580,10 @@ impl Default for Limits {
 #[derive(Debug, Clone)]
 pub struct VaultConfig {
     pub store: String,
+    /// The vault key's file, or with `derived` the instance key it is derived from.
     pub key: PathBuf,
+    /// `key` is the instance key (`--instance-key`), and the vault key is derived from it.
+    pub derived: bool,
 }
 
 /// Mutual TLS for TCP; every client needs a certificate of `client_ca`.
@@ -709,7 +694,7 @@ impl Config {
             }
             (Some(primary), None) | (None, Some(primary)) => Some(Follow {
                 primary,
-                key: get("--follow-key").expect("has a default").into(),
+                key: get("--instance-key").expect("has a default").into(),
                 primary_kernel_keys: kernel_keys()?,
                 copy: get("--reader-copy").unwrap_or_default(),
                 copy_key: get("--reader-copy-key").map(PathBuf::from),
@@ -779,7 +764,7 @@ impl Config {
             }
             Some(witness) => Some(Pair {
                 witness,
-                node_key: get("--node-key").expect("has a default").into(),
+                node_key: get("--instance-key").expect("has a default").into(),
                 advertise: get("--advertise")
                     .unwrap_or_else(|| get("--listen").expect("has a default")),
                 witness_generation: get("--witness-generation").expect("checked above").into(),
@@ -810,7 +795,13 @@ impl Config {
             reader: reader.is_some(),
             from_backup,
             reader_max_lag_ms: number("--reader-max-lag-ms")?,
-            become_writer: get("--become-writer").map(PathBuf::from),
+            become_writer: match get("--become-writer").expect("has a default").as_str() {
+                "on" => true,
+                "off" => false,
+                other => {
+                    return Err(format!("--become-writer: {other} is neither on nor off").into());
+                }
+            },
             approval: get("--approval").map(PathBuf::from),
             project_keys: get("--project-key")
                 .map(|v| {
@@ -823,13 +814,13 @@ impl Config {
                 .transpose()?
                 .unwrap_or_default(),
         };
-        if replication.approval.is_some() && replication.become_writer.is_none() {
+        if replication.approval.is_some() && !replication.become_writer {
             return Err(
                 "--approval goes with --become-writer: the takeover record it is written into"
                     .into(),
             );
         }
-        if replication.become_writer.is_some() {
+        if replication.become_writer {
             let of_copy = replication
                 .follow
                 .as_ref()
@@ -846,7 +837,7 @@ impl Config {
                 (replication.sync, "--replication sync"),
                 (replication.backup, "--backup on"),
                 (
-                    replication.readers && replication.become_writer.is_none(),
+                    replication.readers && !replication.become_writer,
                     "--readers on",
                 ),
             ];
@@ -870,7 +861,7 @@ impl Config {
             roots,
             store: get("--store").expect("has a default"),
             listen: get("--listen").expect("has a default"),
-            kernel_key: get("--kernel-key").expect("has a default").into(),
+            kernel_key: get("--instance-key").expect("has a default").into(),
             lease_ttl_ms: {
                 let ms = number("--lease-ttl-ms")?;
                 i64::try_from(ms).map_err(|_| format!("--lease-ttl-ms: {ms} is too large"))?
@@ -889,9 +880,15 @@ impl Config {
                 .unwrap_or_else(|| snapshots_next_to(&get("--store").expect("has a default"))),
             data: get("--data-store").expect("has a default"),
             cache: get("--cache-store").expect("has a default"),
-            vault: get("--vault-key").map(|key| VaultConfig {
-                store: get("--vault-store").expect("has a default"),
-                key: key.into(),
+            vault: Some(VaultConfig {
+                store: get("--vault-store").unwrap_or_else(|| {
+                    match kernable_store::backend(&get("--store").expect("has a default")).0 {
+                        "memory" => "memory:".into(),
+                        _ => "sqlite:vault.db".into(),
+                    }
+                }),
+                key: get("--instance-key").expect("has a default").into(),
+                derived: true,
             }),
             metrics_listen: get("--metrics-listen"),
             admin_socket: get("--admin-socket"),
@@ -969,7 +966,7 @@ impl Config {
                         }
                         c => c,
                     },
-                    node_key: get("--node-key").expect("has a default").into(),
+                    node_key: get("--instance-key").expect("has a default").into(),
                     copy_keys: get("--partition-copy-keys").expect("has a default").into(),
                 }),
             },
@@ -1261,6 +1258,18 @@ impl Config {
     }
 
     /// The signing key in the key file at `path`; see [`Config::read_secret`].
+    /// The vault's key: read from its file, or derived from the instance key.
+    pub fn read_vault_key(
+        &self,
+        vault: &VaultConfig,
+    ) -> std::io::Result<zeroize::Zeroizing<[u8; 32]>> {
+        let secret = self.read_secret(&vault.key)?;
+        Ok(match vault.derived {
+            true => crate::instance::vault_key(&secret),
+            false => secret,
+        })
+    }
+
     pub fn read_signing_key(
         &self,
         path: &std::path::Path,
@@ -1346,12 +1355,10 @@ mod tests {
                 &root,
                 "--reader",
                 "https://relay.example:7400",
-                "--follow-key",
-                "f.key",
                 "--primary-kernel-key",
                 &root,
                 "--become-writer",
-                "pusher.key",
+                "on",
             ];
             args.extend_from_slice(extra);
             Config::from_args(&args, |_| None).map_err(|e| e.to_string())
@@ -1364,13 +1371,10 @@ mod tests {
                 .contains("--reader-copy")
         );
         let config = parse(&[&copy[..], &["--readers", "on"]].concat()).unwrap();
-        assert_eq!(
-            config.replication.become_writer.as_deref(),
-            Some(std::path::Path::new("pusher.key"))
-        );
+        assert!(config.replication.become_writer);
         // Once it took the copy over, it runs as the writer.
         let writer = crate::promoted(config);
-        assert!(!writer.replication.reader && writer.replication.become_writer.is_none());
+        assert!(!writer.replication.reader && !writer.replication.become_writer);
     }
 
     #[test]

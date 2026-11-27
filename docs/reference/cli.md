@@ -15,7 +15,7 @@ kernable start --root <root.pub> [<flag> <value>]...
 kernable start --dev [<flag> <value>]...
 ```
 
-Runs the kernel in the foreground, trusting grants signed by the root keys; the flags are listed by `kernable start --help`. On Unix, SIGHUP reads the kernel key again. SIGTERM or SIGINT refuses new requests, lets running ones finish and stops; SIGTERM to a pair's primary hands its role to the standby in sync first. SIGUSR1 stops the same way, never handing over (a new binary takes the stores over). `--dev` is for trying kernable out: it creates `root.key`, `kernel.key`, `vault.key`, `app.key` and `app.grant` in the working directory if missing (app may do everything) and defaults to `--root root.pub`, `--vault-key vault.key`, `--ui-listen 127.0.0.1:7234` and `--durability` normal. With `--reader <writer>[,<writer>]` it runs as a reader, a read-only copy of the writer (started with `--readers` on): it catches up, from `--from-backup` if it is new, then answers queries from its copy and forwards commands. Exit 2 on invalid flags; exit 1 if the kernel stops on an error (a reader whose copy no longer continues its writer's log: start it again).
+Runs the kernel in the foreground, trusting grants signed by the root keys; the flags are listed by `kernable start --help`. On Unix, SIGHUP reads the instance key again. SIGTERM or SIGINT refuses new requests, lets running ones finish and stops; SIGTERM to a pair's primary hands its role to the standby in sync first. SIGUSR1 stops the same way, never handing over (a new binary takes the stores over). `--dev` is for trying kernable out: it creates `root.key`, `instance.key`, `app.key` and `app.grant` in the working directory if missing (app may do everything) and defaults to `--root root.pub`, `--ui-listen 127.0.0.1:7234` and `--durability` normal. With `--reader <writer>[,<writer>]` it runs as a reader, a read-only copy of the writer (started with `--readers` on): it catches up, from `--from-backup` if it is new, then answers queries from its copy and forwards commands. Exit 2 on invalid flags; exit 1 if the kernel stops on an error (a reader whose copy no longer continues its writer's log: start it again).
 
 ### `kernable demo`
 
@@ -33,7 +33,15 @@ Runs kernable for presentations: a kernel on a new store in a temporary director
 kernable keys new <name>
 ```
 
-Writes `<name>.key` (the secret key, readable by the owner only, never overwritten) and `<name>.pub` (the key ID), and prints the key ID.
+Writes `<name>.key` (the secret key, readable by the owner only, never overwritten) and `<name>.pub` (the key ID), and prints the key ID. A kernel's one key is such a key (kernable start `--instance-key`).
+
+### `kernable keys vault`
+
+```text
+kernable keys vault <instance.key> <file>
+```
+
+Writes the vault key derived from an instance key to `<file>` (never overwritten): what kernable restore, export, import, copy or vault rekey take as `--vault-key`, or a reader as `--from-backup-vault-key`, without the instance key itself.
 
 ### `kernable grant`
 
@@ -102,10 +110,10 @@ Writes a new copy key (hex, mode 600): the pusher seals what it sends a relay wi
 ### `kernable push`
 
 ```text
-kernable push --follow <addr>[,<addr>] --key <key> --to <relay> --copy <name> --copy-key <file> [--start-anew <position>]
+kernable push --follow <addr>[,<addr>] --instance-key <key> --to <relay> --copy <name> --copy-key <file> [--start-anew <position>]
 ```
 
-Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record, sealed with the copy key, to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes (`--allow-push`). The writer keeps its records until the copy holds them. Beside the push it takes the writes the copy's readers send through the relay and makes them on the writer. The copy key reaches every reader by your own means, never through the relay. When the writer's log no longer continues the copy, it pushes nothing and says so (the copy keeps its history); `--start-anew` with the copy's position it named empties the copy so it begins anew from the writer. Connections use `KERNABLE_TLS_*`, as the SDKs do.
+Follows the writer at `<addr>` (started with `--readers` on; both kernels of a pair, comma-separated) as a reader and sends every record, sealed with the copy key, to the copy `<name>` at the relay `<relay>` over a connection it opens itself, until stopped. `<key>` is the writer's own instance key; it needs a grant for read on `*` (the grant file next to it is sent along, read again on every connection) and must be one the relay takes as the copy's pusher (`--allow-push`, or role push). The writer keeps its records until the copy holds them. Beside the push it takes the writes the copy's readers send through the relay and makes them on the writer. The copy key reaches every reader by your own means, never through the relay. When the writer's log no longer continues the copy, it pushes nothing and says so (the copy keeps its history); `--start-anew` with the copy's position it named empties the copy so it begins anew from the writer. Connections use `KERNABLE_TLS_*`, as the SDKs do.
 
 ### `kernable partitions apply`
 
@@ -336,33 +344,33 @@ Writes everything the running kernel at `<addr>` holds to `<file>`: every record
 ### `kernable export`
 
 ```text
-kernable export <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>]
+kernable export <file> [--store <s>] [--data-store <d>] [--vault-store <v> --instance-key <k> | --vault-key <k>]
 ```
 
-The same from stores read directly, kernel stopped. The flags name the stores as for kernable start, with its defaults; without `--vault-key` the vault is left out, which fails if the store refers to vault values.
+The same from stores read directly, kernel stopped. The flags name the stores as for kernable start, with its defaults; the vault opens with the key derived from the kernel's `--instance-key`, or with a vault key from kernable keys vault. Without either the vault is left out, which fails if the store refers to vault values.
 
 ### `kernable import`
 
 ```text
-kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --instance-key <k> | --vault-key <k>] [--kernel-pub <kernel.pub>]...
 ```
 
-Fills new, empty stores from an export, then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key. The whole file is checked before anything is written: a copy cut short or changed, or a wrong vault key, is refused. Without `--kernel-pub`, the store is checked with the kernel keys the export names; compare them with the source's `.pub` files, or name those. Keep the source's kernel `.pub` files for verify after the kernel runs on the new stores.
+Fills new, empty stores from an export, then checks the store like verify, with the same output and exit codes. The vault's key must be the source's (its instance key, or its vault key). The whole file is checked before anything is written: a copy cut short or changed, or a wrong vault key, is refused. Without `--kernel-pub`, the store is checked with the kernel keys the export names; compare them with the source's `.pub` files, or name those. Keep the source's kernel `.pub` files for verify after the kernel runs on the new stores.
 
 ### `kernable import`
 
 ```text
-kernable import <file> --mask-vault --vault-key <new file> [--with-files] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+kernable import <file> --mask-vault --instance-key <new file> [--with-files] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
 ```
 
-Makes a masked copy (a preview) from an export: its records without a vault value, so every personal value reads as null, as after an erasure. `--vault-key` names a file that does not exist: the copy's own, new vault key, which it writes, with a new, empty vault at `--vault-store`. Files are left out unless `--with-files`. The store is marked as a copy: a kernel runs it only alone, with that vault key.
+Makes a masked copy (a preview) from an export: its records without a vault value, so every personal value reads as null, as after an erasure. `--instance-key` names a file that does not exist: the copy's own, new instance key, which it writes with its `.pub`, and a new, empty vault at `--vault-store` with the vault key derived from it. Files are left out unless `--with-files`. The store is marked as a copy: a kernel runs it only alone, with that instance key.
 
 ## Previews
 
 ### `kernable copy`
 
 ```text
-kernable copy <source store> --mask-vault --vault-key <new file> [--files-from <d>] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
+kernable copy <source store> --mask-vault --instance-key <new file> [--files-from <d>] [--store <s>] [--data-store <d>] [--vault-store <v>] [--kernel-pub <kernel.pub>]...
 ```
 
 Makes a masked copy (a preview) of a store on this machine, read in one consistent view, also while its kernel runs (SQLite): as import `--mask-vault`, without an export file and without the source's vault or its key. `--files-from` copies the files of that data store too. Then checks the copy like verify.
@@ -383,7 +391,7 @@ Links the node in `<dir>` (default .) to a control point (`--ca`: whose certific
 kernable node <project.toml>
 ```
 
-Runs one node of a project: the kernel and, with a [backup] section, the backup follower, with a [push] section the pusher to a relay, as child processes it restarts when they exit. It reads the file again when it changed (it looks twice a second) or on SIGHUP, and restarts a child whose command changed or whose binary was replaced (a kernel hands its stores over to the new one). SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, image, cpus, memory, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, check-hours, signer, cpus, memory, env), [push] (to, copy, key, copy-key, root, follow, cpus, memory, env), [pair] (witness, node-key, advertise, peer, kernel-keys, standby-timeout-ms, witness-generation: this node's kernel of a pair), [node] (instance, project, podman, metrics-listen: GET /metrics, cpus and `memory:` the instance's total, network: own, the default, or host), any number of [[secret]] (name, and file or command) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
+Runs one node of a project: the kernel and, with a [backup] section, the backup follower, with a [push] section the pusher to a relay, as child processes it restarts when they exit. It reads the file again when it changed (it looks twice a second) or on SIGHUP, and restarts a child whose command changed or whose binary was replaced (a kernel hands its stores over to the new one). SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, image, cpus, memory, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, check-hours, signer, cpus, memory, env), [push] (to, copy, key, copy-key, root, follow, cpus, memory, env), [pair] (witness, advertise, peer, kernel-keys, standby-timeout-ms, witness-generation: this node's kernel of a pair), [node] (instance, project, podman, metrics-listen: GET /metrics, cpus and `memory:` the instance's total, network: own, the default, or host), any number of [[secret]] (name, and file or command) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
 
 ### `kernable expose`
 
@@ -438,10 +446,10 @@ Reads the newest generation all through, without writing a store: every object o
 ### `kernable restore`
 
 ```text
-kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--mask-vault [--with-files]] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--mask-vault [--with-files]] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --instance-key <k> | --vault-key <k>] [--kernel-pub <kernel.pub>]...
 ```
 
-Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key of that generation's time; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names. To a point, it first lists the erasures committed after it: restored as it was, they did not happen yet. To apply them again, `--reapply-erasures <file>` (or yes when asked) writes them to `<file>` for kernable erasures apply. With `--signer` and `--signer-key`, it reads an s3:// target through a signer, as backup list, plan and check do. With `--mask-vault`, and `--vault-key` naming a file that does not exist yet, it makes a masked copy (a preview) as import `--mask-vault` does, with the files only if `--with-files`; no vault key of the source is needed.
+Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. The vault's key must be the source's of that generation's time (its instance key, or the vault key kernable keys vault derives); the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names. To a point, it first lists the erasures committed after it: restored as it was, they did not happen yet. To apply them again, `--reapply-erasures <file>` (or yes when asked) writes them to `<file>` for kernable erasures apply. With `--signer` and `--signer-key`, it reads an s3:// target through a signer, as backup list, plan and check do. With `--mask-vault`, and `--instance-key` naming a file that does not exist yet, it makes a masked copy (a preview) as import `--mask-vault` does, with the files only if `--with-files`; no vault key of the source is needed.
 
 ### `kernable backup signer`
 
@@ -491,7 +499,7 @@ Unregisters an aggregate type: its commands are refused (`NOT_FOUND`) unless a m
 kernable vault rekey <vault> <old.key> <new.key>
 ```
 
-Re-encrypts every vault value with a new key; then start the kernel with `--vault-key <new.key>`. `<vault>` is the `--vault-store`, for example `sqlite:vault.db`. A key encrypts at most 2^32 values (each with a random nonce): the kernel warns at startup past half of that and refuses new values at the limit, until the vault is rekeyed.
+Re-encrypts every vault value with a new vault key (from kernable keys vault `<new` instance.key>); then start the kernel with that instance key. `<vault>` is the `--vault-store`, for example `sqlite:vault.db`. A key encrypts at most 2^32 values (each with a random nonce): the kernel warns at startup past half of that and refuses new values at the limit, until the vault is rekeyed.
 
 ## Scripting
 

@@ -17,7 +17,7 @@
 [kernel]
 binary = "/opt/kernable/1.0.1/kernable"   # optional: default the binary that runs the node
 stop-seconds = 30                          # optional
-flags = { root = "root.pub", store = "sqlite:kernable.db", vault-key = "vault.key" }
+flags = { root = "root.pub", store = "sqlite:kernable.db", instance-key = "node-a.key" }
 env = { KERNABLE_LOG = "info" }            # optional
 cpus = "2"                                 # optional (Linux), as memory = "2g"
 image = "docker.io/library/debian:trixie-slim"  # optional (Linux): the base image, this one by default
@@ -34,19 +34,17 @@ env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 
 [push]                                     # optional: a copy at a relay, for readers elsewhere
 to = "https://relay.example.net:7400"
-copy = "shop"
-key = "pusher.key"
+copy = "shop"                              # pushed with the kernel's instance-key
 copy-key = "copy.key"
 # start-anew = 1234                        # only when the pusher refused: the copy's position it named
 follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's listen
 
 [pair]                                     # optional: one node of a pair
 witness = "10.0.0.9:7300"
-node-key = "node-a.key"
 witness-generation = "witness.generation"  # the witness's generation (kernable witness generation)
 advertise = "10.0.0.1:7233"                # optional: default the kernel's listen
 peer = "10.0.0.2:7233"                     # the other node's kernel
-kernel-keys = ["kernel-a.pub", "kernel-b.pub"]
+kernel-keys = ["node-a.pub", "node-b.pub"]   # both kernels' instance keys
 
 [node]                                     # optional
 instance = "node-a"                        # KERNABLE_INSTANCE for the services (default the host name)

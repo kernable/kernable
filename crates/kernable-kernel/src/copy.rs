@@ -48,18 +48,19 @@ impl Mask {
     }
 }
 
-/// Writes a new vault key to `path` (readable by its owner only; an existing file is refused)
-/// and opens a new, empty vault at `store` with it: the copy's own vault.
+/// Writes a new instance key to `path` (readable by its owner only; an existing file is
+/// refused) with its `.pub` beside it, and opens a new, empty vault at `store` with the vault key
+/// derived from it: the copy's own key and vault, as a kernel on the copy starts with them.
 pub fn new_vault(store: &str, path: &str) -> Result<Vault, BoxError> {
     if Path::new(path).exists() {
         return Err(format!(
-            "{path} exists: a masked copy makes its own, new vault key; name a file that does not exist"
+            "{path} exists: a masked copy makes its own, new instance key; name a file that does not exist"
         )
         .into());
     }
     let mut key = Zeroizing::new([0u8; 32]);
     getrandom::fill(key.as_mut()).map_err(|_| "no randomness")?;
-    let vault = Vault::open(store, &key)?;
+    let vault = Vault::open(store, &crate::instance::vault_key(&key))?;
     let held = vault.overview(0)?;
     if held.personal + held.secret + held.erasures + held.intents > 0 {
         return Err(format!(
@@ -73,6 +74,11 @@ pub fn new_vault(store: &str, path: &str) -> Result<Vault, BoxError> {
     let mut file = options.open(path).map_err(|e| format!("{path}: {e}"))?;
     file.write_all(Zeroizing::new(format!("{}\n", hex::encode(key.as_slice()))).as_bytes())?;
     file.sync_all()?;
+    // Its ID beside it, as `kernable keys new` writes one.
+    let id = kernable_core::signing::key_id(
+        &ed25519_dalek::SigningKey::from_bytes(&key).verifying_key(),
+    );
+    std::fs::write(Path::new(path).with_extension("pub"), format!("{id}\n"))?;
     Ok(vault)
 }
 
@@ -155,8 +161,8 @@ pub fn check_config(config: &Config, store: &dyn Store) -> Result<Option<CopyRec
 pub fn check_vault(mark: &CopyRecord, vault: &Vault) -> Result<(), BoxError> {
     if mark.vault_key != vault.key_id() {
         return Err(format!(
-            "the store is a masked copy (a preview): it runs only with the vault key its copy \
-             made (key ID {}), not {}",
+            "the store is a masked copy (a preview): it runs only with the instance key its copy \
+             made (its vault key's ID {}), not with the vault key {}",
             mark.vault_key,
             vault.key_id()
         )

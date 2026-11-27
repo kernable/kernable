@@ -28,7 +28,7 @@ pub fn kernel() -> &'static Arc<Kernel> {
             "memory:",
             "--data-store",
             "memory:",
-            "--kernel-key",
+            "--instance-key",
             key.to_str().expect("a UTF-8 path"),
         ];
         let config = Config::from_args(&args, |_| None).expect("a valid configuration");

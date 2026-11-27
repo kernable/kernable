@@ -7,8 +7,7 @@ Use this page when you move from the tutorial's single key to production, give a
 | a new service, or more rights | [issue a grant](#one-key-per-service) | no |
 | fewer rights | [change the key](#changing-a-key), revoke the old one | no |
 | a key leaked | [revoke it](#revoking-a-stolen-key) | no |
-| the kernel's key | [replace the file, SIGHUP](#the-kernel-s-key) | no |
-| the vault's key | [re-encrypt the vault](#the-vault-s-key) | yes |
+| the instance key (the kernel's own, and its vault's) | [a new instance key, the vault rekeyed](#replacing-it) | yes |
 | the root key | [start with both roots](#the-root-key) | yes, twice |
 
 ## One key per service
@@ -103,7 +102,7 @@ It answers `revoked <key ID>`. `kernable revoke` connects over mutual TLS when `
 `kernable verify` then lists everything the key signed from that time on:
 
 ```text
-$ kernable verify sqlite:data/shop.db keys/kernel.pub
+$ kernable verify sqlite:data/shop.db keys/instance.pub
 2311 events, 1903 commands, 41 checkpoints, 0 events after the last checkpoint
 SUSPECT command c-8f2a: signed by revoked key 1f0a…
 OK, 1 suspect
@@ -111,50 +110,51 @@ OK, 1 suspect
 
 It exits with 2 when there are suspects, 1 when the log was tampered with. Review what the suspects did, and undo it with new commands where needed: the log itself is never rewritten.
 
-## The kernel's key
+## The instance key
 
-The kernel's key signs checkpoints and revocations. Replace it without a restart: write the new key to the file `--kernel-key` names, and send the kernel SIGHUP (Unix only). `kernable keys new` never overwrites a key, so create it under another name and move it:
+Each kernel has one key of its own, the file `--instance-key` names (written by `kernable keys new`). Its ID, the `.pub` beside it, names the kernel everywhere:
 
-```sh
-cp keys/kernel.pub keys/kernel-old.pub        # verify needs it later
-kernable keys new keys/kernel-2
-mv keys/kernel-2.key keys/kernel.key && mv keys/kernel-2.pub keys/kernel.pub
-kill -HUP <pid>
-```
+- it signs the kernel's checkpoints and stored revocations;
+- a standby, a kernel of a pair, a partition or a reader follows with it: its grant, `<name>.grant` beside it, allows `replicate` or `read`;
+- the writer's pusher pushes its copy to a relay with it, and a relay lets it in by that ID;
+- the vault's key is derived from it, so the vault belongs to it.
 
-The kernel logs `kernel key read again`, and signs with the new key from then on. If it cannot read the file, it logs an error and keeps the previous key. SIGHUP changes nothing else; other settings need a restart.
+Keep it as carefully as the vault: whoever has it reads the vault. To hand the vault key alone to a restore or an export, without the instance key, derive it: `kernable keys vault keys/instance.key vault.key`.
 
-Keep every old public key: `kernable verify` needs every key the kernel ever signed with, `kernable verify <store> keys/kernel-old.pub keys/kernel.pub`.
+### Replacing it
 
-## The vault's key
-
-Stop the kernel, encrypt the vault again, and start it with `--vault-key` pointing to the new file:
+Replace an instance key when it may have leaked, when the machine changes hands, or when its vault key has encrypted many values (each value gets a random nonce, and one key is safe for 2^32 of them; the kernel warns at startup past 2^31, the UI's verdict warns too, **Explore → Data → Vault** shows the count, and it refuses new values at 2^32). A new key is a new instance: give it what the old one had, move the vault to it, and start the kernel with it.
 
 ```sh
-kernable keys new keys/vault-2 >/dev/null
-kernable vault rekey sqlite:data/vault.db keys/vault.key keys/vault-2.key
+kernable keys new keys/instance-2
+kernable grant keys/root.key keys/instance-2.pub 'replicate=*'      # what the old key had
+# with the kernel stopped:
+kernable keys vault keys/instance.key old-vault.key
+kernable keys vault keys/instance-2.key new-vault.key
+kernable vault rekey sqlite:data/vault.db old-vault.key new-vault.key && shred -u new-vault.key
+kernable start --instance-key keys/instance-2.key …
 ```
 
-The old key cannot read the vault afterwards. Backups made before still need the old key: keep it as long as they are kept. A [continuous backup](./backup#restore-from-a-continuous-backup) begins a new generation with the new key, and `kernable backup list` names each generation's key.
+Its followers check its checkpoints with `--primary-kernel-key`: give them the new key ID beside the old one. If the old key leaked, revoke it. Keep every old public key, as `kernable verify` needs every key the kernel ever signed with (`kernable verify <store> keys/instance-old.pub keys/instance-2.pub`), and the old vault key (`old-vault.key`) as long as backups made before are kept: they are sealed with it. A [continuous backup](./backup#restore-from-a-continuous-backup) begins a new generation with the new vault key, and `kernable backup list` names each generation's key.
 
-Rekey also when a key has encrypted many values. Each value gets a random nonce, and one key is safe for 2^32 of them. The kernel counts them, logs a warning at startup past 2^31 (the UI's verdict warns too, and **Explore → Data → Vault** shows the count), and refuses new values at 2^32 until the vault is rekeyed.
+SIGHUP (Unix) reads the file again, which unwraps a [wrapped key](#keys-that-are-not-on-the-disk-in-clear) anew; a different key in the file is refused and logged, and the kernel keeps its own.
 
 ## Keys that are not on the disk in clear
 
-With `--key-command`, the key files of the kernel, the vault and the node hold **wrapped** keys, and a program you name unwraps them when the kernel starts (and on SIGHUP). The kernel runs it with the key file's path as its last argument and reads the key from its output: 64 hex characters, as a key file holds them. Nothing in the kernel depends on a provider; any tool that decrypts a file works.
+With `--key-command`, the instance key file holds a **wrapped** key, and a program you name unwraps it when the kernel starts (and on SIGHUP). The kernel runs it with the key file's path as its last argument and reads the key from its output: 64 hex characters, as a key file holds them. Nothing in the kernel depends on a provider; any tool that decrypts a file works.
 
 With [age](https://age-encryption.org) and an identity on a hardware key or in a protected place:
 
 ```sh
-age -e -r age1… -o kernel.key.age kernel.key && shred -u kernel.key
-kernable start --kernel-key kernel.key.age --key-command "age -d -i /etc/kernable/age.identity" …
+age -e -r age1… -o instance.key.age instance.key && shred -u instance.key
+kernable start --instance-key instance.key.age --key-command "age -d -i /etc/kernable/age.identity" …
 ```
 
 With systemd-creds, bound to the machine's TPM:
 
 ```sh
-systemd-creds encrypt --with-key=tpm2 kernel.key kernel.key.cred && shred -u kernel.key
-kernable start --kernel-key kernel.key.cred --key-command "systemd-creds decrypt" …
+systemd-creds encrypt --with-key=tpm2 instance.key instance.key.cred && shred -u instance.key
+kernable start --instance-key instance.key.cred --key-command "systemd-creds decrypt" …
 ```
 
 With a cloud KMS, a small script that takes the path, for example `/usr/local/bin/kms-unwrap`:

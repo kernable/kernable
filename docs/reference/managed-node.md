@@ -61,7 +61,7 @@ The settings name **only** these fields; settings with any other field are refus
 | `role` | `writer`, `standby` or `reader` |
 | `follow` | a standby's primary, or a reader's writers or relays (comma-separated) |
 | `copy` | a reader of a [relay](../how-to/relays): the copy (its key file `copy.key` unless the node's file names `reader-copy-key`) |
-| `push` | a writer: `{"to": "<relay>", "copy": "<copy>"}` for its pusher (keys `pusher.key`, `copy.key` unless its `[push]` names others) |
+| `push` | a writer: `{"to": "<relay>", "copy": "<copy>"}` for its pusher (with the kernel's instance key, and `copy.key` unless its `[push]` names another) |
 | `kernel_version` | run `versions/<version>/kernable` in the project directory, if it is there |
 | `max_lag_ms` | a reader's `--reader-max-lag-ms` |
 | `witness` | a pair's witness (in its `[pair]` section) |

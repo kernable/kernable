@@ -26,7 +26,7 @@ class Partitions(unittest.TestCase):
         self.addCleanup(p1.dispose)
         p1.cli("keys", "new", "node")
         p1.cli("grant", "root.key", "node.pub", "replicate=*")
-        p2 = TestKernel(["counters.*"], ["--partition", "p2", "--control", p1.url, "--node-key", "node.key"])
+        p2 = TestKernel(["counters.*"], ["--partition", "p2", "--control", p1.url, "--instance-key", "node.key"])
         self.addCleanup(p2.dispose)
         for f in ("root.pub", "app.key", "app.pub", "app.grant", "node.key", "node.grant"):
             shutil.copy(f"{p1.dir}/{f}", f"{p2.dir}/{f}")

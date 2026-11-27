@@ -169,8 +169,8 @@ A personal or secret value that a command or event keeps outside the signed log.
 holds `{"$vault": ref}` instead, and `vault_refs` lists the ref. The ref commits to the value:
   ref = hex(SHA-256(kernable.v1.vault message)), see SIGNING.md,
 over a random salt, the subject, `secret` and the value, so it reveals nothing once erased.
-The kernel keeps values encrypted and deletable, and only with a vault key (`kernable start
---vault-key`); without one, a submit with vault values fails with FAILED_PRECONDITION and a
+The kernel keeps values encrypted and deletable, in a vault whose key is derived from the
+kernel's `--instance-key`; without one, a submit with vault values fails with FAILED_PRECONDITION and a
 result with vault values is rejected (`no_vault`).
 Personal values belong to a subject and are erased by an event that `erases` it; secret
 values are deleted when their command completes.

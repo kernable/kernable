@@ -57,7 +57,7 @@ impl Link {
             .ok_or("run with --witness")?;
         let key = config
             .read_signing_key(&pair.node_key)
-            .map_err(|e| format!("--node-key {}: {e}", pair.node_key.display()))?;
+            .map_err(|e| format!("--instance-key {}: {e}", pair.node_key.display()))?;
         let grant_path = pair.node_key.with_extension("grant");
         let grant = std::fs::read_to_string(&grant_path)
             .map_err(|e| format!("the node's grant {}: {e}", grant_path.display()))?

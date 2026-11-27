@@ -29,10 +29,8 @@ class TestKernel:
         actions = ("submit", "subscribe", "listen", "query", "answer", "check", "vault_read", "vault_erase", "manage")
         self._kernable("grant", "root.key", "app.pub", f"run={','.join(command_types)}",
                        *(f"{a}=*" for a in actions), *(grants or []))
-        with open(f"{self.dir}/vault.key", "w") as f:
-            f.write(os.urandom(32).hex())
         self.flags = ["--root", "root.pub", "--store", self.store, "--listen", self.url,
-                      "--checkpoint-interval-ms", "50", "--vault-key", "vault.key", *(extra_flags or [])]
+                      "--checkpoint-interval-ms", "50", "--instance-key", "kernel.key", *(extra_flags or [])]
         self.process: subprocess.Popen | None = None
         self._watchdog: subprocess.Popen | None = None
 

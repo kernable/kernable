@@ -45,8 +45,8 @@ function configReference(): string {
   });
   // Sections of the page; a flag in none of them lands in "Other", so none goes missing.
   const sections: [string, string, string[]][] = [
-    ["Trust", "Which keys the kernel trusts, and its own key.", ["--root", "--kernel-key"]],
-    ["Stores", "Where the kernel keeps what. A store URL names a backend: `sqlite:<path>` (or a bare path) or `memory:` (SQLite in memory); the data service's files are a directory, `file:<directory>`. `memory:` keeps nothing across a restart and is for tests. What to back up: [Back up and restore](../how-to/backup).", ["--store", "--durability", "--snapshots", "--vault-key", "--vault-store", "--data-store", "--cache-store"]],
+    ["Trust", "Which keys the kernel trusts, and its own key: one per kernel, from which its vault key is derived too ([Manage keys](../how-to/keys#the-instance-key)).", ["--root", "--instance-key"]],
+    ["Stores", "Where the kernel keeps what. A store URL names a backend: `sqlite:<path>` (or a bare path) or `memory:` (SQLite in memory); the data service's files are a directory, `file:<directory>`. `memory:` keeps nothing across a restart and is for tests. What to back up: [Back up and restore](../how-to/backup).", ["--store", "--durability", "--snapshots", "--vault-store", "--data-store", "--cache-store"]],
     ["Network", "Where the kernel listens. Plain TCP only on a loopback address; anything else needs mutual TLS ([Set up TLS](../how-to/tls)). The metrics and UI addresses serve plain HTTP with no login ([Monitor kernable](../how-to/monitor)).", ["--listen", "--tls-cert", "--tls-key", "--tls-client-ca", "--metrics-listen", "--ui-listen"]],
     ["Timeouts and intervals", "A timeout ends the wait, not the work: what happens then is in each row and in [Failures and recovery](../concepts/failures).", ["--lease-ttl-ms", "--checkpoint-interval-ms", "--submit-timeout-ms", "--settle-timeout-ms", "--query-timeout-ms", "--middleware-timeout-ms", "--drain-timeout-ms"]],
     ["Limits", "What the kernel takes on at most, so that no client, service or connection can exhaust its memory or capacity. Beyond a limit it refuses with `RESOURCE_EXHAUSTED` (a connection beyond `--max-connections` is closed) and counts the refusal in `kernable_refused_total` ([Metrics](./metrics)). Every limit is at least 1.", ["--max-connections", "--max-streams-per-connection", "--max-message-bytes", "--handshake-timeout-ms", "--max-queued-commands", "--max-queued-per-aggregate", "--max-queued-bytes", "--max-requests-per-key", "--max-subscriptions-per-key", "--max-listeners-per-key", "--max-cache-bytes", "--max-data-bytes"]],
@@ -69,9 +69,9 @@ The kernel takes its settings as flags of \`kernable start\`. Every flag has an 
 kernable start --root root.pub --store sqlite:kernable.db --listen 127.0.0.1:7233
 \`\`\`
 
-The kernel holds no keys of services and no permissions: it trusts the root keys, and a root key says with a grant what each key may do ([Trust](../concepts/trust), [Manage keys](../how-to/keys)). SIGHUP (Unix) reads the kernel key file again; every other change needs a restart.
+The kernel holds no keys of services and no permissions: it trusts the root keys, and a root key says with a grant what each key may do ([Trust](../concepts/trust), [Manage keys](../how-to/keys)). SIGHUP (Unix) reads the instance key file again; every other change needs a restart.
 
-**\`--dev\`** is for trying kernable out on one machine. It creates whatever is missing of \`root.key\`, \`kernel.key\`, \`vault.key\`, \`app.key\` and \`app.grant\` in the working directory, with a grant that lets \`app.key\` do everything. Unless you set them by flag or variable, it then uses \`--root root.pub\`, \`--vault-key vault.key\` and \`--ui-listen 127.0.0.1:7234\`. Every other flag keeps its default. In production, start with \`--root\` and grant each service only what it needs.
+**\`--dev\`** is for trying kernable out on one machine. It creates whatever is missing of \`root.key\`, \`instance.key\`, \`app.key\` and \`app.grant\` in the working directory, with a grant that lets \`app.key\` do everything. Unless you set them by flag or variable, it then uses \`--root root.pub\` and \`--ui-listen 127.0.0.1:7234\`. Every other flag keeps its default. In production, start with \`--root\` and grant each service only what it needs.
 
 **Logs** go to stderr. \`KERNABLE_LOG\` sets the filter (default \`info\`) and \`KERNABLE_LOG_FORMAT=json\` writes JSON ([Monitor kernable](../how-to/monitor#logs)).
 

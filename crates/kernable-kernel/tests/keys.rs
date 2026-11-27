@@ -268,36 +268,30 @@ async fn a_listener_moves_to_its_successor_key_and_keeps_its_place() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_kernel_key_can_change() {
+async fn a_running_kernel_keeps_its_instance_key() {
     let env = start("keys-kernel").await;
     spawn_worker(&env).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     submit(&env.addr, place).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await; // a checkpoint with key 3
 
-    std::fs::write(env.dir.join("kernel.key"), hex(key(4).as_bytes())).unwrap();
+    // The same key again (a wrapped key unwrapped anew) is fine; another one is refused.
     env.kernel.reload().unwrap();
+    std::fs::write(env.dir.join("kernel.key"), hex(key(4).as_bytes())).unwrap();
+    let refused = env.kernel.reload().unwrap_err().to_string();
+    assert!(refused.contains("another key"), "{refused}");
     let add = signed(command("c2", "AddItem", "o1"), &key(1));
     submit(&env.addr, add).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await; // a checkpoint with key 4
+    tokio::time::sleep(Duration::from_millis(100)).await; // still a checkpoint with key 3
 
     let store = kernable_store::open_read_only(&env.store).unwrap();
-    let old_only = store.verify(&[id(&key(3))]).unwrap();
-    assert!(
-        old_only
-            .problems
-            .iter()
-            .any(|p| p.contains("signed by unknown key")),
-        "{:?}",
-        old_only.problems
-    );
-    let both = store.verify(&[id(&key(3)), id(&key(4))]).unwrap();
-    assert!(both.is_ok(), "{:?}", both.problems);
-    assert!(both.checkpoints >= 2);
+    let own = store.verify(&[id(&key(3))]).unwrap();
+    assert!(own.is_ok(), "{:?}", own.problems);
+    assert!(own.checkpoints >= 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
+async fn sighup_keeps_the_instance_key_and_refuses_another_one() {
     use std::process::{Command as Process, Stdio};
     let dir = std::env::temp_dir().join(format!("kn-sighup-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -309,6 +303,8 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
             .current_dir(&dir)
             .args([
                 "start",
+                "--instance-key",
+                "kernel.key",
                 "--root",
                 &id(&root()),
                 "--store",
@@ -330,6 +326,8 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
     );
     tokio::time::sleep(Duration::from_millis(200)).await; // a checkpoint with key 3
 
+    // Another key in the file: the vault's key is derived from the instance key, so the running
+    // kernel keeps its own and goes on signing with it.
     std::fs::write(dir.join("kernel.key"), hex(key(4).as_bytes())).unwrap();
     let hup = Process::new("kill")
         .args(["-HUP", &kernel.child.id().to_string()])
@@ -338,19 +336,17 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let add = signed(command("c2", "AddItem", "o1"), &key(1));
     submit(&addr, add).await.unwrap();
-    until("a checkpoint with key 4", || {
-        let store = kernable_store::open_read_only(&store).unwrap();
-        !store.verify(&[id(&key(3))]).unwrap().is_ok()
-    })
-    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await; // checkpoints after the SIGHUP
     assert!(kernel.child.try_wait().unwrap().is_none(), "still running");
     drop(kernel);
 
     let store = kernable_store::open_read_only(&store).unwrap();
-    let both = store.verify(&[id(&key(3)), id(&key(4))]).unwrap();
-    assert!(both.is_ok(), "{:?}", both.problems);
-    let old_only = store.verify(&[id(&key(3))]).unwrap();
-    assert!(!old_only.is_ok(), "checkpoints signed by the new key");
+    let own = store.verify(&[id(&key(3))]).unwrap();
+    assert!(
+        own.is_ok(),
+        "still signed by its own key: {:?}",
+        own.problems
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -369,7 +365,11 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
             .stderr(Stdio::null()),
     );
     wait_for(&addr).await;
-    assert!(dir.join("vault.key").exists());
+    assert!(dir.join("instance.key").exists());
+    assert!(
+        !dir.join("vault.key").exists(),
+        "the vault key is the instance key's"
+    );
     assert!(dir.join("vault.db").exists(), "the vault is on");
 
     // app.key, with the app.grant next to it, may submit anything: it passes the grant check
@@ -393,8 +393,8 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
     assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
     drop(kernel);
 
-    // A vault key that is not 32 bytes in hex stops the start, and says so.
-    std::fs::write(dir.join("vault.key"), "abcd\n").unwrap();
+    // An instance key that is not 32 bytes in hex stops the start, and says so.
+    std::fs::write(dir.join("instance.key"), "abcd\n").unwrap();
     let out = Process::new(env!("CARGO_BIN_EXE_kernable"))
         .current_dir(&dir)
         .args(["start", "--dev", "--listen", &free_addr()])
@@ -403,7 +403,7 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(
-        stderr.contains("the vault key must be 32 bytes, hex encoded"),
+        stderr.contains("--instance-key instance.key: not a key: 32 bytes, hex encoded"),
         "{stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -2,8 +2,6 @@ package kernable
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -65,12 +63,7 @@ func newTestKernel(t *testing.T, commandTypes []string, o kernelOptions) *testKe
 		args = append(args, "process=*")
 	}
 	k.cli(args...)
-	seed := make([]byte, 32)
-	_, _ = rand.Read(seed)
-	if err := os.WriteFile(filepath.Join(dir, "vault.key"), []byte(hex.EncodeToString(seed)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	k.flags = append([]string{"start", "--root", "root.pub", "--store", k.store, "--checkpoint-interval-ms", "50", "--vault-key", "vault.key", "--listen", k.url}, o.extra...)
+	k.flags = append([]string{"start", "--root", "root.pub", "--store", k.store, "--checkpoint-interval-ms", "50", "--instance-key", "kernel.key", "--listen", k.url}, o.extra...)
 	t.Cleanup(func() {
 		k.stop()
 		os.RemoveAll(dir)

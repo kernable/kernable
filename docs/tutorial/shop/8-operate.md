@@ -90,7 +90,7 @@ Over TCP, `kernable` connects with mutual TLS like every other process, with the
 
 From then on the kernel refuses the key and ends its sessions. Give the time from which you no longer trust the key, for a leak the time it may have leaked: `kernable verify` flags everything it signed since. The kernel stores the revocation; it is never undone.
 
-The **kernel's key** signs checkpoints and revocations. Replace `keys/kernel.key` and send the kernel `SIGHUP`; it reads the key again without a restart. Keep the old `kernel.pub`: `kernable verify` needs every key the kernel ever had.
+The **instance key** (`keys/instance.key`) is the kernel's own: it signs checkpoints and revocations, and the vault's key is derived from it. Replacing it makes a new instance: grant the new key what the old one had, move the vault to it with `kernable vault rekey`, and restart ([Keys](../../how-to/keys#replacing-it)). Keep the old `instance.pub`: `kernable verify` needs every key the kernel ever had.
 
 The **root key** is rotated by trusting two for a while: start the kernel with `--root keys/root.pub --root keys/root-2.pub`, issue every grant again with the new root, then restart with the new root only.
 

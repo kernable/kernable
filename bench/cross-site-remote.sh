@@ -48,34 +48,35 @@ port_up_b() { ssh_b "for i in \$(seq 300); do (exec 3<>/dev/tcp/127.0.0.1/$1) 2>
 
 # --- builds, keys, and site B's share of them -----------------------------------------------------
 (cd "$ROOT" && cargo build -q -p kernable-kernel && cargo zigbuild -q --release --locked --target x86_64-unknown-linux-gnu.2.31 -p kernable-kernel) || exit 1
-for n in root client worker node ops pusherA pusherB readerA readerB kernel1 kernel2 rkA rkB; do "$K" keys new "$n" >/dev/null; done
+for n in root client worker ops readerA readerB kernel1 kernel2; do "$K" keys new "$n" >/dev/null; done
 "$K" grant root.key client.pub 'submit=bench.*,acct.*' >/dev/null
 "$K" grant root.key worker.pub 'run=bench.*,acct.*' 'listen=*' >/dev/null
-# A partition's node key also reads: it asks other partitions through the relay as a reader.
-"$K" grant root.key node.pub 'replicate=*' 'read=*' >/dev/null
+# A writer's key takes the map (replicate), and reads: its pusher follows it, and it asks the
+# other partition through the relay as a reader.
+for n in kernel1 kernel2; do "$K" grant root.key "$n.pub" 'replicate=*' 'read=*' >/dev/null; done
 "$K" grant root.key ops.pub 'manage=*' >/dev/null
-for n in pusherA pusherB readerA readerB; do "$K" grant root.key "$n.pub" 'read=*' >/dev/null; done
+for n in readerA readerB; do "$K" grant root.key "$n.pub" 'read=*' >/dev/null; done
 "$K" relay key copyA.key >/dev/null; "$K" relay key copyB.key >/dev/null
-for v in vault1 vault2 vaultA vaultB; do head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$v.key"; chmod 600 "$v.key"; done
-# The relay knows every key by itself (no root counts there); the node key reads both copies, to
-# ask the other site's partition through the relay. Each partition has the other's copy key.
+# The relay knows every key by itself (no root counts there). One key per kernel: a writer's
+# pushes its copy, and reads the other site's copy, to ask that partition through the relay. Each
+# partition has the other's copy key.
 cat >access.toml <<EOF
 [copies."site.a".keys]
-"$(cat pusherA.pub)" = { role = "push", state = "active" }
+"$(cat kernel1.pub)" = { role = "push", state = "active" }
 "$(cat readerB.pub)" = { role = "read", state = "active" }
-"$(cat node.pub)" = { role = "read", state = "active" }
+"$(cat kernel2.pub)" = { role = "read", state = "active" }
 [copies."site.b".keys]
-"$(cat pusherB.pub)" = { role = "push", state = "active" }
+"$(cat kernel2.pub)" = { role = "push", state = "active" }
 "$(cat readerA.pub)" = { role = "read", state = "active" }
-"$(cat node.pub)" = { role = "read", state = "active" }
+"$(cat kernel1.pub)" = { role = "read", state = "active" }
 EOF
 mkdir -p copy-keys && cp copyA.key copy-keys/site.a.key && cp copyB.key copy-keys/site.b.key
 # Two calls: a command line that names $R itself would match the pattern and end its own shell.
 ssh_b "systemctl stop 'kx-*' 2>/dev/null; systemctl reset-failed 'kx-*' 2>/dev/null; true"
 ssh_b "rm -rf $R && mkdir -p $R/repo/sdks/typescript $R/repo/bench" || { say "no directory on the server"; exit 1; }
 scp -q "$KL" "root@$SERVER:$R/kernable"
-scp -q root.pub kernel1.pub kernel2.key kernel2.pub client.key client.grant worker.key worker.grant node.key node.grant \
-  ops.key ops.grant pusherB.key pusherB.grant readerB.key readerB.grant rkB.key copyB.key vault2.key vaultB.key access.toml "root@$SERVER:$R/"
+scp -q root.pub kernel1.pub kernel2.key kernel2.pub kernel2.grant client.key client.grant worker.key worker.grant \
+  ops.key ops.grant readerB.key readerB.grant copyB.key access.toml "root@$SERVER:$R/"
 scp -qr copy-keys "root@$SERVER:$R/"
 rsync -az --exclude test "$ROOT/sdks/typescript/" "root@$SERVER:$R/repo/sdks/typescript/"
 rsync -az "$ROOT/proto" "root@$SERVER:$R/repo/"
@@ -89,26 +90,26 @@ port_up 17400 || { say "no tunnel to the relay"; exit 1; }
 RELAY=127.0.0.1:17400
 
 writer_flags() { # <n>
-  echo "--root root.pub --partition p$1 --readers on --listen 127.0.0.1:1730$1 --kernel-key kernel$1.key \
-    --vault-key vault$1.key --store sqlite:p$1.db --vault-store sqlite:p$1-vault.db --data-store file:p$1-data \
+  echo "--root root.pub --partition p$1 --readers on --listen 127.0.0.1:1730$1 --instance-key kernel$1.key \
+    --store sqlite:p$1.db --vault-store sqlite:p$1-vault.db --data-store file:p$1-data \
     --snapshots sqlite:p$1-snap.db"
 }
 reader_flags() { # <site> <copy> <copy key> <writer's kernel.pub> <port>
-  echo "--root root.pub --reader $RELAY --reader-copy $2 --reader-copy-key $3 --follow-key reader$1.key \
-    --primary-kernel-key $4 --kernel-key rk$1.key --vault-key vault$1.key --store sqlite:r$1.db \
+  echo "--root root.pub --reader $RELAY --reader-copy $2 --reader-copy-key $3 --instance-key reader$1.key \
+    --primary-kernel-key $4 --store sqlite:r$1.db \
     --vault-store sqlite:r$1-vault.db --data-store file:r$1-data --snapshots sqlite:r$1-snap.db --listen 127.0.0.1:$5"
 }
 
 # Site A: p1, its pusher.
 start p1.log "$K" start $(writer_flags 1)
 port_up 17301 || { say "p1 did not start"; exit 1; }
-start pushA.log "$K" push --follow 127.0.0.1:17301 --key pusherA.key --to "$RELAY" --copy site.a --copy-key copyA.key
+start pushA.log "$K" push --follow 127.0.0.1:17301 --instance-key kernel1.key --to "$RELAY" --copy site.a --copy-key copyA.key
 # Site B: its reader of p1's copy, then p2 with that reader as its control, p2's pusher.
 start_b rB "$R/kernable start $(reader_flags B site.a copyA.key kernel1.pub 17312)"
 port_up_b 17312 || { say "site B's reader did not start"; exit 1; }
-start_b p2 "$R/kernable start $(writer_flags 2) --control 127.0.0.1:17312 --node-key node.key"
+start_b p2 "$R/kernable start $(writer_flags 2) --control 127.0.0.1:17312"
 port_up_b 17302 || { say "p2 did not start"; exit 1; }
-start_b pushB "$R/kernable push --follow 127.0.0.1:17302 --key pusherB.key --to $RELAY --copy site.b --copy-key copyB.key"
+start_b pushB "$R/kernable push --follow 127.0.0.1:17302 --instance-key kernel2.key --to $RELAY --copy site.b --copy-key copyB.key"
 # Site A: its reader of p2's copy.
 start rA.log "$K" start $(reader_flags A site.b copyB.key kernel2.pub 17311)
 port_up 17311 || { say "site A's reader did not start"; exit 1; }

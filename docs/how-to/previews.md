@@ -15,11 +15,11 @@ For a full copy that keeps the personal data, to move a kernel, use [export and 
 
 The log only ever refers to vault values by salted hashes ([Signatures](../reference/signing)), so without the source's vault nothing in the copy leads back to a value. The copy is consistent at one position: the moment it was read (`kernable copy`, an export), or the record a restore reaches.
 
-The copy's store is **marked** as a masked copy, with where it came from, when, up to which event, its own vault key's ID and the source's kernel keys it was checked with. `kernable verify` says so, and so does the kernel UI.
+The copy's store is **marked** as a masked copy, with where it came from, when, up to which event, its own vault key's ID and the source's keys it was checked with. `kernable verify` says so, and so does the kernel UI.
 
 ## Make one
 
-From any of three sources, into new, empty stores. `--vault-key` names a file that does not exist yet: the copy writes its new vault key there (readable by its owner only), and creates the vault at `--vault-store` with it. The other flags name the copy's stores as for `kernable start`, with its defaults.
+From any of three sources, into new, empty stores. `--instance-key` names a file that does not exist yet: the copy writes its own new instance key there (readable by its owner only, its `.pub` beside it), and creates the vault at `--vault-store` with the vault key derived from it. The other flags name the copy's stores as for `kernable start`, with its defaults.
 
 **From a continuous backup**, the usual way for production: it does not touch the running kernel and needs no key of it, only the backup key, and works [through a signer](./backup#without-credentials-on-the-server-a-signer):
 
@@ -27,7 +27,7 @@ From any of three sources, into new, empty stores. `--vault-key` names a file th
 kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
   --signer https://signer.example.com/backup --signer-key preview.key \
   --mask-vault --store sqlite:preview/kernable.db --vault-store sqlite:preview/vault.db \
-  --vault-key preview/vault.key --data-store file:preview/data
+  --instance-key preview/instance.key --data-store file:preview/data
 ```
 
 `--at <time>` or `--at-record <n>` copies the state at a point, as for any restore. The source's vault key is not needed: the backup's vault values are left out unread.
@@ -36,7 +36,7 @@ kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
 
 ```sh
 kernable copy sqlite:kernable.db --mask-vault --store sqlite:preview/kernable.db \
-  --vault-store sqlite:preview/vault.db --vault-key preview/vault.key
+  --vault-store sqlite:preview/vault.db --instance-key preview/instance.key
 ```
 
 `--files-from file:data` copies the files of that data store too. The source's vault is never opened.
@@ -46,7 +46,7 @@ kernable copy sqlite:kernable.db --mask-vault --store sqlite:preview/kernable.db
 ```sh
 kernable export 127.0.0.1:7233 ops.key shop.kx
 kernable import shop.kx --mask-vault --store sqlite:preview/kernable.db \
-  --vault-store sqlite:preview/vault.db --vault-key preview/vault.key
+  --vault-store sqlite:preview/vault.db --instance-key preview/instance.key
 rm shop.kx
 ```
 
@@ -65,13 +65,12 @@ Files are left out by default because files may hold personal data that neither 
 
 ## Run the preview
 
-Start a kernel on the copy with the copy's vault key, a **new snapshot store**, and the preview's own keys:
+Start a kernel on the copy with the copy's instance key and a **new snapshot store**:
 
 ```sh
 kernable start --root root.pub --store sqlite:preview/kernable.db \
-  --vault-store sqlite:preview/vault.db --vault-key preview/vault.key \
-  --snapshots sqlite:preview/snapshots.db --data-store file:preview/data \
-  --kernel-key preview/kernel.key
+  --vault-store sqlite:preview/vault.db --instance-key preview/instance.key \
+  --snapshots sqlite:preview/snapshots.db --data-store file:preview/data
 ```
 
 The kernel finds the mark and runs the store as a masked copy (it logs `running a masked copy`):
@@ -79,7 +78,7 @@ The kernel finds the mark and runs the store as a masked copy (it logs `running 
 - **Personal values of the source read as `null`**, in workers' histories, for read models with `vault_read`, everywhere, exactly as after an erasure. Unique keys built from personal data are free, as after an erasure. Write handlers and read models that cope with an erased value (`Personal<string>` in TypeScript), and they cope with a copy too.
 - **New personal values work end to end.** Commands and events of the preview keep their vault values in the copy's vault, under its key: sign-ups, emails, erasures of the preview's own test people.
 - **Read models rebuild** from the copy's events. Run the preview's processes with a [deployment name](./deployments) of its own and new read model stores; a read model that kept its store from production would hold production's personal data.
-- **Its own kernel key.** Start the preview's kernel with a new kernel key (`kernable keys new kernel` in the preview's directory), never production's. Production's checkpoints came along, signed by production's kernel key; the preview's kernel goes on from them and signs its own with its key. The copy's mark names the kernel keys it was checked with (production's, by key ID, which is the public key), so `kernable verify preview/kernable.db preview/kernel.pub` checks both: the preview's checkpoints with the key you give, production's with the keys the mark names, and says which those are. Compare them with production's `kernel.pub`; to check against production's file itself, give both. The mark is not signed: it tells which keys to check with, it does not vouch for them.
+- **Its own key.** The preview's kernel runs with the instance key the copy made, never production's. Production's checkpoints came along, signed by production's key; the preview's kernel goes on from them and signs its own with its key. The copy's mark names the keys it was checked with (production's, by key ID, which is the public key), so `kernable verify preview/kernable.db preview/instance.pub` checks both: the preview's checkpoints with the key you give, production's with the keys the mark names, and says which those are. Compare them with production's `instance.pub`; to check against production's file itself, give both. The mark is not signed: it tells which keys to check with, it does not vouch for them.
 - **Reactors go on after production's position**: the registrations came along, so a reactor does not act again on what production handled. Point the preview's outbound connections (mail, payments, webhooks) at test accounts.
 
 ## What it refuses

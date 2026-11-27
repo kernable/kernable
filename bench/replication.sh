@@ -14,7 +14,7 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$DIR"; }
 trap cleanup EXIT
 
-for name in root kernel standby-kernel client worker standby; do "$BIN/kernable" keys new "$DIR/$name" >/dev/null; done
+for name in root kernel client worker standby; do "$BIN/kernable" keys new "$DIR/$name" >/dev/null; done
 "$BIN/kernable" grant "$DIR/root.key" "$DIR/client.pub" 'submit=bench.*' >/dev/null
 "$BIN/kernable" grant "$DIR/root.key" "$DIR/worker.pub" 'run=bench.*' 'listen=*' >/dev/null
 "$BIN/kernable" grant "$DIR/root.key" "$DIR/standby.pub" 'replicate=*' >/dev/null
@@ -32,13 +32,13 @@ start() { # <alone|standby>
   local replication=off
   [ "$1" = standby ] && replication=sync
   (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$STORE" --durability "$DURABILITY" \
-    --listen "$SOCK" --kernel-key kernel.key --replication "$replication" --metrics-listen 127.0.0.1:47290 2>/dev/null) &
+    --listen "$SOCK" --instance-key kernel.key --vault-store sqlite:k-vault.db --replication "$replication" --metrics-listen 127.0.0.1:47290 2>/dev/null) &
   KERNEL=$!
   wait_socket "$SOCK"
   if [ "$1" = standby ]; then
     (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$(standby_store)" --durability "$STANDBY_DURABILITY" \
-      --listen "$STANDBY_SOCK" --kernel-key standby-kernel.key --snapshots sqlite:s-snapshots.db --data-store file:s-data \
-      --follow "$SOCK" --follow-key standby.key --primary-kernel-key kernel.pub 2>/dev/null) &
+      --listen "$STANDBY_SOCK" --instance-key standby.key --snapshots sqlite:s-snapshots.db --data-store file:s-data \
+      --vault-store sqlite:s-vault.db --follow "$SOCK" --primary-kernel-key kernel.pub 2>/dev/null) &
     PIDS+=($!)
     for _ in $(seq 200); do
       curl -sf -H 'host: 127.0.0.1' http://127.0.0.1:47290/ready >/dev/null && break

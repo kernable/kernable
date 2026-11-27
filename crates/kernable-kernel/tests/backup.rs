@@ -945,7 +945,7 @@ async fn a_masked_copy_restores_from_a_backup_through_a_signer() {
     let path = env.dir.join("masked");
     let vault = copy::new_vault(
         &format!("sqlite:{}", path.join("vault.db").display()),
-        path.join("vault.key").to_str().unwrap(),
+        path.join("instance.key").to_str().unwrap(),
     )
     .unwrap();
     copy::mark(masked.store.as_ref(), &vault, "backup", &[id(&key(3))]).unwrap();
@@ -958,7 +958,8 @@ async fn a_masked_copy_restores_from_a_backup_through_a_signer() {
         c.store = store;
         c.vault = Some(kernable_kernel::config::VaultConfig {
             store: format!("sqlite:{}", path.join("vault.db").display()),
-            key: path.join("vault.key"),
+            key: path.join("instance.key"),
+            derived: true,
         });
     })
     .await;
@@ -1013,8 +1014,8 @@ async fn a_masked_copy_restores_from_a_backup_through_a_signer() {
         format!("sqlite:{}", cli.join("k.db").display()),
         "--vault-store".into(),
         format!("sqlite:{}", cli.join("vault.db").display()),
-        "--vault-key".into(),
-        cli.join("vault.key").display().to_string(),
+        "--instance-key".into(),
+        cli.join("instance.key").display().to_string(),
         "--data-store".into(),
         format!("file:{}", cli.join("data").display()),
         "--kernel-pub".into(),
