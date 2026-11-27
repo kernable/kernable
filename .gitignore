@@ -26,3 +26,6 @@ __pycache__/
 
 # Go programs built by the docs tests
 docs/examples/**/go/bin/
+
+# The Linux release build (cargo zigbuild), its own target directory.
+/target-linux/

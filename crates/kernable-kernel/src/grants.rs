@@ -287,10 +287,12 @@ pub fn malformed(grant: &Grant) -> Option<String> {
         let switch = p.action == "privileged";
         // `manage` also takes a service (a domain); "*" is a valid pattern already.
         let service = |t: &str| p.action == "manage" && config::valid_domain(t);
+        // `copy` takes copies' names at a relay (`acme.shop.eu`, dashes and all).
+        let copy = |t: &str| p.action == "copy" && crate::relay::valid_name(t);
         if let Some(t) = p
             .types
             .iter()
-            .find(|t| !(config::valid_pattern(t) || switch || service(t)))
+            .find(|t| !(config::valid_pattern(t) || switch || service(t) || copy(t)))
         {
             return Some(format!("invalid type pattern {t}"));
         }
@@ -319,6 +321,22 @@ mod tests {
             root_sig: None,
             issuer: None,
         }
+    }
+
+    #[test]
+    fn copy_takes_copies_names() {
+        let g = |types: &[&str]| Grant {
+            permissions: vec![Permission {
+                action: "copy".into(),
+                types: types.iter().map(|t| (*t).to_owned()).collect(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            malformed(&g(&["u-ce9b28eb83.livetest.r1127-121307", "*"])),
+            None
+        );
+        assert!(malformed(&g(&["Not A Copy"])).is_some());
     }
 
     #[test]
