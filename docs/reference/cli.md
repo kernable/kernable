@@ -99,6 +99,14 @@ kernable approve <root.key> <copy> <instance.pub|ID> [--out <file>]
 
 The root key's approval that the kernel's key may write the copy's partition (`<copy>.approval` by default), for a writer taking the copy over (kernable start `--approval`); readers and standbys that trust the root accept it
 
+### `kernable relay rotate`
+
+```text
+kernable relay rotate <file>
+```
+
+Replaces the copy key in `<file>` (the pusher's `--copy-key`) by a new one, the old one kept beside it as `<file>.<ID>.old`. The pusher pushes with the new one within seconds and the copy begins anew under it; its readers, finding another key, ask for the new one and are handed it if their grant allows `copy=<copy>`. Rotate after a reader's key or the copy key itself may have leaked, once that key is revoked.
+
 ### `kernable relay key`
 
 ```text

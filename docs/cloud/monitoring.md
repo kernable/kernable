@@ -38,6 +38,7 @@ once it is over:
 | A copy's writer is away | its pusher has not been connected for 5 minutes (a copy that never held anything excepted) | critical |
 | A reader is behind | a connected reader is more than 10,000 records behind its copy for 5 minutes | warning |
 | A reader is away | a reader whose key the partition names, active, was connected and has not been for 5 minutes (a key named but never connected, stopped or revoked is not missed) | warning |
+| A reader holds an old copy key | a joined reader's node reports another copy key than the writer's node, for 5 minutes (after a rotation it asks for the new one; granted `copy=<copy>`, it is handed it) | warning |
 | A copy is filling up | over 80 % of its limit (critical over 95 %); past it, the writer stops pushing | warning |
 | A managed node is silent | no report for 2 minutes | critical |
 | A managed node reports a problem | as it reports it | warning |

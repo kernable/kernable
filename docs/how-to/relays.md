@@ -89,6 +89,21 @@ key can grant an instance of their own, so keep it offline. To keep a copy's key
 start the pusher without `--root` (`copy-key-handover = false` on a [node](./node)) and put the
 file on every reader yourself.
 
+### Rotating the copy key
+
+After a reader's key, or the copy key itself, may have leaked (and that key is revoked), replace
+the copy key on the writer's machine:
+
+```sh
+kernable relay rotate copy.key
+```
+
+The old key is kept beside it (`copy.key.<ID>.old`). The pusher notices the new key within
+seconds, pushes with it and begins the copy anew under it (it notes the key it pushes with in
+`copy.key.pushed`). A reader finding records under another key sets its old key aside, asks for
+the new one as a new instance does, and catches up anew once started again (a node restarts it).
+Rotation runs only when you run it.
+
 ## 2. The relay
 
 ```sh

@@ -832,13 +832,18 @@ async fn the_local_socket_serves_readiness_and_drops_an_old_deployment_while_the
     })
     .await;
     let socket = env.dir.join("ops/admin.sock");
+    let mode = |p: &std::path::Path| {
+        std::fs::metadata(p)
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0)
+    };
+    // Bound, then narrowed to its user (inside a directory only its user may enter).
     for _ in 0..100 {
-        if socket.exists() {
+        if mode(&socket) == 0o600 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&socket), 0o600, "the kernel's user only");
     assert_eq!(mode(&env.dir.join("ops")), 0o700);
     let socket_arg = socket.display().to_string();

@@ -566,13 +566,20 @@ async fn a_membership_decides_which_listeners_count_and_which_middlewares_check(
     assert!(ready(get(&metrics, "/ready").await));
     let placed = submit(&env.addr, place).await.unwrap();
     assert!(matches!(placed.outcome, Some(Outcome::Committed(_))));
-    let store = kernable_store::open_read_only(&env.store).unwrap();
-    let listeners = store.listeners().unwrap();
-    let guard = listeners.iter().find(|l| l.name == "guard").unwrap();
-    assert!(
-        guard.middlewares.is_empty(),
-        "its position stays, its check goes"
-    );
+    // Read from the store as it is written (a moment after the answer, on a busy machine).
+    let guard_checks = || {
+        let store = kernable_store::open_read_only(&env.store).unwrap();
+        let listeners = store.listeners().unwrap();
+        let guard = listeners.iter().find(|l| l.name == "guard").unwrap();
+        guard.middlewares.len()
+    };
+    for _ in 0..100 {
+        if guard_checks() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(guard_checks(), 0, "its position stays, its check goes");
 
     // A listener without a service always counts.
     let plain = listen(&env, "plain", opts(0)).await.unwrap();

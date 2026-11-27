@@ -80,6 +80,18 @@ kernable Cloud, through its account API (--api <url>, KERNABLE_CLOUD_API, or the
                                           instance writes the partition: its first writer or a new
                                           one (kernable start --become-writer). Its readers take it
                                           from their nodes (admins)
+  kernable cloud projects [--team <team>] approve-writer <name> <partition> <root.key> <instance.pub|ID> [--revoke-old]
+                                          A new writer in one step: signs its approval here, stops
+                                          the current pusher's key (revokes it with --revoke-old,
+                                          for a machine that is lost or compromised) and names
+                                          the new one the partition's pusher. Start it with
+                                          --become-writer on: it takes the copy over (admins)
+  kernable cloud projects [--team <team>] compromised <name> <instance.pub|ID>
+                                          An instance that may be compromised: its key revoked at
+                                          the relay for every partition at once; then prints what
+                                          only you can do: revoke it on the writer (kernable
+                                          revoke), rotate the copy key (kernable relay rotate) and,
+                                          for a writer, approve a new one (admins)
   kernable cloud projects [--team <team>] signed <name>
                                           The grants and approvals kernable Cloud carries for the
                                           project's nodes
@@ -1199,6 +1211,117 @@ fn projects(mut s: Session, team_flag: Option<String>, rest: &[&str]) -> Result<
             s.show(&v, |_| {
                 println!("{copy}: {key} writes it, approved here by the root; its readers take it within seconds")
             });
+        }
+        ["approve-writer", name, partition, root_key, key, rest @ ..] => {
+            let revoke_old = match rest {
+                [] => false,
+                ["--revoke-old"] => true,
+                _ => return Err("approve-writer takes --revoke-old only".into()),
+            };
+            let root = kernable_core::signing::read_signing_key(root_key)
+                .map_err(|e| format!("{root_key}: {e}"))?;
+            let key = key_id_of(key)?;
+            let links = s.call("GET", &format!("/v1/teams/{t}/projects/{name}/links"), None)?;
+            let link = links["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|l| {
+                    l["removed_at"].is_null()
+                        && l["copy"].as_str().and_then(|c| c.rsplit('.').next()) == Some(partition)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    format!("{name} has no partition {partition} linked: link it first")
+                })?;
+            let copy = text(&link, "copy");
+            let issued_at = crate::now_ms();
+            let approval = kernable_core::proto::WriterApproval {
+                copy: copy.clone(),
+                kernel_key_id: key.clone(),
+                issued_at,
+                root_sig: Some(kernable_core::signing::sign(
+                    &root,
+                    &kernable_core::signing::writer_approval_message(&copy, &key, issued_at),
+                )),
+            };
+            let at = format!("/v1/teams/{t}/projects/{name}/links/{partition}");
+            s.call(
+                "PUT",
+                &format!("{at}/approval"),
+                Some(json!({ "approval": hex::encode(prost::Message::encode_to_vec(&approval)) })),
+            )?;
+            println!("{copy}: {key} approved as its writer, signed here by the root");
+            let state = if revoke_old { "revoked" } else { "stopped" };
+            for old in link["keys"].as_array().into_iter().flatten() {
+                let old_key = text(old, "key");
+                if old["role"] == "push" && old["state"] == "active" && old_key != key {
+                    s.call(
+                        "PUT",
+                        &format!("{at}/keys/{old_key}"),
+                        Some(json!({ "state": state })),
+                    )?;
+                    println!("{copy}: the old pusher {old_key} {state}");
+                }
+            }
+            s.call("PUT", &at, Some(json!({ "pusher": key })))?;
+            println!(
+                "{copy}: {key} is its pusher now. Start it with --become-writer on (a joined node: \
+                 role writer): it catches up from the copy, takes it over with the approval, and \
+                 its readers follow it from the takeover on"
+            );
+        }
+        ["compromised", name, key] => {
+            let key = key_id_of(key)?;
+            let links = s.call("GET", &format!("/v1/teams/{t}/projects/{name}/links"), None)?;
+            let mut writer_of = Vec::new();
+            let mut revoked = Vec::new();
+            for l in links["links"].as_array().into_iter().flatten() {
+                if !l["removed_at"].is_null() {
+                    continue;
+                }
+                let copy = text(l, "copy");
+                let partition = copy.rsplit('.').next().unwrap_or_default().to_owned();
+                for k in l["keys"].as_array().into_iter().flatten() {
+                    if text(k, "key") != key || k["state"] == "revoked" {
+                        continue;
+                    }
+                    if k["role"] == "push" {
+                        writer_of.push(partition.clone());
+                    }
+                    let path =
+                        format!("/v1/teams/{t}/projects/{name}/links/{partition}/keys/{key}");
+                    s.call("PUT", &path, Some(json!({ "state": "revoked" })))?;
+                    revoked.push(copy.clone());
+                }
+            }
+            if revoked.is_empty() {
+                println!("{key}: no partition of {name} names it; nothing revoked at the relay");
+            } else {
+                println!(
+                    "{key}: revoked at the relay for {} (within seconds; audited)",
+                    revoked.join(", ")
+                );
+            }
+            // As `kernable revoke` takes it: 2026-11-27T10:31:00Z.
+            let since = {
+                let t = utc(crate::now_ms());
+                format!("{}T{}:00Z", &t[..10], &t[11..16])
+            };
+            println!(
+                "What only you can do, where your keys are:\n\
+                 1. revoke it on the writer, so no kernel takes it any more and no pusher hands it a copy key:\n   \
+                    kernable revoke <writer address> root.key {key} {since}\n\
+                 2. rotate each copy key it held, on the writer's machine (recommended: it read everything up to now):\n   \
+                    kernable relay rotate copy.key\n\
+                 3. treat what it read as disclosed (personal data: check your duty to notify)"
+            );
+            for partition in writer_of {
+                println!(
+                    "It wrote {partition}: approve a new writer, the old one revoked:\n   \
+                     kernable cloud projects approve-writer {name} {partition} root.key <new instance.pub> --revoke-old"
+                );
+            }
         }
         ["signed", name] => {
             let v = s.call(

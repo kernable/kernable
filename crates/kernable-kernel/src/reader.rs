@@ -77,6 +77,9 @@ pub(crate) struct Reader {
     copy: String,
     /// `--reader-copy-key`: what it gets from a relay is opened with it.
     copy_key: Option<Arc<crate::seal::CopyKey>>,
+    /// Its file: set aside once the copy is sealed with another key, so the reader, started
+    /// again, asks for the new one.
+    copy_key_file: Option<std::path::PathBuf>,
     /// The newest record applied.
     applied: AtomicU64,
     /// How far the writer said it may follow, last.
@@ -127,6 +130,7 @@ impl Reader {
             kernel_keys: follow.primary_kernel_keys.clone(),
             copy: follow.copy.clone(),
             copy_key: standby::copy_key(follow, true)?,
+            copy_key_file: follow.copy_key.clone(),
             applied: AtomicU64::new(applied),
             head: AtomicU64::new(applied),
             // It just caught up (`kernable start` catches up first).
@@ -394,6 +398,16 @@ pub(crate) async fn follow_writer(kernel: &Arc<Kernel>) -> BoxError {
                 reader.connected.store(false, SeqCst);
                 return format!(
                     "{why}: this reader's copy no longer continues its writer's log; start it again to catch up anew"
+                )
+                .into();
+            }
+            Err(Ended::Retry(e)) if e.to_string().contains("sealed with the copy key") => {
+                reader.connected.store(false, SeqCst);
+                if let Some(path) = &reader.copy_key_file {
+                    let _ = std::fs::rename(path, path.with_extension("replaced"));
+                }
+                return format!(
+                    "{e}: the copy key was rotated; start the reader again: it asks for the new key and catches up anew"
                 )
                 .into();
             }

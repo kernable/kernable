@@ -147,6 +147,14 @@ Keys and trust:
                                           the copy's partition (<copy>.approval by default), for a
                                           writer taking the copy over (kernable start --approval);
                                           readers and standbys that trust the root accept it
+  kernable relay rotate <file>            Replaces the copy key in <file> (the pusher's
+                                          --copy-key) by a new one, the old one kept beside it as
+                                          <file>.<ID>.old. The pusher pushes with the new one
+                                          within seconds and the copy begins anew under it; its
+                                          readers, finding another key, ask for the new one and are
+                                          handed it if their grant allows copy=<copy>. Rotate
+                                          after a reader's key or the copy key itself may have
+                                          leaked, once that key is revoked.
   kernable relay key <file>               Writes a new copy key (hex, mode 600): the pusher seals
                                           what it sends a relay with it (--copy-key) and the
                                           copy's readers open it (--reader-copy-key). The relay
@@ -668,6 +676,7 @@ async fn main() -> ExitCode {
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
         ["relay", "key", file] => relay_key(file),
+        ["relay", "rotate", file] => relay_rotate(file),
         ["approve", root_key, copy, kernel] => approve(root_key, copy, kernel, None),
         ["approve", root_key, copy, kernel, "--out", out] => {
             approve(root_key, copy, kernel, Some(out))
@@ -1723,7 +1732,7 @@ async fn run_relay(flags: &[&str]) -> ExitCode {
 /// `kernable push --follow <addr> --instance-key <key> --to <relay> --copy <name>`: pushes until
 /// stopped.
 async fn run_push(flags: &[&str]) -> ExitCode {
-    let parsed = (|| -> Result<push::Pusher> {
+    let parse = || -> Result<push::Pusher> {
         let values = flag_values(
             flags,
             &[
@@ -1774,15 +1783,17 @@ async fn run_push(flags: &[&str]) -> ExitCode {
                 .map_err(boxed)?,
             trust: push::Trust::load(roots, Some(format!("{copy_key_path}.revoked").into()))
                 .map_err(boxed)?,
+            pushed: Some(format!("{copy_key_path}.pushed").into()),
             start_anew: one("--start-anew")
                 .map(|v| {
                     v.parse::<u64>()
                         .map_err(|_| format!("--start-anew {v}: the copy's position, a number"))
                 })
                 .transpose()?,
+            copy_key_file: Some(copy_key_path.into()),
         })
-    })();
-    let pusher = match parsed {
+    };
+    let mut pusher = match parse() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -1794,15 +1805,28 @@ async fn run_push(flags: &[&str]) -> ExitCode {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
-    tokio::select! {
-        result = push::run(pusher) => match result {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                tracing::error!(error = %e, "the pusher stopped");
-                ExitCode::FAILURE
-            }
-        },
-        _ = shutdown_signal() => ExitCode::SUCCESS,
+    let mut stop = std::pin::pin!(shutdown_signal());
+    loop {
+        tokio::select! {
+            result = push::run(pusher) => match result {
+                Ok(()) => return ExitCode::SUCCESS,
+                // A rotated copy key: the pusher starts again with it.
+                Err(e) if e.downcast_ref::<push::KeyChanged>().is_some() => {
+                    pusher = match parse() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::error!(error = %e, "the pusher stopped");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "the pusher stopped");
+                    return ExitCode::FAILURE;
+                }
+            },
+            _ = &mut stop => return ExitCode::SUCCESS,
+        }
     }
 }
 
@@ -1826,6 +1850,25 @@ fn approve(root_key: &str, copy: &str, kernel: &str, out: Option<&str>) -> Resul
     println!(
         "wrote to {out}: the root key {} lets the kernel key {kernel_key_id} write {copy}",
         signing::key_id(&key.verifying_key())
+    );
+    Ok(true)
+}
+
+/// `kernable relay rotate <file>`: the copy key in `file` replaced by a new one; the old one kept
+/// beside it as `<file>.<its ID>.old`.
+fn relay_rotate(file: &str) -> Result<bool> {
+    let path = Path::new(file);
+    let old = kernable_kernel::seal::CopyKey::read(path).map_err(boxed)?;
+    let aside = format!("{file}.{}.old", old.id());
+    fs::rename(path, &aside).map_err(|e| format!("{file}: {e}"))?;
+    kernable_kernel::seal::CopyKey::create(path).map_err(boxed)?;
+    let new = kernable_kernel::seal::CopyKey::read(path).map_err(boxed)?;
+    println!(
+        "the copy key {} replaces {} (kept as {aside}): the pusher pushes with it within seconds and \
+         the copy begins anew under it; readers granted copy=<copy> are handed it, others need it \
+         by hand",
+        new.id(),
+        old.id()
     );
     Ok(true)
 }

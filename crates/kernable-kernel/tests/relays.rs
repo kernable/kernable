@@ -174,6 +174,8 @@ fn start_pusher_anew(
         start_anew,
         // It hands the copy key to keys the test's root granted copy=<copy>.
         trust: push::Trust::load(vec![id(&root())], None).unwrap(),
+        pushed: None,
+        copy_key_file: None,
     };
     tokio::spawn(async move {
         push::run(pusher).await.unwrap();
@@ -307,6 +309,8 @@ async fn a_relay_serves_only_the_readers_it_names_a_copy_it_holds() {
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
         start_anew: None,
         trust: push::Trust::load(Vec::new(), None).unwrap(),
+        pushed: None,
+        copy_key_file: None,
     };
     let pushing = tokio::spawn(push::run(stranger));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1470,6 +1474,8 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
         start_anew: None,
         trust: push::Trust::load(Vec::new(), None).unwrap(),
+        pushed: None,
+        copy_key_file: None,
     };
     tokio::spawn(async move { push::run(pusher).await.unwrap() });
     for i in 20..23 {
@@ -1546,6 +1552,8 @@ async fn a_new_reader_gets_the_copy_key_sealed_to_its_key_by_its_grant() {
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
         start_anew: None,
         trust: push::Trust::load(vec![id(&root())], None).unwrap(),
+        pushed: None,
+        copy_key_file: None,
     };
     tokio::spawn(async move { push::run(pusher).await.unwrap() });
 
@@ -1643,4 +1651,116 @@ async fn a_reader_takes_its_writer_from_the_roots_approval() {
         async || held(&reader) >= at,
     )
     .await;
+}
+
+/// A rotated copy key (`kernable relay rotate`): the pusher pushes with the new one and the copy
+/// begins anew under it; a reader finding another key asks for the new one and, granted
+/// `copy=shop`, is handed it and catches up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotated_copy_key_reaches_granted_readers_and_the_copy_begins_anew_under_it() {
+    let log = captured_log();
+    let dir = Dir::new("relays-rotate");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..3 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    let listen = format!("unix:{}", dir.0.join("relay.sock").display());
+    let relay_config = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        readers: readers(),
+        pushers: vec![id(&key(3))],
+        access: None,
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(relay_config).await.unwrap() });
+    wait_for(&listen).await;
+    let grant_file = reading_key(&dir.0, "writer-instance", 3).with_extension("grant");
+    let key_file = copy_key(&dir.0);
+    let (relay_at, writer_at) = (listen.clone(), writer_config.listen.clone());
+    let (pushed, file) = (dir.0.join("copy.key.pushed"), key_file.clone());
+    // As `kernable push` does: started again with the new key once the file holds it.
+    tokio::spawn(async move {
+        loop {
+            let pusher = push::Pusher {
+                follow: vec![writer_at.clone()],
+                key: key(3),
+                grant_file: grant_file.clone(),
+                relay: relay_at.clone(),
+                copy: "shop".into(),
+                copy_key: kernable_kernel::seal::CopyKey::read(&file).unwrap(),
+                start_anew: None,
+                trust: push::Trust::load(vec![id(&root())], None).unwrap(),
+                pushed: Some(pushed.clone()),
+                copy_key_file: Some(file.clone()),
+            };
+            match push::run(pusher).await {
+                Err(e) if e.downcast_ref::<push::KeyChanged>().is_some() => continue,
+                other => panic!("the pusher stopped: {other:?}"),
+            }
+        }
+    });
+
+    let mut newbie = reader_config(&dir.0, "newbie", 21, &listen, "shop");
+    let newbie_key = dir.0.join("newbie-copy.key");
+    if let Some(f) = newbie.replication.follow.as_mut() {
+        f.copy_key = Some(newbie_key.clone());
+    }
+    let granted = grant(&key(71), &[("read", &["*"]), ("copy", &["shop"])]);
+    std::fs::write(dir.0.join("newbie.grant"), hex(&granted.encode_to_vec())).unwrap();
+    let reader = start_reader(&newbie).await;
+    let at = held(&writer);
+    until_async("the reader holds what the writer wrote", async || {
+        held(&reader) >= at
+    })
+    .await;
+    // Rotated: a new key in the pusher's file, the old one kept beside it.
+    let old = std::fs::read_to_string(&key_file).unwrap();
+    std::fs::rename(&key_file, dir.0.join("copy.key.old")).unwrap();
+    kernable_kernel::seal::CopyKey::create(&key_file).unwrap();
+    let new = std::fs::read_to_string(&key_file).unwrap();
+    assert_ne!(old, new);
+    for i in 3..6 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    // The pusher takes the new key within seconds; the copy begins anew under it, and the
+    // running reader stops (it is to be started again).
+    let new_id = kernable_kernel::seal::CopyKey::read(&key_file)
+        .unwrap()
+        .id();
+    let noted = dir.0.join("copy.key.pushed");
+    until_async("the pusher pushes with the new key", async || {
+        std::fs::read_to_string(&noted).is_ok_and(|t| t.trim() == new_id)
+    })
+    .await;
+    drop(reader);
+    // Started again (as a node does), with its old key: it asks for the new one, and catches up
+    // anew under it.
+    let mut again = reader_config(&dir.0, "again", 23, &listen, "shop");
+    let again_key = dir.0.join("again-copy.key");
+    std::fs::write(&again_key, &old).unwrap();
+    if let Some(f) = again.replication.follow.as_mut() {
+        f.copy_key = Some(again_key.clone());
+    }
+    let granted = grant(&key(73), &[("read", &["*"]), ("copy", &["shop"])]);
+    std::fs::write(dir.0.join("again.grant"), hex(&granted.encode_to_vec())).unwrap();
+    let reader = start_reader(&again).await;
+    let newbie_key = again_key;
+    let at = held(&writer);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !(std::fs::read_to_string(&newbie_key).ok().as_deref() == Some(new.as_str())
+        && held(&reader) >= at)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the reader has the new key and what the writer wrote ({} of {at}, key {:?}, new {new:?}): {}",
+            held(&reader),
+            std::fs::read_to_string(&newbie_key).ok(),
+            log.text()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

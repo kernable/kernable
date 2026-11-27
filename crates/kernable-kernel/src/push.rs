@@ -55,7 +55,26 @@ pub struct Pusher {
     /// Who may be handed the copy key: keys whose grants, signed by these roots, allow `copy`
     /// for this copy, and that are not revoked. No root: nobody (`--root`).
     pub trust: Trust,
+    /// Where it notes the ID of the copy key it pushes with (`<copy-key>.pushed`): another key
+    /// there than its own was rotated (`kernable relay rotate`), and the copy begins anew under
+    /// the new one.
+    pub pushed: Option<PathBuf>,
+    /// The copy key's file: once it holds another key (`kernable relay rotate`), the pusher ends
+    /// with [`KeyChanged`] so it can start again with it.
+    pub copy_key_file: Option<PathBuf>,
 }
+
+/// The copy key's file holds another key now: start the pusher again with it.
+#[derive(Debug)]
+pub struct KeyChanged;
+
+impl std::fmt::Display for KeyChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the copy key's file holds another key now")
+    }
+}
+
+impl std::error::Error for KeyChanged {}
 
 /// The roots a pusher trusts, and the keys the writer revoked, as the pusher saw them pass
 /// (kept in a file, so a pusher started again still knows them).
@@ -243,10 +262,28 @@ pub async fn run(pusher: Pusher) -> Result<(), BoxError> {
     let _calls = AbortOnDrop(calls);
     let mut at = 0;
     let mut delay = Duration::from_millis(200);
+    let changed = async |pusher: &Pusher| loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let now = pusher
+            .copy_key_file
+            .as_ref()
+            .and_then(|f| CopyKey::read(f).ok())
+            .map(|k| k.id());
+        if now.is_some_and(|id| id != pusher.copy_key.id()) {
+            return;
+        }
+    };
     loop {
         let writer = &pusher.follow[at % pusher.follow.len()];
         *current.lock().unwrap_or_else(PoisonError::into_inner) = writer.clone();
-        match push_once(&pusher, writer).await {
+        let pushed = tokio::select! {
+            pushed = push_once(&pusher, writer) => pushed,
+            () = changed(&pusher) => {
+                tracing::warn!(copy = %pusher.copy, "the copy key was replaced: pushing with the new one");
+                return Err(KeyChanged.into());
+            }
+        };
+        match pushed {
             Ok(()) => delay = Duration::from_millis(200),
             // Nothing changes by itself: said as an error, asked again only now and then.
             Err(e) if e.downcast_ref::<Diverged>().is_some() => {
@@ -353,6 +390,43 @@ async fn push_once(pusher: &Pusher, writer: &str) -> Result<(), BoxError> {
     let Some(push_response::Msg::Start(start)) = next(&mut from_relay).await? else {
         return Err("the relay did not start the push".into());
     };
+    // A rotated copy key: the copy, sealed with the old one, begins anew under the new one, from
+    // an image; its readers ask for the new key (they are handed it by their grants).
+    let own = pusher.copy_key.id();
+    let noted = pusher
+        .pushed
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.trim().to_owned());
+    if let (Some(old), Some(path)) = (&noted, &pusher.pushed)
+        && *old != own
+        && !old.is_empty()
+    {
+        if start.seq > 0 {
+            tracing::warn!(copy = %pusher.copy, old = %old, new = %own, "the copy key was rotated: the copy begins anew under the new one");
+            let mut empty = follow_response::Msg::ImageEnd(ImageEnd {
+                seq: 0,
+                hash: ZERO.to_vec(),
+                sealed: Vec::new(),
+            });
+            crate::seal::seal(&pusher.copy_key, &mut empty, &mut Default::default());
+            let follow_response::Msg::ImageEnd(empty) = empty else {
+                unreachable!("sealed in place")
+            };
+            to_relay
+                .send(say(push_request::Msg::ImageEnd(empty)))
+                .await?;
+            match next(&mut from_relay).await? {
+                Some(push_response::Msg::Ack(_)) => {}
+                _ => return Err("the relay did not empty the copy".into()),
+            }
+        }
+        std::fs::write(path, format!("{own}\n"))?;
+        return Ok(());
+    }
+    if let (None, Some(path)) = (&noted, &pusher.pushed) {
+        std::fs::write(path, format!("{own}\n"))?;
+    }
 
     // Then the writer, from there.
     let hello = FollowHello {

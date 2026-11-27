@@ -1697,6 +1697,7 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
             }
             Some(AbortOnDrop(tokio::spawn(crate::managed::run(
                 dir.clone(),
+                path.clone(),
                 first.admin.clone(),
                 problems_rx,
             ))))

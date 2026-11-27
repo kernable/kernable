@@ -575,8 +575,69 @@ pub(crate) fn apply(settings: &Settings, dir: &Path, o: Overlay<'_>) -> Vec<Stri
     problems
 }
 
+/// The IDs of the copy keys the node holds, by copy (`<copy>` → the key's ID, the first 8
+/// bytes of its SHA-256, hex): the reader's (`reader-copy-key`) and the pusher's (`[push]
+/// copy-key`), as its project file and settings name them. An ID names a key without revealing
+/// it; the control point compares them, so a reader that lacks the pusher's key shows.
+fn copy_keys(dir: &Path, project: &Path) -> BTreeMap<String, String> {
+    let mut held = BTreeMap::new();
+    let file: toml::Value = std::fs::read_to_string(project)
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or(toml::Value::Table(Default::default()));
+    let settings = held_settings(dir);
+    let flags = &file["kernel"]["flags"];
+    let reader_copy = settings
+        .as_ref()
+        .map(|s| s.copy.clone())
+        .filter(|c| !c.is_empty())
+        .or_else(|| {
+            flags
+                .get("reader-copy")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+    let push = file.get("push");
+    let push_copy = settings
+        .as_ref()
+        .and_then(|s| s.push.as_ref().map(|p| p.copy.clone()))
+        .or_else(|| {
+            push.and_then(|p| p.get("copy"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+    let entries = [
+        (
+            reader_copy,
+            flags.get("reader-copy-key").and_then(|v| v.as_str()),
+        ),
+        (
+            push_copy,
+            push.and_then(|p| p.get("copy-key"))
+                .and_then(|v| v.as_str()),
+        ),
+    ];
+    for (copy, file) in entries {
+        let Some(copy) = copy else { continue };
+        let path = dir.join(file.unwrap_or("copy.key"));
+        if let Ok(key) = crate::seal::CopyKey::read(&path) {
+            held.insert(copy, key.id());
+        }
+    }
+    held
+}
+
+fn held_settings(dir: &Path) -> Option<Settings> {
+    held(dir).ok().flatten()
+}
+
 /// What the node reports: the settings it runs, what it could not apply, its kernel's role.
-async fn report(dir: &Path, admin: &Path, problems: &[String]) -> Result<(), BoxError> {
+async fn report(
+    dir: &Path,
+    project: &Path,
+    admin: &Path,
+    problems: &[String],
+) -> Result<(), BoxError> {
     let Some(link) = link(dir)? else {
         return Ok(());
     };
@@ -591,6 +652,7 @@ async fn report(dir: &Path, admin: &Path, problems: &[String]) -> Result<(), Box
         "kernel_version": settings.map(|s| s.kernel_version).unwrap_or_default(),
         "role": role,
         "problems": problems,
+        "copy_keys": copy_keys(dir, project),
         "at": crate::now_ms(),
     })
     .to_string();
@@ -621,6 +683,7 @@ async fn role(admin: &Path) -> Result<serde_json::Value, BoxError> {
 /// the newest plan could not apply.
 pub(crate) async fn run(
     dir: PathBuf,
+    project: PathBuf,
     admin: PathBuf,
     problems: tokio::sync::watch::Receiver<Vec<String>>,
 ) {
@@ -648,7 +711,7 @@ pub(crate) async fn run(
         if reported_at.elapsed() >= Duration::from_secs(30) {
             reported_at = tokio::time::Instant::now();
             let problems = problems.borrow().clone();
-            if let Err(e) = report(&dir, &admin, &problems).await {
+            if let Err(e) = report(&dir, &project, &admin, &problems).await {
                 tracing::warn!(error = %e, "[node] reporting failed");
             }
         }
@@ -661,6 +724,34 @@ mod tests {
 
     fn signed(key: &SigningKey, json: &str) -> String {
         hex::encode(key.sign(&settings_message(json)).to_bytes())
+    }
+
+    #[test]
+    fn a_node_reports_the_ids_of_the_copy_keys_it_holds() {
+        let dir = std::env::temp_dir().join(format!("kernable-copy-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = dir.join("project.toml");
+        std::fs::write(
+            &project,
+            "[kernel]\nflags = { reader-copy = \"acme.shop.us\", reader-copy-key = \"us.key\" }\n\n[push]\nto = \"r\"\ncopy = \"acme.shop.eu\"\ncopy-key = \"copy.key\"\n",
+        )
+        .unwrap();
+        crate::seal::CopyKey::create(&dir.join("copy.key")).unwrap();
+        let ids = copy_keys(&dir, &project);
+        assert_eq!(
+            ids.get("acme.shop.eu"),
+            Some(
+                &crate::seal::CopyKey::read(&dir.join("copy.key"))
+                    .unwrap()
+                    .id()
+            )
+        );
+        assert!(
+            !ids.contains_key("acme.shop.us"),
+            "no us.key on this machine"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

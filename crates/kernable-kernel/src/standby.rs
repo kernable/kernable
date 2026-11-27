@@ -896,6 +896,49 @@ async fn follow_once(
     grant: &str,
     tried_backup: &mut bool,
 ) -> Result<(), BoxError> {
+    let of_copy = standby.reader && !standby.follow.copy.is_empty();
+    // The copy key was replaced (`kernable relay rotate`), or is not there yet: asked for.
+    if of_copy
+        && let Some(path) = standby.follow.copy_key.as_ref()
+        && !path.exists()
+    {
+        ask_copy_key(&standby.follow, key, grant, &writers_of(standby)?).await?;
+    }
+    let result = follow_once_with(standby, key, grant, tried_backup).await;
+    if let (Err(e), true) = (&result, of_copy)
+        && e.to_string().contains("sealed with the copy key")
+        && let Some(path) = standby.follow.copy_key.as_ref()
+    {
+        // The copy began anew under another key: this one goes aside, the new one is asked for.
+        let aside = path.with_extension("replaced");
+        if std::fs::rename(path, &aside).is_ok() {
+            tracing::warn!(copy = %standby.follow.copy, old = %aside.display(), "the copy is sealed with another copy key now: asking the writer's pusher for it");
+        }
+    }
+    result
+}
+
+/// The writer keys a reader trusts now: those it was given, approved, or taken over to.
+fn writers_of(standby: &Standby) -> Result<Vec<String>, BoxError> {
+    let mut given = standby.follow.primary_kernel_keys.clone();
+    given.extend(crate::approved_writers(&standby.config));
+    let mut writers = Trust::of(
+        standby.stores().store.as_ref(),
+        &given,
+        &standby.config.roots,
+    )?
+    .keys()
+    .to_vec();
+    writers.extend(given);
+    Ok(writers)
+}
+
+async fn follow_once_with(
+    standby: &Arc<Standby>,
+    key: &SigningKey,
+    grant: &str,
+    tried_backup: &mut bool,
+) -> Result<(), BoxError> {
     let follow = &standby.follow;
     // A primary the network cut off sends nothing more, and TCP tells nothing for minutes: pings
     // end the stream within two thirds of a lease, so a pair's standby claims in time.

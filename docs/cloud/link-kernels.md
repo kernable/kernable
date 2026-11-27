@@ -132,9 +132,30 @@ time: a new writer's pusher is linked only once the current one is stopped or re
 writers never push the same partition. A revoked key is never let in again; use a new key.
 
 A stopped or revoked reader still holds the copy key and what it read. The pusher hands the key
-to nobody whose key the writer revoked. If the copy key itself leaked, make a new one, give it to
-the pusher, and start the copy anew under it; readers whose grant allows `copy` ask for the new
-one.
+to nobody whose key the writer revoked. To shut it out of what comes next, **rotate the copy
+key** on the writer's machine:
+
+```sh
+kernable relay rotate copy.key
+# the copy key 4c1e… replaces 3f9a… (kept as copy.key.3f9a….old): the pusher pushes with it within seconds …
+```
+
+The pusher takes the new key within seconds and the copy begins anew under it. Each reader whose
+grant allows `copy=<copy>` finds another key, asks for the new one and is handed it, sealed to its
+own key; started again, it catches up anew. The console shows, per reader, whether its node holds
+the writer's current copy key, and an alert names a reader that does not.
+
+### An instance that may be compromised
+
+```sh
+kernable cloud projects compromised shop reader-1.pub
+```
+
+Its key is revoked at the relay for every partition at once (audited), and the command prints
+what only you can do where your keys are: revoke it on the writer (`kernable revoke`, so no kernel
+takes it and no pusher hands it a copy key), rotate each copy key it held (`kernable relay
+rotate`), and treat what it read as disclosed. Rotating is your decision, never automatic. If it
+was a partition's writer, it says how to approve a new one (below).
 
 ## 7. A writer from its copy
 
@@ -144,15 +165,17 @@ continues the copy where it stands. On the new machine, its one key (`kernable k
 writer-c`, granted `read`); then tell kernable Cloud which key it uses:
 
 ```sh
-kernable cloud projects key shop eu writer-c.pub read          # it follows the copy first
-kernable approve root.key acme.shop.eu writer-c.pub            # where the root key is kept
+kernable cloud projects approve-writer shop eu root.key writer-c.pub    # --revoke-old for a lost machine
 kernable start --root root.pub --readers on \
   --reader https://relay-eu.kernable.cloud:7400 --reader-copy acme.shop.eu --reader-copy-key copy.key \
-  --instance-key writer-c.key --primary-kernel-key writer.pub \
-  --become-writer on --approval acme.shop.eu.approval
-kernable cloud projects key shop eu writer.pub revoke          # the old writer (or stop)
-kernable cloud projects link shop eu --pusher writer-c.pub     # now the new one pushes
+  --instance-key writer-c.key --approvals approvals --become-writer on
 ```
+
+`approve-writer` signs the approval with your root key on your machine, hands it to kernable
+Cloud, stops the old writer's key at the relay (revokes it with `--revoke-old`) and names the new
+one the partition's pusher, in one step. A joined node gets the approval in `approvals/` by
+itself; without one, `kernable approve root.key acme.shop.eu writer-c.pub` writes it as a file for
+`--approval`.
 
 The new kernel waits, and says why, until the relay takes its key as the pusher; then it becomes
 the writer and writes a **takeover** with your root key's approval. Start its pusher with the

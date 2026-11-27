@@ -1,6 +1,6 @@
 # One key per instance, trust from the root, the copy key at join
 
-Status: decided 2026-11-27; steps 1 to 4 built the same day. Builds on [a writer from its copy](writer-from-copy.md),
+Status: decided 2026-11-27; built the same day. Builds on [a writer from its copy](writer-from-copy.md),
 and replaces its "copy key by hand only" and its separate project key.
 
 Today a small setup (one writer, two readers) needs a dozen key files and many public files
@@ -91,11 +91,26 @@ pusher is connected the instance says so and asks again; only the writer's pushe
 
 ## 5. Rotating a copy key
 
-Only by command (`kernable relay rotate`, or the Cloud's CLI): the pusher makes a new copy key,
-seals it to every instance whose grant still carries `copy=<copy>` and that is active at the
-relay, waits until each reports the new key's fingerprint, and then starts the copy anew under it
-(a new copy key keeps the copy's name, as decided before). An instance whose key was revoked gets
-nothing.
+Only by command, on the writer's machine: `kernable relay rotate copy.key` writes a new key and
+keeps the old one beside it. The pusher checks its key file every few seconds; once it holds
+another key it starts again with it, and since the key it notes in `copy.key.pushed` differs, it
+empties the copy (sealed with the new key) and the writer sends an image: the copy begins anew
+under the new key. A reader that finds records sealed with another key sets its key aside, asks
+for the new one through the relay (section 4) and catches up anew. An instance whose key the
+writer revoked is handed nothing.
+
+Joined nodes report the IDs of the copy keys they hold (`copy_keys` in their report); the
+control point shows them per key beside whether the key is connected, and kernable Cloud alerts
+on a reader whose node holds another key than the writer's node.
+
+## 6. With kernable Cloud, in one step
+
+- `kernable cloud projects approve-writer <project> <partition> <root.key> <instance.pub>`: signs
+  the approval locally, hands it over, stops (or with `--revoke-old` revokes) the current pusher's
+  key at the relay and names the new one the pusher.
+- `kernable cloud projects compromised <project> <instance.pub>`: revokes the key at the relay for
+  every partition and prints what only the root's holder can do: revoke it on the writer, rotate
+  the copy keys it held, and approve a new writer if it was one. Rotation stays a decision.
 
 ## Order of building
 

@@ -168,4 +168,27 @@ The command runs once per key file and has 30 s for it; the kernel keeps the unw
 
 ## The root key
 
-The root key signs only grants and revocations, so it can stay offline: issue grants on a separate machine and copy the `.grant` files. To replace it, start the kernel with both roots (`--root keys/root.pub --root keys/root-2.pub`), issue new grants with the new root and restart the services with them. Then restart the kernel without the old `--root`: grants signed by it are refused from then on. If the old root leaked, revoke it first, signed with the new root (`kernable revoke <addr> keys/root-2.key keys/root.pub <since>`): the kernel drops the grants the old root signed at once and refuses them from then on.
+The root key (with kernable Cloud: the **project root key**) is the one anchor of a project: it
+signs grants, revocations and the approvals of a partition's writer, and through a grant with
+`copy=<copy>` it decides who is handed a copy key. Whoever holds it can make a kernel of their own
+trusted. Keep it accordingly:
+
+- **Offline.** On a machine of its own, or a laptop that does nothing else, never on an instance,
+  in CI or in a secrets manager instances read. Nothing running needs it: kernels and nodes take
+  only its `.pub`.
+- **Encrypted at rest**, opened only to sign, for example with [age](https://age-encryption.org)
+  and a passphrase or a hardware-backed identity:
+
+  ```sh
+  age -p -o root.key.age root.key && shred -u root.key          # once
+  age -d root.key.age > /dev/shm/root.key                       # to sign, then:
+  kernable grant /dev/shm/root.key reader-1.pub 'read=*' 'copy=shop.eu'
+  shred -u /dev/shm/root.key
+  ```
+
+- **Backed up**, encrypted, in two places only you reach (a safe, a second encrypted volume). A
+  lost root key is replaced as below; until then nothing new can be granted.
+- **Few people.** Whoever signs with it should be whoever decides who may join. Every grant and
+  approval is in the project's audit log with kernable Cloud.
+
+The root key signs only grants, revocations and approvals, so it can stay offline: issue grants on a separate machine and copy the `.grant` files. To replace it, start the kernel with both roots (`--root keys/root.pub --root keys/root-2.pub`), issue new grants with the new root and restart the services with them. Then restart the kernel without the old `--root`: grants signed by it are refused from then on. If the old root leaked, revoke it first, signed with the new root (`kernable revoke <addr> keys/root-2.key keys/root.pub <since>`): the kernel drops the grants the old root signed at once and refuses them from then on.
