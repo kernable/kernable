@@ -78,12 +78,14 @@ Keys and trust:
                                           or a bare <type> for every action. Actions: submit run
                                           subscribe listen query answer check privileged vault_read
                                           vault_erase data_read data_write cache manage replicate
-                                          read export backup reserved_order process. A type is *,
+                                          read export backup reserved_order process copy. A type is *,
                                           <domain>.* or <domain>.<Type>; manage takes service names,
                                           process takes process names (<domain>.<name>), privileged
                                           takes bypass_authorization; replicate (a standby), read
                                           (a reader), export, backup and reserved_order (negative
-                                          listener orders, for kits) take *.
+                                          listener orders, for kits) take *; copy takes copies'
+                                          names at a relay (a pusher hands that copy's key to the
+                                          key, sealed: kernable push --root).
                                           --succeeds lets this key take over the aggregates and
                                           listeners registered with <old.pub>. A newer grant for the
                                           same key replaces the older one. grant=<action>,... lets
@@ -150,7 +152,7 @@ Keys and trust:
                                           copy's readers open it (--reader-copy-key). The relay
                                           never holds it: it sees records' positions, hashes and
                                           sizes, nothing else.
-  kernable push --follow <addr>[,<addr>] --instance-key <key> --to <relay> --copy <name> --copy-key <file> [--start-anew <position>]
+  kernable push --follow <addr>[,<addr>] --instance-key <key> --to <relay> --copy <name> --copy-key <file> [--root <root.pub>]... [--start-anew <position>]
                                           Follows the writer at <addr> (started with --readers on;
                                           both kernels of a pair, comma-separated) as a reader and
                                           sends every record, sealed with the copy key, to the copy
@@ -162,8 +164,13 @@ Keys and trust:
                                           the copy's pusher (--allow-push, or role push). The writer keeps its
                                           records until the copy holds them. Beside the push it
                                           takes the writes the copy's readers send through the
-                                          relay and makes them on the writer. The copy key reaches
-                                          every reader by your own means, never through the relay.
+                                          relay and makes them on the writer. With --root (the
+                                          project root key; repeatable or comma-separated) it hands
+                                          the copy key to a new instance that asks through the relay
+                                          and whose grant from that root allows copy=<name>: sealed
+                                          to that instance's own key, signed by <key>; the relay
+                                          never sees it. Without --root the copy key reaches readers
+                                          by your own means only.
                                           When the writer's log no longer
                                           continues the copy, it pushes nothing and says so (the
                                           copy keeps its history); --start-anew with the copy's
@@ -1704,10 +1711,22 @@ async fn run_push(flags: &[&str]) -> ExitCode {
                 "--copy",
                 "--copy-key",
                 "--start-anew",
+                "--root",
             ],
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.last().copied());
         let need = |flag: &str| one(flag).ok_or_else(|| format!("{flag} is missing"));
+        // The roots whose grants (`copy=<copy>`) let a new instance have the copy key.
+        let roots = values
+            .get("--root")
+            .into_iter()
+            .flatten()
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(|r| key_id_of("--root", r))
+            .collect::<Result<Vec<_>>>()?;
+        let copy_key_path = need("--copy-key")?;
         let key_path = need("--instance-key")?;
         let key = signing::read_signing_key(key_path)
             .map_err(|e| format!("--instance-key {key_path}: {e}"))?;
@@ -1729,7 +1748,9 @@ async fn run_push(flags: &[&str]) -> ExitCode {
             grant_file,
             relay: need("--to")?.to_owned(),
             copy: need("--copy")?.to_owned(),
-            copy_key: kernable_kernel::seal::CopyKey::read(Path::new(need("--copy-key")?))
+            copy_key: kernable_kernel::seal::CopyKey::read(Path::new(copy_key_path))
+                .map_err(boxed)?,
+            trust: push::Trust::load(roots, Some(format!("{copy_key_path}.revoked").into()))
                 .map_err(boxed)?,
             start_anew: one("--start-anew")
                 .map(|v| {

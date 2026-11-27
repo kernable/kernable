@@ -172,6 +172,8 @@ fn start_pusher_anew(
         copy: copy.to_owned(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(dir)).unwrap(),
         start_anew,
+        // It hands the copy key to keys the test's root granted copy=<copy>.
+        trust: push::Trust::load(vec![id(&root())], None).unwrap(),
     };
     tokio::spawn(async move {
         push::run(pusher).await.unwrap();
@@ -304,6 +306,7 @@ async fn a_relay_serves_only_the_readers_it_names_a_copy_it_holds() {
         copy: "shop".into(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
         start_anew: None,
+        trust: push::Trust::load(Vec::new(), None).unwrap(),
     };
     let pushing = tokio::spawn(push::run(stranger));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1466,6 +1469,7 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
         copy: "become.eu".into(),
         copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
         start_anew: None,
+        trust: push::Trust::load(Vec::new(), None).unwrap(),
     };
     tokio::spawn(async move { push::run(pusher).await.unwrap() });
     for i in 20..23 {
@@ -1504,4 +1508,80 @@ async fn a_kernel_becomes_the_writer_of_its_copy_once_the_relay_takes_its_pusher
         .lines()
         .any(|l| l.contains("begins anew") && l.contains("become.eu"));
     assert!(!anew, "the copy continued: {}", log.text());
+}
+
+/// A new instance without the copy key asks the copy's pusher through the relay: its grant from
+/// the root allows `copy=shop`, so the pusher seals the key to the instance's own key and signs
+/// it; the relay carries it and never holds it. One whose grant does not allow it gets nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_reader_gets_the_copy_key_sealed_to_its_key_by_its_grant() {
+    let log = captured_log();
+    let dir = Dir::new("relays-handover");
+    let writer_config = config(&dir.0, "writer", 3);
+    let writer = open(&writer_config).await;
+    grant_defaults(&writer);
+    start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    for i in 0..3 {
+        submit(&writer_config.listen, place(i)).await.unwrap();
+    }
+    // The relay takes the writer's own key as the copy's pusher, as with one key per kernel.
+    let listen = format!("unix:{}", dir.0.join("relay.sock").display());
+    let relay_config = relay::RelayConfig {
+        listen: listen.clone(),
+        dir: dir.0.join("copies"),
+        readers: readers(),
+        pushers: vec![id(&key(3))],
+        access: None,
+        tls: None,
+    };
+    tokio::spawn(async move { relay::run(relay_config).await.unwrap() });
+    wait_for(&listen).await;
+    let grant_file = reading_key(&dir.0, "writer-instance", 3).with_extension("grant");
+    let pusher = push::Pusher {
+        follow: vec![writer_config.listen.clone()],
+        key: key(3),
+        grant_file,
+        relay: listen.clone(),
+        copy: "shop".into(),
+        copy_key: kernable_kernel::seal::CopyKey::read(&copy_key(&dir.0)).unwrap(),
+        start_anew: None,
+        trust: push::Trust::load(vec![id(&root())], None).unwrap(),
+    };
+    tokio::spawn(async move { push::run(pusher).await.unwrap() });
+
+    // Granted read and copy=shop by the root, with no copy key file yet.
+    let mut newbie = reader_config(&dir.0, "newbie", 21, &listen, "shop");
+    let newbie_key = dir.0.join("newbie-copy.key");
+    if let Some(f) = newbie.replication.follow.as_mut() {
+        f.copy_key = Some(newbie_key.clone());
+    }
+    let granted = grant(&key(71), &[("read", &["*"]), ("copy", &["shop"])]);
+    std::fs::write(dir.0.join("newbie.grant"), hex(&granted.encode_to_vec())).unwrap();
+    let reader = start_reader(&newbie).await;
+    let at = held(&writer);
+    until_async("the new reader holds what the writer wrote", async || {
+        held(&reader) >= at
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&newbie_key).unwrap(),
+        std::fs::read_to_string(copy_key(&dir.0)).unwrap(),
+        "the copy key, handed over"
+    );
+
+    // Granted read only: the pusher refuses, and the reader says why and waits.
+    let mut plain = reader_config(&dir.0, "plain", 23, &listen, "shop");
+    if let Some(f) = plain.replication.follow.as_mut() {
+        f.copy_key = Some(dir.0.join("plain-copy.key"));
+    }
+    let waiting = tokio::time::timeout(Duration::from_secs(4), standby::run(plain)).await;
+    assert!(waiting.is_err(), "it keeps asking: {waiting:?}");
+    assert!(!dir.0.join("plain-copy.key").exists());
+    assert!(
+        log.text()
+            .lines()
+            .any(|l| l.contains("the copy key") && l.contains("copy=shop")),
+        "and says why: {}",
+        log.text()
+    );
 }

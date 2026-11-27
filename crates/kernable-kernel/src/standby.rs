@@ -544,6 +544,18 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         }
         Stores::open_on(&config, store)
     })?;
+    if config.replication.reader && !follow.copy.is_empty() {
+        // The writer's keys it trusts now: a copy key handed over is taken from them only.
+        let mut writers = Trust::of(
+            stores.store.as_ref(),
+            &follow.primary_kernel_keys,
+            &config.roots,
+        )?
+        .keys()
+        .to_vec();
+        writers.extend(follow.primary_kernel_keys.iter().cloned());
+        ask_copy_key(&follow, &key, &grant, &writers).await?;
+    }
     // It becomes the writer with its own key, which pushes the copy from then on.
     let become_writer = config.replication.become_writer.then(|| key.clone());
     let (promoted, promoted_rx) = oneshot::channel();
@@ -1196,6 +1208,102 @@ fn import(vault: Option<&Vault>, rows: &[kernable_core::proto::VaultRow]) -> Res
     }
 }
 
+/// A new instance of a relay's copy whose `--reader-copy-key` file does not exist yet asks the
+/// relays for it (design/instance-keys.md): the copy's pusher seals it to this instance's own key
+/// if its grant allows `copy` for the copy, and signs it. It is taken only signed by one of
+/// `writers` (a relay cannot slip another key in), opened, checked against the ID it came with,
+/// and written to the file (mode 0600). Asked again while no pusher answers or it is refused.
+async fn ask_copy_key(
+    follow: &Follow,
+    key: &SigningKey,
+    grant: &str,
+    writers: &[String],
+) -> Result<(), BoxError> {
+    let Some(path) = follow.copy_key.as_ref().filter(|p| !p.exists()) else {
+        return Ok(());
+    };
+    let grant = kernable_core::proto::Grant::decode(hex::decode(grant)?.as_slice())?;
+    let relays = crate::reader::addresses(&follow.primary);
+    let key_id = signing::key_id(&key.verifying_key());
+    let mut delay = Duration::from_millis(200);
+    let mut last_refusal = None;
+    tracing::info!(copy = %follow.copy, file = %path.display(), "no copy key yet: asking the copy's pusher through the relay");
+    for attempt in 0usize.. {
+        let relay = &relays[attempt % relays.len()];
+        let mut id = [0u8; 8];
+        getrandom::fill(&mut id).map_err(|_| "no randomness")?;
+        let id = u64::from_le_bytes(id);
+        let issued_at = crate::now_ms();
+        let ask = kernable_core::proto::CopyKeyRequest {
+            copy: follow.copy.clone(),
+            sig: Some(signing::sign(
+                key,
+                &signing::copy_key_message(&follow.copy, &key_id, id, issued_at),
+            )),
+            key_id: key_id.clone(),
+            issued_at,
+            grant: Some(grant.clone()),
+            id,
+        };
+        let answer = tokio::time::timeout(Duration::from_secs(30), async {
+            kernable_core::proto::relay_service_client::RelayServiceClient::new(
+                connect(relay).await?,
+            )
+            .copy_key(ask)
+            .await
+            .map_err(BoxError::from)
+        })
+        .await
+        .unwrap_or_else(|_| Err("no answer within 30 s".into()));
+        let taken = answer.and_then(|reply| {
+            let reply = reply.into_inner();
+            let sig = reply
+                .sender_sig
+                .as_ref()
+                .ok_or("the copy key came unsigned")?;
+            let msg = signing::copy_key_handover_message(
+                &follow.copy,
+                &key_id,
+                &reply.copy_key_id,
+                &reply.sealed,
+            );
+            if !writers.contains(&sig.key_id) || signing::verify(sig, &msg).is_err() {
+                return Err(format!(
+                    "the copy key came signed by {}, not by the writer's key: not taken",
+                    sig.key_id
+                )
+                .into());
+            }
+            crate::seal::open_key(key, &follow.copy, &reply.copy_key_id, &reply.sealed)
+                .map(|k| (k, reply.copy_key_id))
+        });
+        match taken {
+            Ok((copy_key, copy_key_id)) => {
+                crate::seal::CopyKey::write(path, &copy_key)?;
+                tracing::info!(copy = %follow.copy, file = %path.display(), key = %copy_key_id, "got the copy key, sealed to this instance's key");
+                return Ok(());
+            }
+            Err(e) => {
+                // A refusal lasts until the grant or the relay's access list allows it: asked
+                // again, loudly, rarely.
+                let max = match refusal(&*e) {
+                    Some(why) => {
+                        refused_once(&mut last_refusal, format!("the copy key: {why}"), relay);
+                        REFUSED_MAX_DELAY
+                    }
+                    None => {
+                        tracing::warn!(%relay, error = %with_causes(&*e), "asking for the copy key failed; asking again in {delay:?}");
+                        Duration::from_secs(5)
+                    }
+                };
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max);
+            }
+        }
+    }
+    unreachable!("asks until it has the key")
+}
+
 /// Which kernel keys a standby or reader takes checkpoints from (design/writer-from-copy.md):
 /// those it was given (`--primary-kernel-key`), until a takeover record names the kernel key of a
 /// writer that took the partition over; from there on only that one. A takeover counts if a
@@ -1274,6 +1382,11 @@ impl Trust {
             return Err(format!("{what}: its approval is for another key or copy"));
         }
         Ok(())
+    }
+
+    /// The kernel keys it takes checkpoints from now.
+    pub(crate) fn keys(&self) -> &[String] {
+        &self.keys
     }
 
     /// From a counted takeover on, only its kernel key.

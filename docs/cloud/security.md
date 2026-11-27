@@ -15,8 +15,10 @@ Your code, your services and your kernels' stores are never at kernable Cloud.
 ## Keys you hold
 
 - **Your root key**: offline, with you. It grants every other key of your kernels.
-- **The copy key**, one per partition: with your pusher and your readers, given to them by your
-  own means. It unlocks the copy; kernable never has it and never hands it out.
+- **The copy key**, one per partition: made on your writer's machine, with its pusher and your
+  readers. The pusher hands it to a reader your root key granted `copy=<copy>`, sealed to that
+  reader's own key; kernable carries the sealed key and can never open it. Or you keep it by hand
+  (`copy-key-handover = false`).
 - **Each instance's own key**: made on its machine. kernable Cloud knows only its public half,
   with its role and state for the partition (active, stopped, revoked).
 

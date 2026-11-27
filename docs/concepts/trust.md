@@ -52,6 +52,7 @@ kernable grant root.key app.pub 'submit=shop.*' 'listen=shop.*'   # writes app.g
 | `export` | `*`: [exporting](../how-to/export) the whole kernel; the vault values stay sealed with its vault key |
 | `backup` | `*`: following the kernel as its [backup follower](../how-to/backup#continuous-backup); the key gets every record and file, the vault values sealed |
 | `reserved_order` | `*`: registering listeners and middlewares at negative orders, which run before every other listener; for kernable's kits (tenancy, accounts, authorization) |
+| `copy` | copies at a [relay](../how-to/relays#the-copy-key-for-a-new-instance) by name (`shop.eu`, or `*`): the copy's pusher hands that copy's key to the key, sealed to it; whoever has it reads everything the copy holds |
 | `grant` | the actions (by name, never `*` or `grant`) it may grant other keys: a [delegate](#delegated-grants); not part of the action `*` |
 
 A type is a qualified type (`shop.PlaceOrder`), a whole domain (`shop.*`) or everything (`*`). A bare type (`'shop.*'`) means every action on it.

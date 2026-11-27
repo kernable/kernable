@@ -621,6 +621,32 @@ pub fn relay_stream_message(rpc: &str, copy: &str, key_id: &str, issued_at: i64)
         .0
 }
 
+/// What a new instance of a relay's copy signs to ask for the copy key.
+pub fn copy_key_message(copy: &str, key_id: &str, id: u64, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.copy-key")
+        .str(copy)
+        .str(key_id)
+        .u64(id)
+        .i64(issued_at)
+        .0
+}
+
+/// What the holder of a copy key signs over the key it sealed for `recipient`: the copy, the
+/// recipient, the copy key's ID and the SHA-256 of what it sealed.
+pub fn copy_key_handover_message(
+    copy: &str,
+    recipient: &str,
+    copy_key_id: &str,
+    sealed: &[u8],
+) -> Vec<u8> {
+    Msg::new("kernable.v1.copy-key-handover")
+        .str(copy)
+        .str(recipient)
+        .str(copy_key_id)
+        .bytes(&Sha256::digest(sealed))
+        .0
+}
+
 /// What a root key signs to let a kernel key write a copy's partition (a writer taking the
 /// copy over, design/writer-from-copy.md).
 pub fn writer_approval_message(copy: &str, kernel_key_id: &str, issued_at: i64) -> Vec<u8> {

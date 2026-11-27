@@ -42,6 +42,8 @@ const NONCE: usize = 24;
 pub struct CopyKey {
     cipher: XChaCha20Poly1305,
     id: [u8; ID],
+    /// The key itself, to seal it to a new instance.
+    raw: Zeroizing<[u8; 32]>,
 }
 
 impl CopyKey {
@@ -52,6 +54,7 @@ impl CopyKey {
         CopyKey {
             cipher: XChaCha20Poly1305::new(key.into()),
             id,
+            raw: Zeroizing::new(*key),
         }
     }
 
@@ -73,6 +76,23 @@ impl CopyKey {
             .open(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         std::io::Write::write_all(&mut file, format!("{}\n", hex::encode(*key)).as_bytes())?;
+        Ok(())
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8; 32] {
+        &self.raw
+    }
+
+    /// Writes `key` to `path`, readable by its owner only; never overwrites one.
+    pub fn write(path: &Path, key: &[u8; 32]) -> Result<(), BoxError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
+            .open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        std::io::Write::write_all(&mut file, format!("{}\n", hex::encode(key)).as_bytes())?;
+        file.sync_all()?;
         Ok(())
     }
 
@@ -293,6 +313,91 @@ fn open_records(key: &CopyKey, batch: &mut RecordBatch) -> Result<(), BoxError> 
     Ok(())
 }
 
+/// The copy key sealed to the instance whose Ed25519 key is `to` (as X25519): a fresh key
+/// pair's public half, a nonce, then the key under XChaCha20-Poly1305 keyed by the SHA-256 of a
+/// label, both public halves and the shared secret, bound to the copy, the recipient and the copy
+/// key's ID.
+pub(crate) fn seal_key_for(to: &ed25519_dalek::VerifyingKey, copy: &str, key: &CopyKey) -> Vec<u8> {
+    use curve25519_dalek::montgomery::MontgomeryPoint;
+    let mut ephemeral = Zeroizing::new([0u8; 32]);
+    getrandom::fill(ephemeral.as_mut()).expect("randomness");
+    let public = MontgomeryPoint::mul_base_clamped(*ephemeral);
+    let theirs = to.to_montgomery();
+    let shared = theirs.mul_clamped(*ephemeral);
+    let cipher = key_cipher(copy, &public, &theirs, &shared);
+    let mut nonce = [0u8; NONCE];
+    getrandom::fill(&mut nonce).expect("randomness");
+    let recipient = kernable_core::signing::key_id(to);
+    let sealed = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: key.bytes(),
+                aad: &key_aad(copy, &recipient, &key.id()),
+            },
+        )
+        .expect("sealing does not fail");
+    let mut out = public.to_bytes().to_vec();
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&sealed);
+    out
+}
+
+/// Opened with the recipient's own key; the copy key, whose ID must be `key_id`.
+pub(crate) fn open_key(
+    own: &ed25519_dalek::SigningKey,
+    copy: &str,
+    key_id: &str,
+    sealed: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, BoxError> {
+    use curve25519_dalek::montgomery::MontgomeryPoint;
+    if sealed.len() < 32 + NONCE {
+        return Err("the sealed copy key is cut off".into());
+    }
+    let public = MontgomeryPoint(sealed[..32].try_into().expect("32 bytes"));
+    let ours = own.verifying_key().to_montgomery();
+    let shared = public.mul_clamped(own.to_scalar_bytes());
+    let cipher = key_cipher(copy, &public, &ours, &shared);
+    let recipient = kernable_core::signing::key_id(&own.verifying_key());
+    let plain = Zeroizing::new(
+        cipher
+            .decrypt(
+                XNonce::from_slice(&sealed[32..32 + NONCE]),
+                Payload {
+                    msg: &sealed[32 + NONCE..],
+                    aad: &key_aad(copy, &recipient, key_id),
+                },
+            )
+            .map_err(|_| "the copy key is not sealed to this key, or for another copy or key")?,
+    );
+    let mut key = Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(plain.get(..32).ok_or("the copy key is too short")?);
+    if CopyKey::new(&key).id() != key_id {
+        return Err("the copy key is not the one it says it is".into());
+    }
+    Ok(key)
+}
+
+fn key_aad(copy: &str, recipient: &str, key_id: &str) -> Vec<u8> {
+    format!("{copy}\n{recipient}\n{key_id}").into_bytes()
+}
+
+fn key_cipher(
+    copy: &str,
+    ephemeral: &curve25519_dalek::montgomery::MontgomeryPoint,
+    to: &curve25519_dalek::montgomery::MontgomeryPoint,
+    shared: &curve25519_dalek::montgomery::MontgomeryPoint,
+) -> XChaCha20Poly1305 {
+    let mut h = Sha256::new();
+    h.update(b"kernable.v1.copy-key-for");
+    h.update(copy.as_bytes());
+    h.update(ephemeral.as_bytes());
+    h.update(to.as_bytes());
+    h.update(shared.as_bytes());
+    let key = Zeroizing::new(<[u8; 32]>::from(h.finalize()));
+    XChaCha20Poly1305::new((&*key).into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +422,22 @@ mod tests {
             head: 3,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_copy_key_sealed_to_an_instance_opens_with_its_key_only() {
+        let reader = kernable_core::signing::generate_key();
+        let other = kernable_core::signing::generate_key();
+        let key = CopyKey::new(&[9; 32]);
+        let sealed = seal_key_for(&reader.verifying_key(), "shop", &key);
+        assert_eq!(
+            *open_key(&reader, "shop", &key.id(), &sealed).unwrap(),
+            [9; 32]
+        );
+        assert!(open_key(&other, "shop", &key.id(), &sealed).is_err());
+        assert!(open_key(&reader, "other", &key.id(), &sealed).is_err());
+        let wrong = CopyKey::new(&[8; 32]).id();
+        assert!(open_key(&reader, "shop", &wrong, &sealed).is_err());
     }
 
     #[test]

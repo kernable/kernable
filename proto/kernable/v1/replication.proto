@@ -67,6 +67,35 @@ service RelayService {
   // answered with the writer's answer, sealed. The relay passes it to the copy's pusher, which
   // makes the call on the writer; UNAVAILABLE while no pusher is connected.
   rpc Call(SealedCall) returns (SealedReply);
+  // A new instance of a copy asks for the copy key (design/instance-keys.md). The relay lets
+  // only a key it lets read the copy ask, and passes the ask to the copy's pusher. The pusher
+  // seals the key to the asking key if its grant, signed by a root the pusher trusts, allows
+  // `copy` for this copy, and neither the key nor its grant's signer is revoked; it signs what it
+  // sends. The relay carries it and never sees the key.
+  rpc CopyKey(CopyKeyRequest) returns (CopyKeyReply);
+}
+
+// Signed by the asking key over kernable.v1.copy-key, valid 60 s around issued_at.
+message CopyKeyRequest {
+  string copy = 1;
+  string key_id = 2;
+  int64 issued_at = 3;
+  Signature sig = 4;
+  // The asking key's grant.
+  Grant grant = 5;
+  // Random, the asker's: matches the answer to the ask.
+  uint64 id = 6;
+}
+
+// The copy key sealed to the asking key (X25519 from its Ed25519 key, XChaCha20-Poly1305, bound
+// to the copy, the asking key and the copy key's ID), signed by the pusher's key over
+// kernable.v1.copy-key-handover; or why not.
+message CopyKeyReply {
+  uint64 id = 1;
+  bytes sealed = 2;
+  string refused = 3;
+  string copy_key_id = 4;
+  Signature sender_sig = 5;
 }
 
 // A write a reader sends through a relay: a ForwardedCall sealed with the copy key, bound to
@@ -91,6 +120,7 @@ message CallsRequest {
     PushHello hello = 1;
     ChallengeResponse challenge_response = 2;
     SealedReply reply = 3;
+    CopyKeyReply key_reply = 4;
   }
 }
 
@@ -98,6 +128,7 @@ message CallsResponse {
   oneof msg {
     Challenge challenge = 1;
     SealedCall call = 2;
+    CopyKeyRequest key_request = 3;
   }
 }
 

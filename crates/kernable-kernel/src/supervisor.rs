@@ -29,6 +29,7 @@
 //! to = "relay.example.net:7400"
 //! copy = "shop"                              # pushed with the kernel's instance-key
 //! copy-key = "copy.key"
+//! copy-key-handover = false                  # optional: else new instances granted copy=<copy> get it
 //! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
 //! start-anew = 1234                          # only after a refusal: the copy's position it named
 //! ```
@@ -380,6 +381,10 @@ struct PushSection {
     to: String,
     copy: String,
     copy_key: String,
+    /// `false`: the pusher hands the copy key to nobody, it reaches instances by hand only.
+    /// Otherwise it hands it to a new instance whose grant from the kernel's root allows
+    /// `copy=<copy>` (design/instance-keys.md).
+    copy_key_handover: Option<bool>,
     follow: Option<String>,
     /// `--start-anew`: the copy's position, as the pusher's refusal named it, when the writer's
     /// log no longer continues the copy and it may begin anew (nothing else empties it).
@@ -420,6 +425,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
                 to,
                 copy,
                 copy_key: "copy.key".into(),
+                copy_key_handover: None,
                 follow: None,
                 start_anew: None,
                 cpus: None,
@@ -584,6 +590,8 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
     let mut listen = "127.0.0.1:7233".to_owned();
     // The kernel's one key: its pusher pushes with it too.
     let mut instance_key = "instance.key".to_owned();
+    // The kernel's roots: its pusher hands the copy key out by their grants.
+    let mut roots = None;
     for (flag, value) in &k.flags {
         if flag.starts_with('-') {
             return Err(format!("[kernel] flags: write {flag} without its dashes").into());
@@ -610,6 +618,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         }
         if flag == "instance-key" {
             instance_key.clone_from(&value);
+        }
+        if flag == "root" {
+            roots = Some(value.clone());
         }
         if flag == "admin-socket" {
             return Err(
@@ -759,6 +770,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         ];
         if let Some(at) = p.start_anew {
             args.extend(["--start-anew".into(), at.to_string()]);
+        }
+        if let (Some(roots), true) = (&roots, p.copy_key_handover != Some(false)) {
+            args.extend(["--root".into(), roots.clone()]);
         }
         specs.push(kernable("push", args, p.env, &p.cpus, &p.memory));
     }
@@ -2578,9 +2592,17 @@ segment-seconds = 2
                 "--copy",
                 "shop",
                 "--copy-key",
-                "copy.key"
+                "copy.key",
+                "--root",
+                "root.pub"
             ]
         );
+        // Without the hand-over, no root: the copy key reaches instances by hand only.
+        let by_hand = format!("{text}copy-key-handover = false\n");
+        let told = plan(&by_hand, Path::new("/srv/shop"), Path::new("/bin/kernable"))
+            .unwrap()
+            .children;
+        assert!(!told[2].args.contains(&"--root".to_owned()));
         // The copy begins anew only with the position the pusher's refusal named.
         let anew = format!("{text}start-anew = 1234\n");
         let told = plan(&anew, Path::new("/srv/shop"), Path::new("/bin/kernable"))
@@ -2589,7 +2611,8 @@ segment-seconds = 2
         assert!(
             told[2]
                 .args
-                .ends_with(&["--start-anew".into(), "1234".into()])
+                .windows(2)
+                .any(|w| w == ["--start-anew", "1234"])
         );
         // A service may not take its name.
         let named = format!("{text}\n[[service]]\nname = \"push\"\nimage = \"x\"\n");

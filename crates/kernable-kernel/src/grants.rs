@@ -14,7 +14,7 @@ use kernable_core::{proto::Grant, signing};
 use crate::config;
 
 /// The actions a grant names; `*` stands for all of them.
-pub const ACTIONS: [&str; 20] = [
+pub const ACTIONS: [&str; 21] = [
     "submit",
     "run",
     "subscribe",
@@ -35,6 +35,7 @@ pub const ACTIONS: [&str; 20] = [
     "backup",
     "reserved_order",
     "process",
+    "copy",
 ];
 
 /// The action of a delegate: its types are the actions it may grant others. Not one of
@@ -93,6 +94,9 @@ pub struct Permissions {
     /// Business processes a key may register and remove (qualified process names,
     /// `shop.fulfilment`, or `shop.*`).
     pub process: Rules,
+    /// Copies at a relay whose copy key a key may be handed (`copy=<copy>`, the copy's name, or
+    /// `*`): the pusher seals it to the key (design/instance-keys.md).
+    pub copy: Rules,
     /// Old key ID -> new key ID: a listener registered with the old key may connect with the
     /// new one and keeps its position, order and middleware registration.
     pub successors: HashMap<String, String>,
@@ -166,6 +170,7 @@ impl Permissions {
             "backup" => &mut self.backup,
             "reserved_order" => &mut self.reserved_order,
             "process" => &mut self.process,
+            "copy" => &mut self.copy,
             _ => unreachable!("not an action: {action}"),
         }
     }

@@ -58,20 +58,36 @@ the remaining readers (the copy begins anew under it).
 
 ## 1. Keys
 
-The pusher needs a key the writer grants `read` (the writer runs with `--readers on`). Readers
-need keys granted `read`, as for any reader. The relay knows each of them by its key alone: it
-takes pushes and serves readers only for the keys it names (below), whatever a root granted them.
+The pusher pushes with the writer's own key, which the root grants `read` (the writer runs with
+`--readers on`). Readers need their keys granted `read`, as for any reader, and `copy=<copy>` to
+be handed the copy key (below). The relay knows each of them by its key alone: it takes pushes and
+serves readers only for the keys it names, whatever a root granted them.
 
 ```sh
-kernable keys new pusher && kernable grant root.key pusher.pub 'read=*'
-kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*'
+kernable grant root.key node-a.pub 'read=*'                          # the writer's key
+kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*' 'copy=shop'
 kernable relay key copy.key
 ```
 
-`copy.key` goes to the pusher and to every reader of the copy, never to the relay, and only by
-your own means (a secrets manager, configuration management, a file copy): nothing hands it out.
+`copy.key` seals everything that reaches the relay. The pusher holds it; the relay never does.
 Whoever holds it reads everything the writer tells a reader: keep it as carefully as a reader's
 key.
+
+### The copy key for a new instance
+
+A reader started with a `--reader-copy-key` file that does not exist yet asks the copy's pusher
+for the key, through the relay. The pusher, started with `--root`, hands it over if the reader's
+grant, signed by that root, allows `copy=<copy>` and neither the key nor its grant's signer is
+revoked: it seals the key to the reader's own key (X25519, bound to the copy, the reader's key and
+the copy key's ID) and signs what it sends with the writer's key. The reader takes it only signed
+by the writer's key, checks its ID, writes the file (mode 0600) and starts. The relay carries it
+and can open nothing: it holds no key that opens it, and it cannot make a grant. While no pusher
+is connected, or the grant does not allow it, the reader says why and asks again.
+
+So granting the reader is the whole decision; nothing is copied by hand. Whoever holds the root
+key can grant an instance of their own, so keep it offline. To keep a copy's key by hand only,
+start the pusher without `--root` (`copy-key-handover = false` on a [node](./node)) and put the
+file on every reader yourself.
 
 ## 2. The relay
 
@@ -127,8 +143,8 @@ they come, without the copy key and without a stop.
 ## 3. The pusher, beside the writer
 
 ```sh
-kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --instance-key instance.key \
-  --to https://relay.example.net:7400 --copy shop --copy-key copy.key
+kernable push --follow 10.0.0.1:7233,10.0.0.2:7233 --instance-key node-a.key \
+  --to https://relay.example.net:7400 --copy shop --copy-key copy.key --root root.pub
 ```
 
 `https://` reaches the relay over TLS, its certificate checked against the public CAs (and
@@ -138,7 +154,9 @@ is reached without. With a pair,
 name both kernels: it follows whichever is the writer. It pushes with the writer's own
 `--instance-key`, which needs a grant for `read` (`instance.grant` beside it, read again on every
 connection), and tries again after every failure. A [node](./node) runs it for you with a
-`[push]` section (`to`, `copy`, `copy-key`), with the kernel's instance key.
+`[push]` section (`to`, `copy`, `copy-key`), with the kernel's instance key and its roots
+(`--root`, for the [hand-over](#the-copy-key-for-a-new-instance); `copy-key-handover = false`
+leaves them out).
 
 ## Partitions at several sites
 
@@ -154,9 +172,10 @@ key, as `<copy>.key` in its `--partition-copy-keys` directory.
 kernable start --root root.pub \
   --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
   --instance-key reader-1.key \
-  --primary-kernel-key kernel-a.pub --primary-kernel-key kernel-b.pub --listen 10.1.0.5:7233
+  --primary-kernel-key node-a.pub --primary-kernel-key node-b.pub --listen 10.1.0.5:7233
 ```
 
+Without `copy.key` there, it asks for it first ([above](#the-copy-key-for-a-new-instance)).
 Everything else is as for [readers](./readers).
 
 ## 5. A writer from its copy
@@ -171,7 +190,7 @@ kernable keys new instance-c && kernable grant root.key instance-c.pub 'read=*'
 kernable approve root.key shop instance-c.pub           # where the root key is kept: shop.approval
 kernable start --root root.pub --readers on \
   --reader https://relay.example.net:7400 --reader-copy shop --reader-copy-key copy.key \
-  --instance-key instance-c.key --primary-kernel-key kernel-a.pub \
+  --instance-key instance-c.key --primary-kernel-key node-a.pub \
   --become-writer on --approval shop.approval --listen 10.2.0.5:7233
 ```
 

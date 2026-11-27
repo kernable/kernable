@@ -35,10 +35,11 @@ use std::{
 
 use kernable_core::{
     proto::{
-        CallsRequest, CallsResponse, Challenge, FollowMode, FollowRequest, FollowResponse,
-        FollowStart, PromoteRequest, PromoteResult, PushRequest, PushResponse, RecordBatch,
-        RecordPoint, SealedCall, SealedReply, SwitchoverRequest, SwitchoverResult, calls_request,
-        calls_response, follow_request, follow_response, push_request, push_response,
+        CallsRequest, CallsResponse, Challenge, CopyKeyReply, CopyKeyRequest, FollowMode,
+        FollowRequest, FollowResponse, FollowStart, PromoteRequest, PromoteResult, PushRequest,
+        PushResponse, RecordBatch, RecordPoint, SealedCall, SealedReply, SwitchoverRequest,
+        SwitchoverResult, calls_request, calls_response, follow_request, follow_response,
+        push_request, push_response,
         relay_service_server::{RelayService, RelayServiceServer},
         replication_service_server::{ReplicationService, ReplicationServiceServer},
     },
@@ -475,6 +476,8 @@ struct Copy {
     calls: Mutex<Option<mpsc::Sender<Result<CallsResponse, Status>>>>,
     /// Calls sent down it, waiting for their answers, by ID.
     pending: Mutex<HashMap<u64, oneshot::Sender<SealedReply>>>,
+    /// Asks for the copy key sent down it, waiting for their answers, by ID.
+    keys: Mutex<HashMap<u64, oneshot::Sender<CopyKeyReply>>>,
     /// Bytes sent to readers since the copy began (`served`).
     served: AtomicU64,
     /// Who is connected now, for `status.json`.
@@ -705,6 +708,7 @@ impl Relay {
             changed,
             calls: Mutex::default(),
             pending: Mutex::default(),
+            keys: Mutex::default(),
             who: Mutex::default(),
             followed: Mutex::default(),
             served: AtomicU64::new(
@@ -1012,18 +1016,97 @@ async fn calls(
     *copy.calls.lock().unwrap_or_else(PoisonError::into_inner) = Some(out.clone());
     tracing::info!(copy = %copy.name, key = %hello.key_id, "a pusher takes calls");
     while let Some(message) = inbound.message().await? {
-        if let Some(calls_request::Msg::Reply(reply)) = message.msg {
-            let waiting = copy
-                .pending
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&reply.id);
-            if let Some(waiting) = waiting {
-                let _ = waiting.send(reply);
+        match message.msg {
+            Some(calls_request::Msg::Reply(reply)) => {
+                let waiting = copy
+                    .pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&reply.id);
+                if let Some(waiting) = waiting {
+                    let _ = waiting.send(reply);
+                }
             }
+            Some(calls_request::Msg::KeyReply(reply)) => {
+                let waiting = copy
+                    .keys
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&reply.id);
+                if let Some(waiting) = waiting {
+                    let _ = waiting.send(reply);
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
+}
+
+/// A new instance's ask for the copy key, from a key this relay lets read the copy, passed to
+/// the copy's pusher, which decides and seals; carried back as it came.
+async fn copy_key(relay: Arc<Relay>, ask: CopyKeyRequest) -> Result<CopyKeyReply, Status> {
+    let sig = ask
+        .sig
+        .as_ref()
+        .filter(|s| s.key_id == ask.key_id)
+        .ok_or_else(|| Status::unauthenticated("the ask is not signed by its key"))?;
+    let msg = signing::copy_key_message(&ask.copy, &ask.key_id, ask.id, ask.issued_at);
+    if signing::verify(sig, &msg).is_err() {
+        return Err(Status::unauthenticated("invalid signature"));
+    }
+    if (now_ms() - ask.issued_at).abs() > MAX_REQUEST_AGE_MS {
+        return Err(Status::unauthenticated("the ask expired; check the clock"));
+    }
+    relay.reader_may(&ask.key_id, &ask.copy)?;
+    let copy = relay.copy(&ask.copy, false)?;
+    let out = copy
+        .calls
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .filter(|o| !o.is_closed())
+        .ok_or_else(|| {
+            Status::unavailable(format!(
+                "no pusher of the copy {} is connected to this relay; try again",
+                copy.name
+            ))
+        })?;
+    let (tx, rx) = oneshot::channel();
+    copy.keys
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(ask.id, tx);
+    let id = ask.id;
+    let forget = || {
+        copy.keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+    };
+    if out
+        .send(Ok(CallsResponse {
+            msg: Some(calls_response::Msg::KeyRequest(ask)),
+        }))
+        .await
+        .is_err()
+    {
+        forget();
+        return Err(Status::unavailable("the copy's pusher left; try again"));
+    }
+    match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(reply)) if reply.refused.is_empty() => Ok(reply),
+        Ok(Ok(reply)) => Err(Status::permission_denied(reply.refused)),
+        Ok(Err(_)) => Err(Status::unavailable(
+            "the copy's pusher left before it answered; try again",
+        )),
+        Err(_) => {
+            forget();
+            Err(Status::deadline_exceeded(
+                "the copy's pusher did not answer in time",
+            ))
+        }
+    }
 }
 
 /// A reader's write, passed to the copy's pusher; the writer's answer, as the pusher sent it.
@@ -1430,6 +1513,15 @@ impl RelayService for Api {
             .await
             .map(Response::new)
     }
+
+    async fn copy_key(
+        &self,
+        request: Request<CopyKeyRequest>,
+    ) -> Result<Response<CopyKeyReply>, Status> {
+        copy_key(Arc::clone(&self.0), request.into_inner())
+            .await
+            .map(Response::new)
+    }
 }
 
 #[tonic::async_trait]
@@ -1660,6 +1752,7 @@ mod tests {
                 changed,
                 calls: Mutex::default(),
                 pending: Mutex::default(),
+                keys: Mutex::default(),
                 served: AtomicU64::new(0),
                 who: Mutex::default(),
                 followed: Mutex::default(),

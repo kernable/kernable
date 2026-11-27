@@ -1009,6 +1009,7 @@ async fn partitions_ask_each_other_through_a_relay() {
         copy: "p2.copy".into(),
         copy_key: std::sync::Arc::new(CopyKey::new(&[44; 32])),
         start_anew: None,
+        trust: push::Trust::load(Vec::new(), None).unwrap(),
     };
     tokio::spawn(async move { push::run(pusher).await.unwrap() });
 

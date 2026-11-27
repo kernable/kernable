@@ -1,6 +1,6 @@
 # One key per instance, trust from the root, the copy key at join
 
-Status: decided 2026-11-27; steps 1 and 2 built the same day. Builds on [a writer from its copy](writer-from-copy.md),
+Status: decided 2026-11-27; steps 1 to 3 built the same day. Builds on [a writer from its copy](writer-from-copy.md),
 and replaces its "copy key by hand only" and its separate project key.
 
 Today a small setup (one writer, two readers) needs a dozen key files and many public files
@@ -61,25 +61,28 @@ someone with the root key signs its grant (`kernable grant`, uploaded with the C
 
 ## 4. The copy key, sealed to a granted instance
 
-A grant may carry `copy=<copy>`: the root lets this instance have the copy key. An instance
-holding the key (the pusher first, else a reader) seals it to such an instance through the relay:
+A grant may carry `copy=<copy>`: the root lets this instance have the copy key. A new instance
+whose `--reader-copy-key` file does not exist asks the copy's pusher for it through the relay
+(`RelayService.CopyKey`), with its grant:
 
-1. The relay tells a connected holder which keys of the copy wait for its key, with their grants
-   and their exchange keys (each signed by the instance's own key).
-2. The holder checks the grant against its root, `copy=<copy>` in it, and the exchange key's
-   signature. Then it seals the copy key to the exchange key (HPKE, RFC 9180: X25519,
-   HKDF-SHA256, ChaCha20-Poly1305), with the copy, the recipient, the key's fingerprint and the
-   grant's hash as associated data, and signs the envelope with its own key.
-3. The relay keeps the envelope, opaque to it, and hands it to the recipient when it connects.
-   The recipient checks the sender's signature (a key its root granted, or its writer), opens the
-   envelope, and checks the fingerprint against the records it can now unseal.
+1. The relay lets only a key it lets read the copy ask, and passes the ask down the pusher's
+   `Calls` stream.
+2. The pusher, started with the roots it trusts (`--root`; a node passes the kernel's), checks the
+   grant against them, `copy=<copy>` in it, and that neither the key nor its grant's signer is
+   revoked (it notes revocations as it pushes them). Then it seals the copy key to the asking key
+   (X25519 from its Ed25519 key, an ephemeral key pair, XChaCha20-Poly1305 keyed by the SHA-256 of
+   a label, both public halves and the shared secret, bound to the copy, the recipient and the copy
+   key's ID) and signs the sealed bytes with its own key, the writer's
+   (`kernable.v1.copy-key-handover`).
+3. The relay carries the answer. The instance takes it only signed by a writer key it trusts,
+   opens it, checks the key's ID, writes the file (mode 0600) and starts.
 
 Nothing in this lets the relay, or whoever runs it, read a copy: it never holds a key that opens
 the envelope, and it cannot make a grant. Whoever holds the root can, by joining an instance of
 their own: the root is the project's single anchor, and is kept offline accordingly.
 
-`[push] copy-key-handover = off` keeps a copy's key by hand only. A relay without a holder
-connected keeps the request until one comes.
+Without `--root` (`[push] copy-key-handover = false`) the pusher hands it to nobody. While no
+pusher is connected the instance says so and asks again; only the writer's pusher hands it over.
 
 ## 5. Rotating a copy key
 

@@ -18,10 +18,13 @@ kernable keys new writer && kernable grant root.key writer.pub 'read=*'
 kernable relay key copy.key
 ```
 
-`copy.key` seals everything that leaves the writer. It goes to the pusher and to every reader of
-the partition, **by your own means** (a secrets manager, configuration management, a file copy):
-kernable Cloud never sees it and never hands it out. Whoever holds it reads everything the writer
-tells a reader: keep it as carefully as a reader's key. One copy key per partition.
+`copy.key` seals everything that leaves the writer; one per partition, made once on the writer's
+machine. Readers do not need it copied to them: your writer's pusher hands it to each reader whose
+grant from your root key allows `copy=<copy>`, **sealed to that reader's own key** and signed by
+the writer's (section 5). kernable Cloud carries the sealed key and can never open it, and it
+cannot grant a key, so only whoever holds your root key decides who gets it. Whoever holds the
+copy key reads everything the writer tells a reader. You can keep it by hand instead
+(`copy-key-handover = false` under `[push]`, then put the file on every reader yourself).
 
 ## 2. The project's root key
 
@@ -85,17 +88,18 @@ copy = "acme.shop.eu"                # <team>.<project>.<partition>: `kernable c
 copy-key = "copy.key"
 ```
 
-The connection is TLS, the relay's certificate a public one: nothing to install. The pusher
+The node gives the pusher the kernel's `root`, so it hands the copy key to new readers granted
+`copy=<copy>`. The connection is TLS, the relay's certificate a public one: nothing to install. The pusher
 reconnects by itself after any failure. If the writer's history does not continue the copy (a
 writer restored from an older backup, say), the pusher pushes nothing and says so: the copy keeps
 its history. See [backups](/cloud/backups#if-your-writer-was-restored).
 
 ## 5. Readers at the copy
 
-A reader needs its one key, granted `read`, named for the partition, and the copy key:
+A reader needs its one key, granted `read` and `copy=<copy>`, and named for the partition:
 
 ```sh
-kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*'
+kernable keys new reader-1 && kernable grant root.key reader-1.pub 'read=*' 'copy=acme.shop.eu'
 kernable cloud projects key shop eu reader-1.pub read
 # eu: 5e0c… read active
 kernable start --root root.pub \
@@ -103,10 +107,11 @@ kernable start --root root.pub \
   --instance-key reader-1.key --primary-kernel-key writer.pub
 ```
 
-The keys: `--instance-key`, the reader's own, granted `read`, which also signs its checkpoints and
-seals its vault; `--reader-copy-key`, the partition's copy key, which you brought there;
-`--primary-kernel-key`, the writer's public key (name both of a pair), to check its signed
-checkpoints. Every flag: [readers](/how-to/readers#_3-start-a-reader).
+The keys: `--instance-key`, the reader's own, granted `read` and `copy`, which also signs its
+checkpoints and seals its vault; `--reader-copy-key`, where the partition's copy key goes: the
+first time, the reader asks the writer's pusher for it through the relay and writes it there
+(mode 0600) once it arrives sealed to its key and signed by the writer's; `--primary-kernel-key`,
+the writer's public key (name both of a pair), to check its signed checkpoints. Every flag: [readers](/how-to/readers#_3-start-a-reader).
 
 A reader refuses queries while it is further behind the writer than `--reader-max-lag-ms` (30 s
 by default), and reports itself not ready while the writer is away.
@@ -126,9 +131,10 @@ Or in the console, on each key under **Linked kernels**. A partition has one act
 time: a new writer's pusher is linked only once the current one is stopped or revoked, so two
 writers never push the same partition. A revoked key is never let in again; use a new key.
 
-A stopped or revoked reader still holds the copy key and what it read. If the copy key itself
-leaked, make a new one, give it to the pusher and the remaining readers, and start the copy anew
-under it.
+A stopped or revoked reader still holds the copy key and what it read. The pusher hands the key
+to nobody whose key the writer revoked. If the copy key itself leaked, make a new one, give it to
+the pusher, and start the copy anew under it; readers whose grant allows `copy` ask for the new
+one.
 
 ## 7. A writer from its copy
 

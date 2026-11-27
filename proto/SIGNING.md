@@ -48,6 +48,8 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 | Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
 | Root key | `kernable.v1.writer-approval` | `copy`, `kernel_key_id`, `issued_at: i64` (`kernable approve`: the kernel key may write the copy's partition; a writer taking the copy over carries it in its `TakeoverRecord`, see `storage.proto`) |
+| Instance key | `kernable.v1.copy-key` | `copy`, `key_id`, `id: u64`, `issued_at: i64` (a new instance asks a relay's copy's pusher for the copy key) |
+| Instance key (pusher) | `kernable.v1.copy-key-handover` | `copy`, `recipient`, `copy_key_id`, `sha256(sealed)` (the copy key sealed to the recipient) |
 | Root key | `kernable.v1.grant` | `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type |
 | Operator tooling | `kernable.v1.retry` | `listener`, `positions_count: u64` and every `position: u64`, `dismiss: u64` (1 or 0), `issued_at: i64` |
 | Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |

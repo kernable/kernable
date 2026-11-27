@@ -36,6 +36,7 @@ env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 to = "https://relay.example.net:7400"
 copy = "shop"                              # pushed with the kernel's instance-key
 copy-key = "copy.key"
+copy-key-handover = false                  # optional: else it hands the key to readers granted copy=shop
 # start-anew = 1234                        # only when the pusher refused: the copy's position it named
 follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's listen
 
