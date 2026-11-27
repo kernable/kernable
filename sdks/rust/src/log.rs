@@ -52,6 +52,9 @@ pub(crate) struct Log {
     pub(crate) color: bool,
     /// `<url> · key <name> (<key id>…)`.
     pub(crate) peer: Arc<str>,
+    /// Every address of the kernel is on this machine (a Unix socket, loopback): reconnecting
+    /// costs nothing there, so it waits at most [`LOCAL_RETRY`].
+    pub(crate) local: bool,
 }
 
 impl Log {
@@ -65,6 +68,7 @@ impl Log {
             color: std::io::stderr().is_terminal()
                 && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
             peer: peer(url, &key_name, key_id).into(),
+            local: local(url),
         }
     }
 
@@ -256,6 +260,30 @@ pub(crate) fn backoff(base: Duration, attempt: u32) -> Duration {
 /// The longest wait before trying a kernel of a pair again that was not the primary.
 pub(crate) const PAIR_RETRY: Duration = Duration::from_secs(1);
 
+/// The longest wait before trying a kernel on this machine again: a restart (a deploy) is over
+/// within seconds, and the processes using it should be back with it, not up to 30 s later.
+pub(crate) const LOCAL_RETRY: Duration = Duration::from_secs(2);
+
+/// Whether every address in `url` (comma-separated for a pair) is on this machine: `unix:`, or
+/// a loopback host (127.0.0.0/8, `localhost`, `::1`).
+pub(crate) fn local(url: &str) -> bool {
+    url.split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .all(|a| {
+            if a.starts_with("unix:") {
+                return true;
+            }
+            let rest = a.split_once("://").map_or(a, |(_, r)| r);
+            let host = if let Some(v6) = rest.strip_prefix('[') {
+                v6.split(']').next().unwrap_or_default()
+            } else {
+                rest.split([':', '/']).next().unwrap_or_default()
+            };
+            host == "localhost" || host == "::1" || host.starts_with("127.")
+        })
+}
+
 /// Whether `reason` says the kernel is one of a pair that is not the primary right now.
 pub(crate) fn switching_roles(reason: &str) -> bool {
     reason.starts_with("not_primary")
@@ -279,6 +307,8 @@ pub(crate) fn reconnecting(
     // hands its role over) may be the primary in a moment: try again soon, not after up to 30 s.
     let delay = if switching_roles(&reason) {
         backoff(base, attempt).min(PAIR_RETRY)
+    } else if log.local {
+        backoff(base, attempt).min(LOCAL_RETRY)
     } else {
         backoff(base, attempt)
     };
@@ -437,6 +467,28 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_kernel_on_this_machine_is_retried_within_two_seconds() {
+        for url in [
+            "unix:/srv/account/run/kernel.sock",
+            "http://127.0.0.1:7233",
+            "127.0.0.1:7233",
+            "http://localhost:7233",
+            "http://[::1]:7233",
+            "http://127.0.0.1:7233,http://127.0.0.1:7235",
+        ] {
+            assert!(local(url), "{url}");
+        }
+        for url in [
+            "https://kernel.example.com:7233",
+            "http://10.0.0.5:7233",
+            "http://127.0.0.1:7233,https://b.example:7233",
+            "http://localhost.example.com:7233",
+        ] {
+            assert!(!local(url), "{url}");
+        }
     }
 
     #[test]
@@ -646,7 +698,17 @@ mod tests {
 
     #[test]
     fn reconnects_back_off_to_30_seconds_and_refusals_are_errors() {
-        let log = Log::new("unix:/k.sock", std::path::Path::new("app.key"), "ab");
+        // A kernel on this machine: at most two seconds.
+        let near = Log::new("unix:/k.sock", std::path::Path::new("app.key"), "ab");
+        for attempt in [4, 12, 40] {
+            let delay = reconnecting(&near, "worker", None, Duration::from_millis(100), attempt);
+            assert!(delay <= LOCAL_RETRY, "attempt {attempt}: {delay:?}");
+        }
+        let log = Log::new(
+            "https://kernel.example.com:7233",
+            std::path::Path::new("app.key"),
+            "ab",
+        );
         let base = Duration::from_millis(100);
         for (attempt, expected) in [
             (1, 100),
@@ -693,6 +755,7 @@ mod pair_retry_tests {
         assert!(!switching_roles("the key may not run orders.Order"));
         for attempt in 1..20 {
             assert!(backoff(Duration::from_millis(500), attempt).min(PAIR_RETRY) <= PAIR_RETRY);
+            assert!(backoff(Duration::from_millis(500), attempt).min(LOCAL_RETRY) <= LOCAL_RETRY);
         }
     }
 }

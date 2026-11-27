@@ -27,6 +27,39 @@ const (
 // pairRetry is the longest wait before trying a kernel of a pair again that was not the primary.
 const pairRetry = time.Second
 
+// localRetry is the longest wait before trying a kernel on this machine again: a restart is over
+// in seconds.
+const localRetry = 2 * time.Second
+
+// isLocal reports whether every address in url (comma-separated for a pair) is on this machine:
+// unix:, or a loopback host (127.0.0.0/8, localhost, ::1).
+func isLocal(url string) bool {
+	for _, a := range strings.Split(url, ",") {
+		a = strings.TrimSpace(a)
+		if a == "" || strings.HasPrefix(a, "unix:") {
+			continue
+		}
+		rest := a
+		if i := strings.Index(a, "://"); i >= 0 {
+			rest = a[i+3:]
+		}
+		var host string
+		if strings.HasPrefix(rest, "[") {
+			host, _, _ = strings.Cut(rest[1:], "]")
+		} else {
+			parts := strings.FieldsFunc(rest, func(r rune) bool { return r == ':' || r == '/' })
+			if len(parts) == 0 {
+				return false
+			}
+			host = parts[0]
+		}
+		if host != "localhost" && host != "::1" && !strings.HasPrefix(host, "127.") {
+			return false
+		}
+	}
+	return true
+}
+
 // logger prints connection and activity lines of workers, listeners and subscriptions on stderr,
 // up to the level of KERNABLE_LOG (off, error, warn, info (default) or debug):
 // `12:04:11  listener carts  <line>`.
@@ -35,11 +68,13 @@ type logger struct {
 	color bool
 	// `<url> · key <name> (<key id>…)`: the kernel and the key this process connects with.
 	peer string
-	mu   sync.Mutex
+	// local: every address of the kernel is on this machine; reconnecting waits at most localRetry.
+	local bool
+	mu    sync.Mutex
 }
 
 func newLogger(url, keyPath string, key *Key) *logger {
-	l := &logger{level: levelInfo}
+	l := &logger{level: levelInfo, local: isLocal(url)}
 	switch strings.ToLower(os.Getenv("KERNABLE_LOG")) {
 	case "off":
 		l.level = levelOff
@@ -119,6 +154,8 @@ func (l *logger) reconnect(ctx context.Context, what string, err error, base tim
 	delay := backoff(base, attempt)
 	if switchingRoles(reason) {
 		delay = min(delay, pairRetry)
+	} else if l.local {
+		delay = min(delay, localRetry)
 	}
 	if refusals[code] {
 		l.print(levelError, what, fmt.Sprintf("refused (%s), reconnecting in %g s", reason, delay.Seconds()))

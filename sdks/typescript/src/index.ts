@@ -1917,11 +1917,14 @@ class Log {
   private readonly color = Boolean(process.stderr.isTTY) && !process.env.NO_COLOR;
   /** `<url> · key <name> (<key id>…)`: the kernel and the key this process connects with. */
   readonly peer: string;
+  /** Every address of the kernel is on this machine: reconnecting waits at most `LOCAL_RETRY_MS`. */
+  readonly local: boolean;
 
   constructor(url: string, keyPath: string, key: Key) {
     const level = process.env.KERNABLE_LOG?.toLowerCase() ?? "";
     this.level = level in LEVELS ? LEVELS[level as keyof typeof LEVELS] : LEVELS.info;
     this.peer = `${url} · key ${basename(keyPath).replace(/\.key$/, "")} (${key.id.slice(0, 12)}…)`;
+    this.local = isLocal(url);
   }
 
   enabled(level: Level): boolean {
@@ -1953,7 +1956,11 @@ class Log {
     const e = err as Error & { details?: string; code?: number };
     const reason = e.details || e.message;
     // A kernel of a pair that is not the primary right now may be in a moment.
-    const delay = switchingRoles(reason) ? Math.min(backoff(ms, attempt), PAIR_RETRY_MS) : backoff(ms, attempt);
+    const delay = switchingRoles(reason)
+      ? Math.min(backoff(ms, attempt), PAIR_RETRY_MS)
+      : this.local
+        ? Math.min(backoff(ms, attempt), LOCAL_RETRY_MS)
+        : backoff(ms, attempt);
     const refused = e.code !== undefined && REFUSALS.has(e.code);
     this.print(refused ? "error" : "warn", what, `${refused ? "refused" : "connection lost"} (${reason}), reconnecting in ${delay / 1000} s`);
     await stopped.sleep(delay);
@@ -1969,6 +1976,26 @@ class Log {
 
 /** The longest wait before trying a kernel of a pair again that was not the primary. */
 const PAIR_RETRY_MS = 1000;
+
+/** The longest wait before trying a kernel on this machine again: a restart is over in seconds. */
+const LOCAL_RETRY_MS = 2000;
+
+/**
+ * Whether every address in `url` (comma-separated for a pair) is on this machine: `unix:`, or a
+ * loopback host (127.0.0.0/8, `localhost`, `::1`).
+ */
+export function isLocal(url: string): boolean {
+  return url
+    .split(",")
+    .map((a) => a.trim())
+    .filter(Boolean)
+    .every((a) => {
+      if (a.startsWith("unix:")) return true;
+      const rest = a.includes("://") ? a.slice(a.indexOf("://") + 3) : a;
+      const host = rest.startsWith("[") ? rest.slice(1).split("]")[0] : rest.split(/[:/]/)[0];
+      return host === "localhost" || host === "::1" || host.startsWith("127.");
+    });
+}
 
 /** Whether `reason` says the kernel is one of a pair that is not the primary right now. */
 function switchingRoles(reason: string): boolean {

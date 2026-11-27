@@ -2518,6 +2518,8 @@ class _Log:
         self.level = _LOG_LEVELS.get(os.environ.get("KERNABLE_LOG", ""), _LOG_LEVELS["info"])
         #: `<url> · key <name> (<key id>…)`: the kernel and the key this process connects with.
         self.peer = f"{url} · key {os.path.basename(key_path).removesuffix('.key')} ({key_id[:12]}…)"
+        #: Every address of the kernel is on this machine: reconnecting waits at most _LOCAL_RETRY_S.
+        self.local = _is_local(url)
 
     def enabled(self, level: str) -> bool:
         return _LOG_LEVELS[level] <= self.level
@@ -2547,6 +2549,8 @@ class _Log:
         # A kernel of a pair that is not the primary right now may be in a moment.
         if _switching_roles(reason):
             delay = min(delay, _PAIR_RETRY_S)
+        elif self.local:
+            delay = min(delay, _LOCAL_RETRY_S)
         self.print("error" if refused else "warn", what,
                    f"{'refused' if refused else 'connection lost'} ({reason}), reconnecting in {delay:.2f} s")
         stopped.wait(delay)
@@ -2562,6 +2566,21 @@ class _Log:
 
 _PAIR_RETRY_S = 1.0
 """The longest wait before trying a kernel of a pair again that was not the primary."""
+
+_LOCAL_RETRY_S = 2.0
+"""The longest wait before trying a kernel on this machine again: a restart is over in seconds."""
+
+
+def _is_local(url: str) -> bool:
+    """Whether every address in `url` (comma-separated for a pair) is on this machine: `unix:`,
+    or a loopback host (127.0.0.0/8, `localhost`, `::1`)."""
+    def one(a: str) -> bool:
+        if a.startswith("unix:"):
+            return True
+        rest = a.split("://", 1)[1] if "://" in a else a
+        host = rest[1:].split("]", 1)[0] if rest.startswith("[") else rest.replace("/", ":").split(":", 1)[0]
+        return host in ("localhost", "::1") or host.startswith("127.")
+    return all(one(a.strip()) for a in url.split(",") if a.strip())
 
 
 def _switching_roles(reason: str) -> bool:
