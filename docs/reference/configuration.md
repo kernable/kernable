@@ -20,7 +20,7 @@ Which keys the kernel trusts, and its own key: one per kernel, from which its va
 
 | Flag | Variable | Default | Description |
 |---|---|---|---|
-| `--root` | `KERNABLE_ROOT` | **required** | A root key the kernel trusts: its key ID (hex) or the path of its `.pub` file. Only a root key can sign grants and revocations. Repeat the flag for several roots, for example while you replace one; the variable takes them comma-separated. At least one is required; `--dev` uses `root.pub` if none is given. |
+| `--root` | `KERNABLE_ROOT` | **required** | A root key the kernel trusts: its key ID (hex) or the path of its `.pub` file. Only a root key can sign grants and revocations. Several roots, for example while you replace one: repeat the flag or name them comma-separated, as the variable takes them. At least one is required; `--dev` uses `root.pub` if none is given. |
 | `--instance-key` | `KERNABLE_INSTANCE_KEY` | `instance.key` | This kernel's one key, written by `kernable keys new instance`; the file must exist. Its ID (the `.pub` beside it) names the kernel everywhere: it signs checkpoints and stored revocations, follows a primary or a writer (its grant, `<name>.grant` next to it, allows `replicate` for a standby, a kernel of a pair or a partition, `read` for a reader), and pushes and reads at a relay. The vault's key is derived from it, so the vault belongs to this key: `kernable vault rekey` moves a vault to another one. |
 
 ## Stores

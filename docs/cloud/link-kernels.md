@@ -51,7 +51,7 @@ the replacement, or for 7 days at most; then only the new one counts:
 ```sh
 kernable cloud projects root shop set new-root.pub
 #   the old root 81c2d4e5f6a7… stays valid until 2026-12-01 10:31 UTC, or until: kernable cloud projects root shop finish
-kernable grant new-root.key pusher.pub 'read=*'     # and every other key, anew
+kernable grant new-root.key instance.pub 'read=*'   # and every other key, anew
 kernable cloud projects root shop finish
 ```
 

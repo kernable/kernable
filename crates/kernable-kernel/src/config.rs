@@ -9,7 +9,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--root",
         "KERNABLE_ROOT",
         "",
-        "A root key the kernel trusts: its key ID (hex) or the path of its `.pub` file. Only a root key can sign grants and revocations. Repeat the flag for several roots, for example while you replace one; the variable takes them comma-separated. At least one is required; `--dev` uses `root.pub` if none is given.",
+        "A root key the kernel trusts: its key ID (hex) or the path of its `.pub` file. Only a root key can sign grants and revocations. Several roots, for example while you replace one: repeat the flag or name them comma-separated, as the variable takes them. At least one is required; `--dev` uses `root.pub` if none is given.",
     ),
     (
         "--store",
@@ -644,17 +644,17 @@ impl Config {
                 n => Ok(n),
             }
         };
-        let roots = match given.get("--root") {
+        // Each --root, like KERNABLE_ROOT, may name several, comma-separated (a joined node's
+        // pinned roots, a hosted kernel's during a replacement).
+        let roots: Vec<String> = match given.get("--root") {
             Some(roots) => roots.clone(),
-            None => env("KERNABLE_ROOT")
-                .map(|r| {
-                    r.split(',')
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
+            None => env("KERNABLE_ROOT").into_iter().collect(),
+        }
+        .iter()
+        .flat_map(|r| r.split(','))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
         if roots.is_empty() {
             return Err(
                 "no root key: pass --root <key ID or .pub file> (or set KERNABLE_ROOT)".into(),
@@ -1443,6 +1443,20 @@ mod tests {
         let config =
             Config::from_args(&["--root", &root, "--snapshots", "memory:"], |_| None).unwrap();
         assert_eq!(config.snapshots, "memory:");
+    }
+
+    #[test]
+    fn a_root_flag_names_several_roots_comma_separated_as_the_variable_does() {
+        let id = || {
+            kernable_core::signing::key_id(&kernable_core::signing::generate_key().verifying_key())
+        };
+        let (a, b, c) = (id(), id(), id());
+        let both = format!("{a}, {b}");
+        let config = Config::from_args(&["--root", &both, "--root", &c], |_| None).unwrap();
+        assert_eq!(config.roots, [a.clone(), b.clone(), c]);
+        let config =
+            Config::from_args(&[], |v| (v == "KERNABLE_ROOT").then(|| both.clone())).unwrap();
+        assert_eq!(config.roots, [a, b]);
     }
 
     #[test]

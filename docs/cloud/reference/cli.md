@@ -57,7 +57,7 @@ In CI, set `KERNABLE_CLOUD_TOKEN` to a team's [token](/cloud/teams#tokens-for-ci
 | `kernable cloud projects root <name>` | (Next release.) The project's root key, and the old one during a replacement. |
 | `kernable cloud projects root <name> set <root.pub\|ID> [--now]` | Sets the root key; a later one [replaces it](/cloud/link-kernels#replacing-it), keeping the old one valid until `finish` (7 days at most), or `--now` ends it at once. Admins and owners. |
 | `kernable cloud projects root <name> finish` | Finishes a replacement: the old root no longer counts. Admins and owners. |
-| `kernable cloud projects link <name> <partition> --pusher <pusher.pub\|ID>` | Links a partition: that pusher may push its copy. A linked partition takes another pusher only once its current one is stopped or revoked. Developers and up. |
+| `kernable cloud projects link <name> <partition> --pusher <instance.pub\|ID>` | Links a partition: that pusher may push its copy. A linked partition takes another pusher only once its current one is stopped or revoked. Developers and up. |
 | `kernable cloud projects key <name> <partition> <key.pub\|ID> read\|push\|stop\|revoke\|activate` | `read`, `push`: adds the key in that role, active; `stop`: refused until `activate`; `revoke`: refused for good. The relay applies it within seconds. Developers and up. |
 | `kernable cloud projects unlink <name> <partition>` | Ends the link at once; the copy is kept 30 days. Admins and owners. |
 | `kernable cloud projects alerts <name> [set <email>...]` | Where the project's [alerts](/cloud/monitoring#alerts) go besides the team's owners and admins (at most 10); `set` without addresses leaves only them. Admins and owners. |
