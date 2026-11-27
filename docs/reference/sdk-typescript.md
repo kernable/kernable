@@ -720,6 +720,13 @@ await kernable.reindex({ domain: "crm", aggregateType: "Customer", aggregateIds:
 - `context?: RequestContext`: Replaces the client's default context (`Options.context`).
 - `timeoutMs?: number`: How long to wait for each outcome; default `Options.timeoutMs`.
 
+### isLocal()
+
+`export function isLocal(url: string): boolean`
+
+Whether every address in `url` (comma-separated for a pair) is on this machine: `unix:`, or a
+loopback host (127.0.0.0/8, `localhost`, `::1`).
+
 ### Kernable
 
 A client of one kernel: it submits commands, asks queries, and runs workers and listeners
