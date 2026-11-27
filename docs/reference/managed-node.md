@@ -44,7 +44,8 @@ Every later request carries three headers, from the node's key:
 |---|---|
 | `x-kernable-key` | the public key, hex |
 | `x-kernable-time` | Unix seconds; within 120 s of the control point's clock |
-| `x-kernable-signature` | Ed25519 over `kernable-state-request\n<METHOD>\n<path>\n<time>\n<hex SHA-256 of the body>`, hex |
+| `x-kernable-nonce` | 32 lowercase hex digits, random per request; the control point takes each key's nonce once, so a request sent again is refused |
+| `x-kernable-signature` | Ed25519 over `kernable-state-request\n<METHOD>\n<path>\n<time>\n<nonce>\n<hex SHA-256 of the body>`, hex |
 
 ## Settings
 

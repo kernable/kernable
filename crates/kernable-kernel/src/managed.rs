@@ -98,13 +98,22 @@ fn settings_message(json: &str) -> Vec<u8> {
     m
 }
 
-/// What a request's signature covers: method, path, time (s) and the body's SHA-256.
-fn request_message(method: &str, path: &str, time: i64, body: &[u8]) -> Vec<u8> {
+/// What a request's signature covers: method, path, time (s), the nonce and the body's
+/// SHA-256.
+fn request_message(method: &str, path: &str, time: i64, nonce: &str, body: &[u8]) -> Vec<u8> {
     format!(
-        "kernable-state-request\n{method}\n{path}\n{time}\n{}",
+        "kernable-state-request\n{method}\n{path}\n{time}\n{nonce}\n{}",
         hex::encode(Sha256::digest(body))
     )
     .into_bytes()
+}
+
+/// A request's nonce: 16 random bytes in hex. The control point takes each once, so a request
+/// captured on the way cannot be sent again.
+fn new_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("OS randomness unavailable");
+    hex::encode(bytes)
 }
 
 fn now_s() -> i64 {
@@ -406,8 +415,9 @@ fn call(
     body: &[u8],
 ) -> Result<(u16, String), BoxError> {
     let time = now_s();
+    let nonce = new_nonce();
     let sig = hex::encode(
-        key.sign(&request_message(method, path, time, body))
+        key.sign(&request_message(method, path, time, &nonce, body))
             .to_bytes(),
     );
     let url = format!("{}{path}", link.url);
@@ -419,6 +429,7 @@ fn call(
             hex::encode(key.verifying_key().as_bytes()),
         )
         .header("x-kernable-time", time.to_string())
+        .header("x-kernable-nonce", &nonce)
         .header("x-kernable-signature", sig)
         .header("content-type", "application/json")
         .body(body.to_vec())?;
