@@ -257,7 +257,13 @@ pub fn account(domain: &Domain) -> Aggregate<Account> {
     a.apply(RegistrationAttempted, |s, d, _, _| {
         s.attempt_noted_at = d.at
     });
-    a.apply(SignedIn, |s, _, _, _| s.failures = Failures::default());
+    // A sign-in that still owes its second factor is not complete: its failures stay, so wrong
+    // codes after the right password add up to the lockout (SecondFactorProved clears them).
+    a.apply(SignedIn, |s, d, _, _| {
+        if !d.mfa {
+            s.failures = Failures::default();
+        }
+    });
     a.apply(SignInFailed, |s, d, _, _| {
         if d.reason == FailureReason::WrongPassword {
             s.failures = Failures {

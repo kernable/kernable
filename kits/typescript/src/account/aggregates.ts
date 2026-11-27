@@ -130,7 +130,11 @@ export const accountAggregate = accountDomain
   .apply(ProviderLinked, (s, d) => void s.links.push({ provider: d.provider, subject: d.subject }))
   .apply(ProviderUnlinked, (s, d) => void (s.links = s.links.filter((l) => !(l.provider === d.provider && l.subject === d.subject))))
   .apply(RegistrationAttempted, (s, d) => void (s.attemptNotedAt = d.at))
-  .apply(SignedIn, (s) => void (s.failures = { count: 0, lastAt: 0 }))
+  // A sign-in that still owes its second factor is not complete: its failures stay, so wrong codes
+  // after the right password add up to the lockout (SecondFactorProved clears them).
+  .apply(SignedIn, (s, d) => {
+    if (!d.mfa) s.failures = { count: 0, lastAt: 0 };
+  })
   .apply(SignInFailed, (s, d) => {
     if (d.reason === "wrong_password") s.failures = { count: s.failures.count + 1, lastAt: d.at };
   })

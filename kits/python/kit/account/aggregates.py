@@ -190,8 +190,11 @@ def _(s: Account, d: RegistrationAttempted):
 
 
 @Account.apply(SignedIn)
-def _(s: Account):
-    s.failures = {"count": 0, "last_at": 0}
+def _(s: Account, d: SignedIn):
+    # A sign-in that still owes its second factor is not complete: its failures stay, so wrong
+    # codes after the right password add up to the lockout (SecondFactorProved clears them).
+    if not d.mfa:
+        s.failures = {"count": 0, "last_at": 0}
 
 
 @Account.apply(SignInFailed)

@@ -1024,6 +1024,27 @@ async fn second_factor_and_api_keys(w: &World) {
         "wrong_code",
     );
 
+    // Wrong codes after the right password count toward the lockout too: signing in again with
+    // the password does not wipe them, or the code could be guessed without end.
+    let ivy = "ivy-lockout@example.com";
+    let (ivys, _) = w.person(ivy).await;
+    let (ivy_secret, _) = api.start_totp(&ivys, "Kit", ivy).await.unwrap();
+    let ivy_step = kernable::Timestamp::now().millis() / 30_000;
+    api.confirm_totp(&ivys, &totp_code(&ivy_secret, ivy_step))
+        .await
+        .unwrap();
+    for wrong in ["000001", "000002", "000003", "000004", "000005"] {
+        let s = api.sign_in(ivy, PASSWORD, None, None).await.unwrap();
+        let c = api.check(&s.access_token).unwrap();
+        refused(api.prove_second_factor(&c, wrong).await, "wrong_code");
+    }
+    // Locked now: even the right password answers like a wrong one, the right code is not
+    // reached.
+    refused(
+        api.sign_in(ivy, PASSWORD, None, None).await,
+        "wrong_password",
+    );
+
     // Henry, now an owner, gives a service an API key, and a group to act in.
     let as_henry = w.context(&claims, Some(&henrys)).await;
     let service = new_id();

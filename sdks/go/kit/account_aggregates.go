@@ -191,7 +191,13 @@ func accountAggregate(d *kernable.Domain) *kernable.Aggregate[Account] {
 		s.Links = slices.DeleteFunc(s.Links, func(x Link) bool { return x.Provider == e.Provider && eqPtr(x.Subject, e.Subject) })
 	})
 	kernable.Apply(a, "RegistrationAttempted", func(_ *ac, s *Account, e RegistrationAttempted) { s.AttemptNotedAt = e.At })
-	kernable.Apply(a, "SignedIn", func(_ *ac, s *Account, _ SignedIn) { s.Failures = Failures{} })
+	// A sign-in that still owes its second factor is not complete: its failures stay, so wrong
+	// codes after the right password add up to the lockout (SecondFactorProved clears them).
+	kernable.Apply(a, "SignedIn", func(_ *ac, s *Account, e SignedIn) {
+		if !e.Mfa {
+			s.Failures = Failures{}
+		}
+	})
 	kernable.Apply(a, "SignInFailed", func(_ *ac, s *Account, e SignInFailed) {
 		if e.Reason == FailWrongPassword {
 			s.Failures = Failures{Count: s.Failures.Count + 1, LastAt: e.At}
