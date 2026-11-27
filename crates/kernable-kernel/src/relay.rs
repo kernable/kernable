@@ -409,13 +409,41 @@ impl Log {
             msg: Some(push_request::Msg::Records(batch)),
         };
         within_limit(&self.dir, self.end + (HEADER + msg.encoded_len()) as u64)?;
-        let frame = append(&mut self.file, self.end, Kind::Records, first, last, &msg)
+        self.cut_to_end()?;
+        let frame = match append(&mut self.file, self.end, Kind::Records, first, last, &msg)
             .and_then(|f| self.file.sync_data().map(|()| f))
-            .map_err(|e| Status::internal(format!("writing the copy failed: {e}")))?;
+        {
+            Ok(frame) => frame,
+            Err(e) => {
+                // Written in part (a full disk, say): taken back at once, so the next frame
+                // follows the last whole one and readers never meet torn bytes.
+                let _ = self.cut_to_end();
+                return Err(Status::internal(format!("writing the copy failed: {e}")));
+            }
+        };
         self.end += (HEADER + frame.len as usize) as u64;
         self.frames.push(frame);
         self.head = head;
         Ok(last)
+    }
+
+    /// Cuts the file to where the last whole frame ends: bytes after it (a frame a failed write
+    /// left in part) would otherwise lie between the frames before and the ones appended next,
+    /// and every reader would stop there for good.
+    fn cut_to_end(&mut self) -> Result<(), Status> {
+        let len = self.file.metadata().map_err(internal)?.len();
+        if len != self.end {
+            self.file
+                .set_len(self.end)
+                .and_then(|()| self.file.sync_data())
+                .map_err(|e| {
+                    Status::internal(format!(
+                        "the copy's log has {} bytes after its last whole frame that cannot be cut: {e}",
+                        len.saturating_sub(self.end)
+                    ))
+                })?;
+        }
+        Ok(())
     }
 }
 
@@ -1780,6 +1808,30 @@ mod tests {
         assert_eq!(log.hash_at(4).unwrap(), Some(vec![4; 32]));
         assert_eq!(log.hash_at(0).unwrap(), Some(ZERO.to_vec()));
         assert_eq!(log.hash_at(6).unwrap(), None);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_frame_written_in_part_while_running_is_cut_before_the_next() {
+        let d = dir("torn-running");
+        {
+            let mut log = Log::open(&d).unwrap();
+            assert_eq!(log.add(batch(1, 3)).unwrap(), 3);
+            // A write that failed half way (the disk full), the relay still running.
+            let mut file = OpenOptions::new().append(true).open(d.join("log")).unwrap();
+            file.write_all(&[0, 0, 1, 0, 3, 9, 9, 9]).unwrap();
+            drop(file);
+            assert_eq!(log.add(batch(4, 5)).unwrap(), 5);
+        }
+        // Every frame whole: the log opens with all five records, nothing cut off.
+        let log = Log::open(&d).unwrap();
+        assert_eq!(log.head.seq, 5);
+        assert_eq!(log.hash_at(4).unwrap(), Some(vec![4; 32]));
+        assert_eq!(
+            std::fs::metadata(d.join("log")).unwrap().len(),
+            log.end,
+            "no bytes after the last whole frame"
+        );
         let _ = std::fs::remove_dir_all(d);
     }
 
