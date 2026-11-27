@@ -590,7 +590,17 @@ impl Drop for Pushing {
 struct Relay {
     config: RelayConfig,
     copies: Mutex<HashMap<String, Arc<Copy>>>,
+    /// Per copy, the keys it refused lately (proven by their signatures): key, when (ms), why.
+    /// In `status.json`, so whoever runs the relay sees a key it does not take knocking.
+    refused: Mutex<HashMap<String, Vec<Refusal>>>,
 }
+
+/// A key a copy refused: the key, when (ms), why.
+type Refusal = (String, i64, String);
+
+/// How many refusals per copy `status.json` names, and for how long.
+const REFUSED_KEPT: usize = 20;
+const REFUSED_FOR_MS: i64 = 3_600_000;
 
 pub(crate) fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -727,6 +737,38 @@ impl Relay {
     /// that may push a copy may read it too: one key per instance, so a reader that became the
     /// writer follows and pushes with the same key.
     fn may(&self, key: &str, copy: &str, role: KeyRole) -> Result<(), Status> {
+        let decided = self.may_now(key, copy, role);
+        if let Err(why) = &decided
+            && valid_name(copy)
+        {
+            let mut refused = self.refused.lock().unwrap_or_else(PoisonError::into_inner);
+            let seen = refused.entry(copy.to_owned()).or_default();
+            let now = now_ms();
+            seen.retain(|(k, at, _)| k != key && now - at < REFUSED_FOR_MS);
+            seen.push((key.to_owned(), now, why.message().to_owned()));
+            if seen.len() > REFUSED_KEPT {
+                seen.remove(0);
+            }
+        }
+        decided
+    }
+
+    /// The keys `copy` refused within the last hour, newest last, for `status.json`.
+    fn refused_of(&self, copy: &str) -> serde_json::Value {
+        let now = now_ms();
+        let refused = self.refused.lock().unwrap_or_else(PoisonError::into_inner);
+        serde_json::json!(
+            refused
+                .get(copy)
+                .into_iter()
+                .flatten()
+                .filter(|(_, at, _)| now - at < REFUSED_FOR_MS)
+                .map(|(key, at, why)| serde_json::json!({ "key": key, "at": at, "why": why }))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    fn may_now(&self, key: &str, copy: &str, role: KeyRole) -> Result<(), Status> {
         if !valid_name(copy) {
             return Err(invalid_name());
         }
@@ -1601,6 +1643,7 @@ pub async fn run(config: RelayConfig) -> Result<(), BoxError> {
     let relay = Arc::new(Relay {
         config,
         copies: Mutex::default(),
+        refused: Mutex::default(),
     });
     // What each copy served, for whoever operates the relay, every ten seconds.
     let counting = Arc::clone(&relay);
@@ -1621,7 +1664,9 @@ pub async fn run(config: RelayConfig) -> Result<(), BoxError> {
                 let written = std::fs::write(dir.join("served.new"), format!("{served}\n"))
                     .and_then(|()| std::fs::rename(dir.join("served.new"), dir.join("served")))
                     .and_then(|()| {
-                        std::fs::write(dir.join("status.json.new"), copy.status().to_string())
+                        let mut status = copy.status();
+                        status["refused"] = counting.refused_of(&copy.name);
+                        std::fs::write(dir.join("status.json.new"), status.to_string())
                     })
                     .and_then(|()| {
                         std::fs::rename(dir.join("status.json.new"), dir.join("status.json"))

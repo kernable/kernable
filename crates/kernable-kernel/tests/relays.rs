@@ -1178,6 +1178,10 @@ async fn a_relay_writes_who_is_connected_to_each_copy() {
     let reader = start_reader(&reader_config(&dir.0, "reader", 21, &relay, "shop")).await;
     let at = held(&writer);
     until_async("the reader holds it", async || held(&reader) >= at).await;
+    // A key the relay does not take knocks (its key 110: not among the readers it serves).
+    let stranger = reader_config(&dir.0, "stranger", 60, &relay, "shop");
+    let knocked = tokio::time::timeout(Duration::from_secs(2), standby::run(stranger)).await;
+    assert!(!matches!(knocked, Ok(Ok(()))), "{knocked:?}");
 
     let path = dir.0.join("copies/shop/status.json");
     let status = || -> serde_json::Value {
@@ -1196,6 +1200,10 @@ async fn a_relay_writes_who_is_connected_to_each_copy() {
                     r["key"] == id(&key(71)) && r["position"].as_u64() == s["head"].as_u64()
                 })
             })
+            // And the key it refused, with why.
+            && s["refused"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|r| r["key"] == id(&key(110))))
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(25);
     while !named() {
