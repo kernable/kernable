@@ -196,11 +196,13 @@ step_push() {
   echo "  pushed main and $TAG ($(git rev-parse --short HEAD))"
 }
 
-# The run of the release workflow for the tag (it starts a few seconds after the push).
+# The run of the release workflow for the tag (it starts a few seconds after the push). A
+# cancelled one is passed over: the run of a tag pushed again (same commit) comes after it.
 workflow_run() {
   local run=
   for _ in $(seq 30); do
-    run=$(gh run list -R "$REPO" --workflow release.yml --branch "$TAG" -L 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+    run=$(gh run list -R "$REPO" --workflow release.yml --branch "$TAG" -L 5 --json databaseId,conclusion \
+      -q '[.[] | select(.conclusion != "cancelled")][0].databaseId // empty' 2>/dev/null || true)
     [ -n "$run" ] && break
     sleep 10
   done
