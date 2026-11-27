@@ -119,7 +119,8 @@ by default), and reports itself not ready while the writer is away.
 ## 6. Stop or revoke a key
 
 Each key of a partition is **active**, **stopped** or **revoked**; the relay lets in only active
-ones, and ends the streams of the others within seconds:
+ones, and ends the streams of the others within seconds. Developers and up name keys and let them
+in again; admins and owners stop and revoke them:
 
 ```sh
 kernable cloud projects key shop eu reader-1.pub stop       # refused until: … activate
