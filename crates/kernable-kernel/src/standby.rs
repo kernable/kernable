@@ -1065,7 +1065,7 @@ async fn follow_once_with(
                 let roots = standby.config.roots.clone();
                 let applied_to = Arc::clone(&stores);
                 let seq = tokio::task::spawn_blocking(move || {
-                    let mut trust = Trust::of(applied_to.store.as_ref(), &keys, &roots)?;
+                    let mut trust = Trust::to_apply(applied_to.store.as_ref(), &keys, &roots)?;
                     apply(&applied_to, batch, &mut trust)
                 })
                 .await??;
@@ -1189,7 +1189,7 @@ async fn take_image(standby: &Arc<Standby>, inbound: &mut Inbound) -> Result<u64
                 keys.extend(crate::approved_writers(&standby.config));
                 let roots = standby.config.roots.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut trust = Trust::of(stores.store.as_ref(), &keys, &roots)?;
+                    let mut trust = Trust::to_apply(stores.store.as_ref(), &keys, &roots)?;
                     apply_image(&stores, batch, &mut trust)
                 })
                 .await??;
@@ -1376,6 +1376,25 @@ impl Trust {
             configured: configured.to_vec(),
             roots: roots.to_vec(),
         })
+    }
+
+    /// As [`Trust::of`], for applying what a writer sent: a follower that trusts no writer key
+    /// at all (none given, none approved yet) takes nothing, so nothing slips in before the
+    /// first checkpoint it could check.
+    pub(crate) fn to_apply(
+        store: &dyn Store,
+        configured: &[String],
+        roots: &[String],
+    ) -> Result<Trust, BoxError> {
+        let trust = Trust::of(store, configured, roots)?;
+        if trust.keys.is_empty() {
+            return Err(
+                "no writer key to trust yet: give --primary-kernel-key, or wait for the \
+                        root's approval of the writer in --approvals"
+                    .into(),
+            );
+        }
+        Ok(trust)
     }
 
     /// Exactly these keys, a takeover counting only for one of them (a backup's restore: it
