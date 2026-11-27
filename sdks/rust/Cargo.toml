@@ -22,8 +22,8 @@ name = "kernable"
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-kernable-core = { path = "../../crates/kernable-core", version = "=0.3.0" }
-kernable-sdk-macros = { path = "../rust-macros", version = "=0.3.0" }
+kernable-core = { path = "../../crates/kernable-core", version = "=0.4.0" }
+kernable-sdk-macros = { path = "../rust-macros", version = "=0.4.0" }
 prost.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

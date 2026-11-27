@@ -1,6 +1,6 @@
 {
   "name": "@kernable/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "kernable SDK for TypeScript: event-sourced business logic in TypeScript on the kernable kernel",
   "keywords": [
     "event-sourcing",
